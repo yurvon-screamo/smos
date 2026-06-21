@@ -1,0 +1,95 @@
+[package]
+name = "smos-adapters"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SMOS adapter layer — concrete implementations of port traits."
+
+[dependencies]
+# Workspace-shared.
+smos-domain.workspace = true
+smos-application.workspace = true
+tokio.workspace = true
+surrealdb.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+futures.workspace = true
+bytes.workspace = true
+uuid.workspace = true
+sha1.workspace = true
+
+# HTTP server + upstream proxy. Declared directly here because they are only
+# consumed by this crate (the single place IO happens).
+axum = { version = "0.8", features = ["json", "tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+config = { version = "0.14", default-features = false, features = ["toml"] }
+async-stream = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+# CLI argument parsing for the unified `smos` binary's subcommands.
+clap = { version = "4", features = ["derive"] }
+
+# SMOS Dreaming Agent — autonomous memory audit via an LLM with tool-calling.
+# rig-core is pinned to the 0.14 line and stripped of its default reqwest
+# features so it shares the workspace's rustls stack (no native-tls, no
+# duplicate OpenSSL on Linux). The `derive` feature pulls in `rig-derive`
+# which is convenient for any future ToolEmbedding impls.
+rig-core = { version = "0.14", default-features = false, features = [
+    "derive",
+    "reqwest-rustls",
+] }
+# tokio-cron-scheduler backs the periodic `dreaming` audit trigger declared in
+# `[audit].schedule`. Pinned to the 0.14 line (latest stable as of writing).
+tokio-cron-scheduler = "0.14"
+
+# Native NLI backend (ort + tokenizers + hf-hub). Native NLI is the only
+# available backend (the legacy Python implementation was removed). The
+# version pin on `ort` is exact (=2.0.0-rc.12) because the API is still
+# pre-stable and a patch release could silently change EP wiring.
+#
+# `tls-rustls` is selected (not the default `tls-native`) so the ort binary
+# downloader shares the rustls stack already pulled in by `reqwest`.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+    "tls-rustls",
+] }
+tokenizers = { version = "0.23", default-features = false, features = [
+    "onig",
+] }
+hf-hub = { version = "0.4", default-features = false, features = [
+    "ureq",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# E2E tests spin up an in-process mock OpenAI upstream (no external LLM).
+wiremock = "0.6"
+
+[features]
+default = []
+
+# GPU execution-provider features (optional; default build is CPU-only).
+# Exactly one GPU feature should be enabled per build — combining more than one
+# is rarely useful and ort's prebuilt binary matrix cannot satisfy every
+# combination (e.g. `cuda` and `webgpu` cannot ship in the same prebuilt
+# build, so enabling both silently falls back to CPU-only).
+nli-cuda = ["ort/cuda"]
+nli-metal = ["ort/coreml"]
+nli-directml = ["ort/directml"]
+nli-webgpu = ["ort/webgpu"]
+
+[[bin]]
+name = "smos"
+path = "src/bin/smos.rs"

@@ -1,0 +1,23 @@
+[package]
+name = "smos-domain"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SMOS domain layer — entities, value objects, pure domain logic. NO IO dependencies."
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+sha1.workspace = true
+
+[dev-dependencies]
+# `serde_json` is intentionally a DEV-only dependency: production code in
+# `smos-domain` never parses or emits JSON. The crate exposes its own opaque
+# payload types (e.g. `chat::ToolArguments`) so adapters own the JSON
+# boundary. Tests still rely on `serde_json` for round-trip checks against
+# the canonical wire shape.
+serde_json.workspace = true

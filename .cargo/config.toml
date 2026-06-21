@@ -1,0 +1,27 @@
+# Cargo configuration for the SMOS workspace.
+#
+# Defines the test aliases (see README.md -> Testing). The default `cargo t`
+# runs every test that does NOT carry `#[ignore]` — embedded SurrealDB +
+# wiremock + in-process axum are all universal and need no external
+# services. `cargo tall` additionally pulls in the `#[ignore]` tests that
+# require a 643 MB DeBERTa download or a live Ollama server.
+#
+# The `--test-threads` cap keeps CPU usage bounded on laptops so `cargo test`
+# no longer saturates every core. Override per-invocation by passing
+# `-- --test-threads=N` (or setting `RUST_TEST_THREADS`) after the alias.
+
+[alias]
+# Default pre-commit check: every test except `#[ignore]`. Runs the full
+# embedded-SurrealDB e2e suite (~50 s warm).
+t = "test --workspace -- --test-threads=4"
+
+# Super-fast dev loop: only the pure domain + application crates. No
+# adapters, no IO, no async runtime startup cost.
+tf = "test -p smos-domain -p smos-application -- --test-threads=4"
+
+# Alias kept for backwards compatibility — same scope as `t`.
+ti = "test --workspace -- --test-threads=2"
+
+# Pre-release tier: includes every `#[ignore]` test (native NLI model
+# download + any test that requires a live Ollama on localhost:11434).
+tall = "test --workspace --include-ignored -- --test-threads=2"

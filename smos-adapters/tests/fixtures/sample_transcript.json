@@ -1,0 +1,68 @@
+{
+  "info": {
+    "id": "ses_test123abc456",
+    "title": "Test session",
+    "agent": "head-of-development",
+    "time": {
+      "created": "2026-06-18T10:00:00Z",
+      "updated": "2026-06-18T11:00:00Z"
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_1",
+        "role": "user",
+        "agent": "user"
+      },
+      "parts": [
+        {"type": "text", "text": "How does TTL work?"}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_2",
+        "role": "assistant",
+        "agent": "head-of-development",
+        "sessionID": "ses_test123abc456"
+      },
+      "parts": [
+        {"type": "reasoning", "text": "Analyzing TTL configuration..."},
+        {"type": "text", "text": "TTL=10 prevents the token refresh loop. The previous value was TTL=60 which caused rapid refresh attempts."},
+        {"type": "tool", "tool": "read_file", "state": {"input": {"path": "auth.rs"}, "output": "fn validate_token() { ... }"}}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_3",
+        "role": "assistant",
+        "agent": "head-of-development",
+        "sessionID": "ses_test123abc456"
+      },
+      "parts": [
+        {"type": "text", "text": "The fix was applied in auth.rs. The validate_token function now respects the new TTL."}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_4",
+        "role": "assistant",
+        "agent": "dreaming",
+        "sessionID": "ses_test123abc456"
+      },
+      "parts": [
+        {"type": "text", "text": "Internal analysis: this looks like a configuration drift issue."}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_5",
+        "role": "assistant",
+        "agent": "head-of-development"
+      },
+      "parts": [
+        {"type": "text", "text": "ok"}
+      ]
+    }
+  ]
+}

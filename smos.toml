@@ -1,0 +1,142 @@
+# SMOS proxy default configuration.
+# Copy/edit next to the binary (or pass via a custom path) and run:
+#   cargo run --bin smos -- serve
+# Any section omitted here falls back to the built-in defaults in
+# smos-adapters/src/config.rs.
+
+[surreal]
+path = "./data/smos.db"
+namespace = "smos"
+database = "smos"
+
+[server]
+host = "127.0.0.1"
+port = 8888
+shutdown_extraction_grace_seconds = 30
+enable_response_extraction = true
+graceful_degradation = true
+log_format = "json"
+
+# Upstream LLM providers for chat completions (forward user requests).
+# Multiple providers supported — `single` (first only), `round_robin`
+# (default, even distribution), or `failover` (try next on error).
+[[upstream.providers]]
+name = "ollama-local"
+url = "http://localhost:11434/v1/chat/completions"
+api_key = "ollama"
+auth_header = "Authorization"
+timeout_seconds = 120
+
+# Optional second provider (consulted under `mode = "failover"`).
+# [[upstream.providers]]
+# name = "openrouter"
+# url = "https://openrouter.ai/api/v1/chat/completions"
+# api_key = ""  # set SMOS__UPSTREAM__API_KEY to keep secrets out of TOML
+# auth_header = "Authorization"
+# timeout_seconds = 120
+
+[upstream.strategy]
+mode = "single"
+
+# LLM for fact extraction (Qwen3.5:2b or any Ollama-/OpenAI-compatible model).
+[llm_extraction]
+url = "http://localhost:11434"           # API base (the adapter appends /api/chat)
+model = "qwen3.5:2b"
+api_key = ""                              # optional, for cloud providers
+timeout_seconds = 30
+# Deterministic extraction: temperature=0 disables random sampling, seed pins
+# the RNG so two runs against the same input re-yield the same bullet list.
+# This is what keeps FactId = SHA1(content) stable across re-extraction runs.
+temperature = 0.0
+seed = 42
+
+# Embedding model for vector search (may be a different provider than the
+# extraction LLM).
+[embedding]
+url = "http://localhost:11434"           # the adapter appends /api/embeddings
+model = "hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest"
+dimensions = 1024                          # MUST match the HNSW index DDL
+api_key = ""
+timeout_seconds = 30
+
+# Reranker (REQUIRED for production-quality enrichment).
+# The enrich pipeline reranks vector-search survivors via a cross-encoder
+# before injecting them into the request; without it the pipeline runs in
+# degraded mode (vector-order-only ranking) and logs a WARN on every request.
+# Start the llama.cpp reranker server with a Qwen3-Reranker GGUF model:
+#   ./llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
+# The adapter expects an OpenAI-compatible /v1/rerank endpoint.
+[reranker]
+url = "http://localhost:8181"
+model = "qwen3-reranker"
+timeout_seconds = 60
+
+[retrieval]
+top_k_initial = 50
+top_k_final = 5
+min_confidence = 0.7
+min_topic_chars = 3
+
+[merge]
+cosine_threshold = 0.85
+
+[confidence]
+base = 0.5
+multi_source_bonus = 0.2
+no_contradiction_bonus = 0.1
+accept_threshold = 0.7
+pending_threshold = 0.4
+
+# NLI verdict thresholds (domain layer). Drives the `is_contradiction` /
+# `is_entailment` / `decide_merge` predicates. Soft caps so a borderline
+# softmax distribution does not flip a verdict.
+[nli]
+contradiction_threshold = 0.5
+entailment_threshold = 0.6
+
+# Native ort + ONNX Runtime backend for NLI inference — adapter-only sibling
+# of `[nli]`. The model id and cache directory are interpreter-level data
+# that the domain layer never reads; keeping them under their own section
+# preserves the layering invariant ("domain types carry no IO-boundary
+# data"). Putting `model` / `cache_dir` under `[nli]` is a loud startup
+# error — both sections carry `#[serde(deny_unknown_fields)]`, so the
+# parser rejects the misplacement instead of silently dropping it.
+[nli_backend]
+model = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
+cache_dir = "./data/nli_cache"
+
+# Semantic dedup safety net for fact extraction (persist_facts step 2).
+# When the extractor rephrases a fact just enough to break the FactId =
+# SHA1(content) exact match, the semantic layer catches it via cosine
+# similarity and routes it through cross-session confirmation instead of
+# leaving the fact stuck at single-source confidence.
+[extraction]
+dedup_cosine_threshold = 0.95
+
+[heat]
+decay_rate = 0.03
+min_threshold = 0.2
+
+[session]
+timeout_seconds = 1800
+pending_overflow_threshold = 20
+scan_interval_seconds = 60
+
+# SMOS Dreaming Agent — autonomous LLM-driven memory audit. Disabled by
+# default; flip `enabled = true` to opt in. The agent runs on a cron schedule,
+# reviews stored facts via rig tool-calling, applies bounded mutations
+# (deletions, merges, conflict flags), and writes a markdown report.
+[audit]
+enabled = false
+schedule = "0 3 * * *"
+llm_provider = "cloud"
+cloud_model = "z-ai/glm-4.6"
+# Set this to "${OPENROUTER_API_KEY}" to keep the secret out of TOML; the
+# dreaming module expands the placeholder via std::env::var at runtime.
+cloud_api_key = ""
+cloud_base_url = "https://openrouter.ai/api/v1"
+local_model = "granite4.1:3b"
+local_url = "http://localhost:11434"
+max_deletions_per_run = 50
+max_merges_per_run = 100
+report_dir = "./reports"

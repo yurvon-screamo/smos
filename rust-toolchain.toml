@@ -1,0 +1,5 @@
+# rust-toolchain: pin the minimum supported Rust version for this workspace.
+# CI and contributors build against 1.96; newer versions are accepted.
+[toolchain]
+channel = "1.96"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,243 @@
+{
+  "artifact": "README.md, CONTRIBUTING.md, docs/ARCHITECTURE.md, LICENSE, .github/*",
+  "product": "smos-rust",
+  "checked_at": "2026-06-22T00:00:00+03:00",
+  "overall_confidence": 0.95,
+  "claims": [
+    {
+      "claim": "Rust 1.96 required (badge + toolchain).",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["rust-toolchain.toml:4 (channel = \"1.96\")", "Cargo.toml:7 (rust-version = \"1.96\")"],
+      "note": ""
+    },
+    {
+      "claim": "MIT license.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["Cargo.toml:9 (license = \"MIT\")", "LICENSE file created"],
+      "note": ""
+    },
+    {
+      "claim": "665+ tests under default cargo t; 5 ignored.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["PERFORMANCE.md:29-31 (665 + 5 ignored)", "PERFORMANCE.md:59-61 (5 native_nli_tests ignored)"],
+      "note": "Conservative baseline as of 2026-06-20. Memory context mentions 683 from the 06-21 second-audit session; not promoted to README without a fresh PERFORMANCE.md update."
+    },
+    {
+      "claim": "Rust edition 2024.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["Cargo.toml:6 (edition = \"2024\")"],
+      "note": ""
+    },
+    {
+      "claim": "Repository URL: github.com/yurvon-screamo/smos.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["Cargo.toml:10 (repository = \"https://github.com/yurvon-screamo/smos\")"],
+      "note": "Replaces the old uwuwu-agent parent path; standalone repo URL."
+    },
+    {
+      "claim": "ort =2.0.0-rc.12 (exact pin) for native NLI.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos-adapters/Cargo.toml:60 (ort = { version = \"=2.0.0-rc.12\" ...})"],
+      "note": ""
+    },
+    {
+      "claim": "SurrealDB embedded with RocksDB + HNSW vector index.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["Cargo.toml:26 (surrealdb features = [\"kv-rocksdb\"])"],
+      "note": "HNSW is the SurrealDB 2.x vector index type used by the schema."
+    },
+    {
+      "claim": "axum 0.8, reqwest 0.12, rig-core 0.14, tokio-cron-scheduler 0.14.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "smos-adapters/Cargo.toml:29 (axum = \"0.8\")",
+        "smos-adapters/Cargo.toml:30 (reqwest = \"0.12\")",
+        "smos-adapters/Cargo.toml:45 (rig-core = \"0.14\")",
+        "smos-adapters/Cargo.toml:51 (tokio-cron-scheduler = \"0.14\")"
+      ],
+      "note": ""
+    },
+    {
+      "claim": "Release profile: LTO = true, codegen-units = 1.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["Cargo.toml:32-34 ([profile.release] lto = true, codegen-units = 1)"],
+      "note": "Binary size claim (~72MB from project brief) intentionally omitted — unverifiable without a release build present in target/."
+    },
+    {
+      "claim": "DeBERTa-v3-large-mnli-fever-anli-ling-wanli model id; ~643 MB ONNX.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "smos.toml:98 (model = \"MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli\")",
+        "PERFORMANCE.md:31 (~643MB DeBERTa)",
+        "docs/SMOKE_TEST.md:23 (~643 MB on first run)"
+      ],
+      "note": ""
+    },
+    {
+      "claim": "Deterministic extraction: temperature = 0.0, seed = 42.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos.toml:50-51 (temperature = 0.0, seed = 42)"],
+      "note": ""
+    },
+    {
+      "claim": "Confidence: base 0.5, multi_source_bonus 0.2, no_contradiction_bonus 0.1, accept_threshold 0.7, pending_threshold 0.4.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos.toml:76-81 ([confidence] block)"],
+      "note": ""
+    },
+    {
+      "claim": "Session timeout 1800s (30 min), scan_interval 60s, pending_overflow 20.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos.toml:113-116 ([session] block)"],
+      "note": ""
+    },
+    {
+      "claim": "extraction.dedup_cosine_threshold = 0.95; merge.cosine_threshold = 0.85.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos.toml:74, 107"],
+      "note": ""
+    },
+    {
+      "claim": "NLI thresholds: contradiction 0.5, entailment 0.6.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos.toml:87-88"],
+      "note": ""
+    },
+    {
+      "claim": "GPU features: nli-cuda, nli-directml, nli-metal, nli-webgpu (mutually exclusive).",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos-adapters/Cargo.toml:88-91 ([features] nli-cuda = [\"ort/cuda\"], nli-metal = [\"ort/coreml\"], nli-directml = [\"ort/directml\"], nli-webgpu = [\"ort/webgpu\"])"],
+      "note": "AGENTS.md notes CoreML is the actual EP behind nli-metal."
+    },
+    {
+      "claim": "Drift-priority walk: scan every candidate, first contradiction wins, merge pick held but not committed until scan is contradiction-free.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "smos-application/src/use_cases/finalize_session.rs:6-9 (docstring)",
+        "smos-application/src/use_cases/finalize_session.rs:193-201 (Step 3 implementation)",
+        "smos-application/src/use_cases/finalize_session.rs:231-244 (resolve_one docstring)"
+      ],
+      "note": ""
+    },
+    {
+      "claim": "C3 guard: already-flagged conflict pairs skip the NLI call but still count as observed.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos-application/src/use_cases/finalize_session.rs:267-284 (C3 guard block + comment)"],
+      "note": ""
+    },
+    {
+      "claim": "Exact-match short-circuit: identical text returns NliResult::exact_match_result() (Entailment, 1.0/0.0/0.0, available=true) without invoking DeBERTa.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "smos-application/src/use_cases/finalize_session.rs:286-292",
+        "smos-domain/src/value_objects/nli.rs:31-46 (exact_match_result)"
+      ],
+      "note": ""
+    },
+    {
+      "claim": "FactId = SHA1(content) is the exact-match dedup identity.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "smos-domain/src/config.rs:128",
+        "smos-application/src/use_cases/extract_facts_from_response.rs:30",
+        "smos-adapters/src/config.rs:118"
+      ],
+      "note": ""
+    },
+    {
+      "claim": "smos audit subcommand exists with --provider and --dry-run flags; runs independently of [audit].enabled.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "smos-adapters/src/bin/smos.rs:128-138 (Audit command enum)",
+        "smos-adapters/src/cli/audit_runner.rs:54-95 (AuditArgs + validate_audit_always path)"
+      ],
+      "note": "README initially claimed 'smos audit --run-once' — incorrect. Corrected to 'smos audit [--provider cloud|local] [--dry-run]'."
+    },
+    {
+      "claim": "[server].allowed_origins field exists; default CORS is CorsLayer::permissive() with a startup warning on non-localhost binds.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "smos-adapters/src/http/axum_server.rs:63-69, 98-112 (build_cors_layer)",
+        "smos-adapters/src/cli/server_runner.rs:146"
+      ],
+      "note": ""
+    },
+    {
+      "claim": "3-crate workspace with enforced one-way dependency: domain <- application <- adapters.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "Cargo.toml:3 (members = [\"smos-domain\", \"smos-application\", \"smos-adapters\"])",
+        "smos-domain/Cargo.toml (no tokio/serde_json/surrealdb)",
+        "smos-application/Cargo.toml (no tokio/surrealdb/http)"
+      ],
+      "note": "A layering violation fails to compile because smos-domain's Cargo.toml does not declare the IO crates."
+    },
+    {
+      "claim": "Async port traits are Send-bounded at the adapter call site, not at the port definition.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos-rust/AGENTS.md (Architecture reminders: 'Async port traits are Send-bounded at the adapter call site, not at the port definition.')"],
+      "note": ""
+    },
+    {
+      "claim": "Multi-provider strategies: single / round_robin / failover.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos.toml:38-39 ([upstream.strategy] mode = \"single\"), smos.toml:20-22 (comment lists all three modes)"],
+      "note": ""
+    },
+    {
+      "claim": "Default bind: 127.0.0.1:8888.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["smos.toml:13-14 (host = \"127.0.0.1\", port = 8888)"],
+      "note": ""
+    },
+    {
+      "claim": "SSE streaming passthrough through axum + reqwest bytes_stream.",
+      "confidence": 0.95,
+      "status": "verified",
+      "sources": [
+        "smos-adapters/Cargo.toml:30 (reqwest features = [..., \"stream\"])",
+        "smos-adapters/src/http/stream_transform.rs exists",
+        "smos-adapters/src/upstream/sse_parser.rs + streaming_buffer.rs exist"
+      ],
+      "note": "Module presence + dependency features confirm; exact byte-for-byte passthrough verified by existing e2e_passthrough tests."
+    },
+    {
+      "claim": "Dreaming agent is opt-in, disabled by default, writes a markdown report under [audit].report_dir.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": [
+        "smos.toml:122-135 ([audit] block, enabled = false, report_dir = \"./reports\")",
+        "smos-adapters/src/cli/server_runner.rs:266-267 (audit disabled log)"
+      ],
+      "note": ""
+    }
+  ],
+  "flags": [],
+  "gate": "READY"
+}

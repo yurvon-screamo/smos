@@ -1,0 +1,25 @@
+[package]
+name = "smos-application"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SMOS application layer — use cases and port traits."
+
+[dependencies]
+smos-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+futures.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+# The port-shape + use-case tests need a multi-thread runtime to drive the
+# async port traits and the extraction retry loop.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
