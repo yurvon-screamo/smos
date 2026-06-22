@@ -17,11 +17,15 @@
 //! - [`finalize_runner`] — `smos finalize` (single-session drain trigger).
 //! - [`import_runner`] — `smos import` (opencode transcript importer) +
 //!   [`import_helpers`] (pure helpers + unit tests).
+//! - [`dir_import_runner`] — `smos import-dir` (bulk document importer)
+//!   + [`dir_scanner`] (recursive scan + content extraction helpers).
 //! - [`doctor_runner`] — `smos doctor` (environment validation + report).
 //! - [`service`] — `smos service` (cross-platform service management via
 //!   sc.exe / systemd / launchd).
 
 pub mod audit_runner;
+pub mod dir_import_runner;
+pub mod dir_scanner;
 pub mod doctor_runner;
 pub mod finalize_runner;
 pub mod git_import_runner;
@@ -35,6 +39,7 @@ pub mod shutdown;
 pub mod tracing_setup;
 
 pub use audit_runner::{AuditArgs, AuditProvider, run_audit_cli};
+pub use dir_import_runner::{ImportDirArgs, run_dir_import};
 pub use doctor_runner::{DoctorArgs, run_doctor};
 pub use finalize_runner::run_finalize;
 pub use git_import_runner::{ImportGitArgs, run_import_git};

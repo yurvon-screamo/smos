@@ -10,6 +10,8 @@
 //!   default `config.toml`.
 //! - `smos serve` — HTTP proxy server (proxy + watcher + native NLI).
 //! - `smos import` — import an opencode session transcript.
+//! - `smos import-dir` — bulk import facts from a directory tree
+//!   (`*.md`, `*.txt`, `*.json`, `*.jsonl`, `*.yaml`, `*.yml`, `*.toml`).
 //! - `smos doctor` — environment validation, stats, Markdown report.
 //! - `smos finalize` — manual single-session drain trigger.
 //! - `smos service` — install/uninstall/start/stop/restart/status SMOS as
@@ -21,8 +23,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use smos_adapters::cli::{
-    AuditArgs, AuditProvider, DoctorArgs, ImportArgs, ImportGitArgs, ServiceAction, run_audit_cli,
-    run_doctor, run_finalize, run_import, run_import_git, run_init, run_server, run_service,
+    AuditArgs, AuditProvider, DoctorArgs, ImportArgs, ImportDirArgs, ImportGitArgs, ServiceAction,
+    run_audit_cli, run_dir_import, run_doctor, run_finalize, run_import, run_import_git, run_init,
+    run_server, run_service,
 };
 
 #[derive(Parser, Debug)]
@@ -99,6 +102,30 @@ enum Command {
     ImportGit {
         /// Git repository URL. Private repos use the system's SSH credentials.
         url: String,
+    },
+
+    /// Bulk import facts from a directory tree.
+    ///
+    /// Scans `path` recursively for `*.md`, `*.txt`, `*.json`, `*.jsonl`,
+    /// `*.yaml`, `*.yml`, `*.toml` (hidden directories like `.git` are
+    /// skipped), feeds each file's content through the extraction
+    /// pipeline (Qwen → facts), and optionally triggers a single
+    /// finalize drain (NLI) at the end.
+    ImportDir {
+        /// Directory to scan for documents.
+        path: String,
+
+        /// Memory namespace (project key). Defaults to the shared namespace.
+        #[arg(long, default_value = "shared")]
+        memory_key: String,
+
+        /// Limit number of files to process (smoke testing).
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Skip the NLI finalize drain after the import.
+        #[arg(long)]
+        no_finalize: bool,
     },
 
     /// Environment validation, stats, and Markdown report generator.
@@ -227,6 +254,21 @@ async fn main() -> anyhow::Result<ExitCode> {
         Command::ImportGit { url } => {
             let args = ImportGitArgs { url };
             run_import_git(&config_path, args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::ImportDir {
+            path,
+            memory_key,
+            limit,
+            no_finalize,
+        } => {
+            let args = ImportDirArgs {
+                path,
+                memory_key,
+                limit,
+                no_finalize,
+            };
+            run_dir_import(&config_path, args).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Service { action } => {
