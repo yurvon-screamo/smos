@@ -550,6 +550,37 @@ impl FactRepository for SurrealStore {
         Ok(out)
     }
 
+    async fn list_memory_keys(&self) -> Result<Vec<MemoryKey>, RepoError> {
+        // Same shape as `list_memory_keys_for_session` minus the WHERE filter:
+        // a single `SELECT memory_key` pass, with the distinct-set computed in
+        // Rust so the query stays portable across engine versions (see the
+        // rationale on `list_memory_keys_for_session`).
+        let mut res = self
+            .db
+            .query("SELECT memory_key FROM fact;")
+            .await
+            .map_err(Self::map_db_error)?;
+        Self::check_errors(&mut res, "list_memory_keys")?;
+
+        #[derive(Debug, Deserialize)]
+        struct MemoryKeyRow {
+            memory_key: String,
+        }
+        let rows: Vec<MemoryKeyRow> = res.take(0).map_err(Self::map_db_error)?;
+
+        let mut out: Vec<MemoryKey> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for row in rows {
+            if !seen.insert(row.memory_key.clone()) {
+                continue;
+            }
+            let mk = MemoryKey::from_raw(&row.memory_key)
+                .map_err(|e| RepoError::SerializationFailed(e.to_string()))?;
+            out.push(mk);
+        }
+        Ok(out)
+    }
+
     async fn search_similar(
         &self,
         embedding: Vec<f32>,

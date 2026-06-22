@@ -404,6 +404,15 @@ pub struct AuditConfig {
     pub max_deletions_per_run: usize,
     /// Hard cap on the number of `merge_facts` calls per run.
     pub max_merges_per_run: usize,
+    /// Maximum number of tool-calling rounds the rig agent may take per
+    /// audit run. rig 0.14's `PromptRequest` defaults to single-turn
+    /// (`max_depth = 0`), which prevents the tool loop from ever engaging
+    /// and surfaces as `MaxDepthError: (reached limit: 0)` on the first
+    /// prompt that expects a tool call. The audit workflow drives every
+    /// fact query, mutation, and report write through a `rig::tool::Tool`,
+    /// so this MUST be > 0; 10 is the canonical headroom for a full
+    /// list → search → merge → flag → report sweep.
+    pub max_tool_rounds: usize,
     /// Filesystem directory where `write_report` drops the markdown audit
     /// report. Created on first write if missing.
     pub report_dir: String,
@@ -542,6 +551,7 @@ impl Default for AuditConfig {
             local_url: "http://localhost:11434".into(),
             max_deletions_per_run: 50,
             max_merges_per_run: 100,
+            max_tool_rounds: 10,
             report_dir: paths.reports.to_string_lossy().into_owned(),
         }
     }
@@ -623,6 +633,16 @@ impl SmosConfig {
     pub fn load(path: &str) -> Result<Self, ConfigError> {
         let mut builder = ::config::Config::builder();
         if std::path::Path::new(path).exists() {
+            // The existence pre-check is load-bearing: `File::with_name`
+            // treats its argument as a *stem* and, when the exact file is
+            // absent, probes `<name>.toml` (the only registered extension
+            // under the `features = ["toml"]` build) — so
+            // `with_name("smos.toml")` would search for `smos.toml.toml`.
+            // Skipping the source when the path does not exist avoids that
+            // probe entirely. Do not remove the pre-check without
+            // replacing it; `File::from(Path)` does NOT bypass the probe
+            // in config 0.14.x (it funnels through the same `find_file`
+            // extension-search path as `with_name`).
             builder = builder.add_source(::config::File::with_name(path));
         }
         builder = builder.add_source(::config::Environment::with_prefix("SMOS").separator("__"));
@@ -828,6 +848,14 @@ impl SmosConfig {
         }
         if provider == "local" && self.audit.local_url.trim().is_empty() {
             errors.push("audit.local_url must not be empty for the local provider".into());
+        }
+        if self.audit.max_tool_rounds == 0 {
+            // `max_tool_rounds = 0` reproduces the rig 0.14 default
+            // (`max_depth = 0`), which short-circuits the tool-calling loop
+            // and makes the audit fail with `MaxDepthError` on the first
+            // prompt that needs a tool. Reject at startup so the operator
+            // hears about it as a config error, not as a mid-audit crash.
+            errors.push("audit.max_tool_rounds must be > 0".into());
         }
         errors
     }

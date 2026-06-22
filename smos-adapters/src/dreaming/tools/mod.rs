@@ -5,6 +5,7 @@
 //!
 //! - [`shared`] — parsing helpers, fact-to-view projection, rate-limit
 //!   slot acquisition, audit-privileged rehydrate.
+//! - [`list_memory_keys`] — namespace discovery (call first).
 //! - [`list_facts`], [`get_fact`], [`count_facts`] — read-only queries.
 //! - [`search_facts`], [`nli_classify`] — semantic search + NLI verdict.
 //! - [`update_fact`], [`merge_facts`], [`flag_conflict`], [`delete_fact`] —
@@ -22,6 +23,7 @@ pub mod delete_fact;
 pub mod flag_conflict;
 pub mod get_fact;
 pub mod list_facts;
+pub mod list_memory_keys;
 pub mod merge_facts;
 pub mod nli_classify;
 pub mod search_facts;
@@ -36,6 +38,7 @@ pub use delete_fact::{DeleteFactArgs, DeleteFactTool};
 pub use flag_conflict::{FlagConflictArgs, FlagConflictTool};
 pub use get_fact::{GetFactArgs, GetFactTool};
 pub use list_facts::{ListFactsArgs, ListFactsTool};
+pub use list_memory_keys::{ListMemoryKeysArgs, ListMemoryKeysTool};
 pub use merge_facts::{MergeFactsArgs, MergeFactsTool};
 pub use nli_classify::{NliClassifyArgs, NliClassifyTool};
 pub use search_facts::{SearchFactsArgs, SearchFactsTool};

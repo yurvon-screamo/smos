@@ -92,12 +92,11 @@ dimensions = 1024                          # MUST match the HNSW index DDL
 api_key = ""
 timeout_seconds = 30
 
-# Reranker — hard dependency.
+# Reranker — required for enrichment.
 # The enrich pipeline reranks vector-search survivors via a cross-encoder
-# before injecting them into the request. If the reranker is unreachable
-# or returns an empty result, every chat-completion request fails with
-# HTTP 503 rather than silently shipping vector-order-only ranking.
-# Start the llama.cpp reranker server with a Qwen3-Reranker GGUF model:
+# before injecting them into the request. Without a reachable reranker,
+# enrichment returns HTTP 503 (no fallback to vector-order-only ranking).
+# Start the llama.cpp reranker with a Qwen3-Reranker GGUF model:
 #   ./llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
 # The adapter expects an OpenAI-compatible /v1/rerank endpoint.
 [reranker]
@@ -174,6 +173,11 @@ local_model = "granite4.1:3b"
 local_url = "http://localhost:11434"
 max_deletions_per_run = 50
 max_merges_per_run = 100
+# rig 0.14's PromptRequest defaults to single-turn (max_depth = 0); without a
+# non-zero multi-turn depth the tool-calling loop never engages and the audit
+# fails with `MaxDepthError: (reached limit: 0)` on the first prompt that needs
+# a tool. 10 is the canonical headroom for a full audit sweep.
+max_tool_rounds = 10
 # Defaults to ~/.smos/reports; uncomment to override.
 # report_dir = "~/.smos/reports"
 
@@ -220,3 +224,4 @@ repo_url = ""
 branch = "main"
 auto_push = false
 local_path = "~/.smos/git/memory"
+disable_gpg_sign = true            # SMOS commits are unsigned by default

@@ -297,6 +297,9 @@ mod tests {
         ) -> Result<Vec<MemoryKey>, crate::errors::RepoError> {
             Ok(Vec::new())
         }
+        async fn list_memory_keys(&self) -> Result<Vec<MemoryKey>, crate::errors::RepoError> {
+            Ok(Vec::new())
+        }
         async fn search_similar(
             &self,
             _e: Vec<f32>,

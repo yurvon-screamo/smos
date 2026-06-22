@@ -48,6 +48,21 @@ pub trait FactRepository {
         session_id: &SessionId,
     ) -> Result<Vec<MemoryKey>, RepoError>;
 
+    /// Distinct `memory_key` values across **every** namespace in the store.
+    ///
+    /// Backs the dreaming agent's `list_memory_keys` discovery tool: the LLM
+    /// has no other way to learn which namespaces exist, and without it the
+    /// audit prompt's "for every memory_key" instruction sends the model
+    /// straight into `count_facts("")` (rejected as an invalid key).
+    ///
+    /// Required (not defaulted): a future production adapter that forgets to
+    /// override it would silently surface zero namespaces — the audit would
+    /// emit an empty report with no error. Forcing every implementor to
+    /// acknowledge the method makes that failure mode impossible. The
+    /// test stubs return `Vec::new()` because they are never exercised on
+    /// the dreaming path.
+    async fn list_memory_keys(&self) -> Result<Vec<MemoryKey>, RepoError>;
+
     /// K-nearest-neighbour vector search against accepted facts.
     ///
     /// Returns hits ordered by ascending distance from `embedding`.

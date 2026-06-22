@@ -21,6 +21,7 @@ use super::prompts::{self, AUDIT_TRIGGER_PROMPT};
 use super::report::AuditReport;
 use super::tools::delete_fact::DeleteFactTool;
 use super::tools::flag_conflict::FlagConflictTool;
+use super::tools::list_memory_keys::ListMemoryKeysTool;
 use super::tools::merge_facts::MergeFactsTool;
 use super::tools::update_fact::UpdateFactTool;
 use super::tools::write_report::WriteReportTool;
@@ -108,6 +109,9 @@ where
 
     let agent = AgentBuilder::new(model)
         .preamble(prompts::SYSTEM_PROMPT)
+        .tool(ListMemoryKeysTool {
+            store: store.clone(),
+        })
         .tool(ListFactsTool {
             store: store.clone(),
         })
@@ -156,8 +160,15 @@ where
         "starting SMOS dreaming audit"
     );
 
+    // rig 0.14's `PromptRequest` defaults `max_depth = 0` (single-turn), which
+    // makes the tool-calling loop never engage — every prompt that needs a
+    // tool surface fails with `MaxDepthError: (reached limit: 0)`. Configuring
+    // a non-zero multi-turn depth is load-bearing for the audit workflow
+    // because every fact query, mutation, and report write happens through a
+    // `rig::tool::Tool` impl.
     let response = agent
         .prompt(AUDIT_TRIGGER_PROMPT)
+        .multi_turn(config.max_tool_rounds)
         .await
         .context("audit agent prompt failed")?;
     let deletions = deletion_counter.load(Ordering::Relaxed);

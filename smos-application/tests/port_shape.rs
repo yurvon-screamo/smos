@@ -177,6 +177,9 @@ impl FactRepository for StubFactRepository {
     ) -> Result<Vec<MemoryKey>, RepoError> {
         Ok(Vec::new())
     }
+    async fn list_memory_keys(&self) -> Result<Vec<MemoryKey>, RepoError> {
+        Ok(Vec::new())
+    }
     async fn search_similar(
         &self,
         _embedding: Vec<f32>,

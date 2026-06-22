@@ -203,11 +203,11 @@
       "note": ""
     },
     {
-      "claim": "Multi-provider strategies: single / round_robin / failover.",
+      "claim": "Providers routing: each [[providers]] entry is a standalone target; the legacy [upstream.strategy] round-robin/failover modes were removed during the persons-routing refactor.",
       "confidence": 1.0,
       "status": "verified",
-      "sources": ["smos.toml:38-39 ([upstream.strategy] mode = \"single\"), smos.toml:20-22 (comment lists all three modes)"],
-      "note": ""
+      "sources": ["smos.toml:32 ('There is no round-robin / failover any more — every provider is a standalone target routed via persons')"],
+      "note": "Updated 2026-06-22: previously claimed 'Multi-provider strategies: single / round_robin / failover' based on the now-removed [upstream.strategy] section."
     },
     {
       "claim": "Default bind: 127.0.0.1:8888.",

@@ -1232,6 +1232,103 @@ async fn list_memory_keys_for_session_returns_distinct_keys() {
 }
 
 // ---------------------------------------------------------------------------
+// 13d. Cross-namespace discovery via list_memory_keys ( dreaming-agent path )
+// ---------------------------------------------------------------------------
+//
+// Exercises the dreaming agent's namespace discovery: the LLM has no other
+// way to learn which memory_keys exist, and the audit prompt now instructs
+// it to call list_memory_keys FIRST. The contract is "every distinct
+// memory_key present in the fact table", regardless of session or status.
+
+#[tokio::test]
+async fn list_memory_keys_returns_every_distinct_namespace() {
+    let (store, _tmp) = fresh_store("list_memory_keys_discovery").await;
+
+    let ns_a = memory_key();
+    let ns_b = MemoryKey::from_raw("second-namespace").expect("memory key");
+    let ns_c = MemoryKey::from_raw("third-namespace").expect("memory key");
+
+    // Seed facts across three namespaces, mixing sessions so the test would
+    // catch a regression that filtered by session (the sibling
+    // `list_memory_keys_for_session` does filter; this method must NOT).
+    let a_one = Fact::new_pending(
+        "ns_a fact one",
+        ns_a.clone(),
+        sid(1),
+        unit_embedding(1),
+        ts(),
+        ConfidenceConfig::default().base,
+    )
+    .expect("pending");
+    let a_two = Fact::new_pending(
+        "ns_a fact two",
+        ns_a.clone(),
+        sid(2),
+        unit_embedding(2),
+        ts(),
+        ConfidenceConfig::default().base,
+    )
+    .expect("pending");
+    let b_fact = Fact::new_pending(
+        "ns_b fact",
+        ns_b.clone(),
+        sid(1),
+        unit_embedding(3),
+        ts(),
+        ConfidenceConfig::default().base,
+    )
+    .expect("pending");
+    let c_fact = Fact::new_pending(
+        "ns_c fact",
+        ns_c.clone(),
+        sid(3),
+        unit_embedding(4),
+        ts(),
+        ConfidenceConfig::default().base,
+    )
+    .expect("pending");
+    FactRepository::save(&store, &a_one)
+        .await
+        .expect("save a_one");
+    FactRepository::save(&store, &a_two)
+        .await
+        .expect("save a_two");
+    FactRepository::save(&store, &b_fact).await.expect("save b");
+    FactRepository::save(&store, &c_fact).await.expect("save c");
+
+    let keys = FactRepository::list_memory_keys(&store)
+        .await
+        .expect("list_memory_keys");
+
+    assert_eq!(
+        keys.len(),
+        3,
+        "expected exactly 3 distinct keys, got {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k.as_str() == ns_a.as_str()),
+        "ns_a must be discovered, got {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k.as_str() == "second-namespace"),
+        "ns_b must be discovered, got {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k.as_str() == "third-namespace"),
+        "ns_c must be discovered, got {keys:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_memory_keys_returns_empty_on_fresh_store() {
+    let (store, _tmp) = fresh_store("list_memory_keys_empty").await;
+    let keys = FactRepository::list_memory_keys(&store)
+        .await
+        .expect("list_memory_keys on empty store");
+    assert!(keys.is_empty(), "fresh store has no namespaces");
+}
+
+// ---------------------------------------------------------------------------
 // 14. Pending-only session (no accepted pool) — every fact finalized standalone
 // ---------------------------------------------------------------------------
 

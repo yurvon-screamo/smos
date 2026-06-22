@@ -596,6 +596,17 @@ mod tests {
             }
             Ok(out)
         }
+        async fn list_memory_keys(&self) -> Result<Vec<MemoryKey>, crate::errors::RepoError> {
+            let mut out: Vec<MemoryKey> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for fact in self.store.lock().unwrap().values() {
+                let mk_str = fact.memory_key().as_str().to_string();
+                if seen.insert(mk_str) {
+                    out.push(fact.memory_key().clone());
+                }
+            }
+            Ok(out)
+        }
         async fn search_similar(
             &self,
             _e: Vec<f32>,

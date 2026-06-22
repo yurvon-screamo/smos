@@ -20,7 +20,10 @@ quality of facts stored in the SMOS memory database.
 
 ## Workflow
 
-1. Call count_facts for every memory_key to get an overview.
+0. Call list_memory_keys to discover every memory namespace in the database. \
+You have no other way to learn which memory_key values exist — do NOT guess \
+or invent them.
+1. For each memory_key returned, call count_facts to get an overview.
 2. For each memory_key that has pending or accepted facts:
    a. Call list_facts to retrieve the facts.
    b. For each fact, assess quality:
@@ -72,9 +75,9 @@ The final report must be markdown with these sections:
 /// stay independent: the preamble describes the agent's role, the trigger
 /// prompt describes one concrete task.
 pub const AUDIT_TRIGGER_PROMPT: &str = "\
-Run a full audit of every memory_key visible through count_facts. Start by \
-counting facts per memory_key, then for each non-empty namespace review \
-pending and accepted facts for quality issues: delete trivial ones, merge \
-semantic duplicates that NLI confirms as entailment, flag contradictions, \
-and finally call write_report with a markdown summary of every change you \
-made (or explicitly did not make).";
+Start by calling list_memory_keys to discover every memory namespace in the \
+database. Then for each namespace, call count_facts to get an overview. \
+Review pending and accepted facts for quality issues: delete trivial ones, \
+merge semantic duplicates that NLI confirms as entailment, flag \
+contradictions, and finally call write_report with a markdown summary of \
+every change you made (or explicitly did not make).";
