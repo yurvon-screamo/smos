@@ -45,19 +45,19 @@ jobs:
         if: matrix.archive == 'zip'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../smos-${{ matrix.target }}-v${{ github.ref_name }}.zip smos.exe
+          7z a ../../../smos-${{ matrix.target }}-${{ github.ref_name }}.zip smos.exe
           cd ../../..
 
       - name: Package (Unix)
         if: matrix.archive != 'zip'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../smos-${{ matrix.target }}-v${{ github.ref_name }}.tar.gz smos
+          tar czf ../../../smos-${{ matrix.target }}-${{ github.ref_name }}.tar.gz smos
           cd ../../..
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            smos-${{ matrix.target }}-v${{ github.ref_name }}.zip
-            smos-${{ matrix.target }}-v${{ github.ref_name }}.tar.gz
+            smos-${{ matrix.target }}-${{ github.ref_name }}.zip
+            smos-${{ matrix.target }}-${{ github.ref_name }}.tar.gz
