@@ -5,10 +5,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yurvon-screamo/smos"
+    "url": "git+https://github.com/yurvon-screamo/smos.git"
   },
   "bin": {
-    "smos": "./bin/smos.js"
+    "smos": "bin/smos.js"
   },
   "scripts": {
     "postinstall": "node install.js"
