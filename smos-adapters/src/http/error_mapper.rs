@@ -17,6 +17,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use smos_application::errors::{UpstreamError, UseCaseError};
+use smos_application::helpers::person_router::RouteError;
 
 /// The single source of truth for how an `UpstreamError` is classified.
 #[derive(Debug, PartialEq, Eq)]
@@ -59,12 +60,19 @@ pub fn render(error: UpstreamError) -> Response {
 ///
 /// - `Upstream` variant delegates to [`render`] (preserves the §12 status
 ///   matrix for upstream failures).
-/// - `Domain` variant maps to 400 Bad Request: in Slice-4 the only path for a
-///   domain error to reach the HTTP boundary is `parse_model` validating the
-///   user-supplied model string. If a future slice surfaces an invariant
-///   violation (status transition, confidence threshold), the handler will
-///   treat it as a client error too — those never happen from well-formed
-///   inputs in production.
+/// - `Domain` variant maps to 400 Bad Request: a domain error reaches the
+///   HTTP boundary when `route_request` rejects an unsafe person name
+///   (e.g. `request.model = "../etc"`). If a future slice surfaces an
+///   invariant violation (status transition, confidence threshold), the
+///   handler will treat it as a client error too — those never happen from
+///   well-formed inputs in production.
+/// - `Route` variant maps to:
+///     - 400 Bad Request for unknown person / invalid memory key (client
+///       sent a malformed `request.model`).
+///     - 502 Bad Gateway for an unknown provider (config-level mistake —
+///       the operator's `[persons.X].provider` references a name missing
+///       from `[[providers]]`; surfaced here defensively, since the
+///       startup validator catches it first).
 /// - `Repo` / `Provider` variants map to 503 Service Unavailable: those are
 ///   recoverable downstream outages (DB down, Ollama down). The client can
 ///   retry; the proxy stays up.
@@ -75,6 +83,7 @@ pub fn render_use_case_error(error: UseCaseError) -> Response {
             StatusCode::BAD_REQUEST,
             format!("invalid request: {domain}"),
         ),
+        UseCaseError::Route(route) => render_route_error(route),
         UseCaseError::Repo(repo) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("SMOS storage unavailable: {repo}"),
@@ -83,6 +92,31 @@ pub fn render_use_case_error(error: UseCaseError) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
             format!("SMOS provider unavailable: {provider}"),
         ),
+    }
+}
+
+/// Map a routing-layer error to its HTTP response.
+///
+/// See [`render_use_case_error`] for the status-code rationale.
+fn render_route_error(error: RouteError) -> Response {
+    match error {
+        // Client sent a `request.model` that does not name a configured
+        // person — operator-facing "fix your client" message, 400.
+        RouteError::UnknownPerson(_) => error_response(StatusCode::BAD_REQUEST, error.to_string()),
+        // Client sent a person name that is not a valid MemoryKey (e.g.
+        // contains path separators). The error message already carries the
+        // domain validation cause; surface it as 400.
+        RouteError::InvalidMemoryKey(_, _) => {
+            error_response(StatusCode::BAD_REQUEST, error.to_string())
+        }
+        // Config-level mistake: the operator's `[persons.X].provider`
+        // references a name that is missing from `[[providers]]`. The
+        // startup validator catches this first; if it slips through (e.g.
+        // a hot config edit), surface as 502 so the client does not retry
+        // blindly against a permanently-broken route.
+        RouteError::UnknownProvider(_, _) => {
+            error_response(StatusCode::BAD_GATEWAY, error.to_string())
+        }
     }
 }
 

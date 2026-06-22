@@ -18,8 +18,7 @@ SMOS uses a single test surface (defined in
 | `cargo ti`  | Alias kept for compat — same scope as `cargo t`.            |
 | `cargo tall`| Pre-release. Includes every `#[ignore]` test (643 MB model download + live Ollama). |
 
-See [PERFORMANCE.md](PERFORMANCE.md) for measured warm/cold timings and
-[README.md](README.md) → Testing for the full breakdown.
+See [README.md](README.md) → Testing for the full breakdown.
 
 ### `#[ignore]` policy
 

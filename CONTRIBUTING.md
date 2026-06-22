@@ -101,7 +101,7 @@ A bug in our own code (including a SurrealQL syntax mistake) is **not** a reason
 2. **Embedded-SurrealDB / wiremock / TCP listener** → universal, runs by default. No gating.
 3. **Needs a live Ollama / model download** → `#[ignore]` per test, with a reason.
 
-See [`AGENTS.md`](AGENTS.md) and [`PERFORMANCE.md`](PERFORMANCE.md) for the full rationale.
+See [`AGENTS.md`](AGENTS.md) for the full rationale.
 
 ## Code style
 

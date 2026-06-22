@@ -241,7 +241,7 @@ async fn mount_ollama_chat_fail_then_succeed(ollama: &MockServer, fail_times: us
 /// trigger enrichment (`"hi"` < `min_topic_chars=3`), so only extraction runs.
 fn extraction_request() -> Value {
     json!({
-        "model": "origa:gpt-4o",
+        "model": "origa",
         "messages": [{"role": "user", "content": "hi"}],
     })
 }
@@ -250,7 +250,7 @@ fn extraction_request() -> Value {
 /// detected session is deterministic (for cross-session confirmation tests).
 fn extraction_request_with_session(session: &SessionId) -> Value {
     json!({
-        "model": "origa:gpt-4o",
+        "model": "origa",
         "messages": [
             {"role": "assistant", "content": format!("prior\n<!-- smos:{} -->", session.as_str())},
             {"role": "user", "content": "hi"},
@@ -800,7 +800,7 @@ async fn extraction_streaming_saves_pending_fact() {
 
     let smos = serve_state(state.clone()).await;
     let body = json!({
-        "model": "origa:gpt-4o",
+        "model": "origa",
         "stream": true,
         "messages": [{"role": "user", "content": "hi"}],
     });
@@ -843,7 +843,7 @@ async fn extraction_streaming_concatenates_content_deltas() {
 
     let smos = serve_state(state.clone()).await;
     let body = json!({
-        "model": "origa:gpt-4o",
+        "model": "origa",
         "stream": true,
         "messages": [{"role": "user", "content": "hi"}],
     });

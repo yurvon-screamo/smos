@@ -10,9 +10,9 @@
 //! the domain layer contains only entities and value objects.
 
 pub mod memory_block;
-pub mod model_parser;
 pub mod noise_filter;
 pub mod openai_content;
+pub mod person_router;
 pub mod request_enricher;
 pub mod retrieval_planner;
 pub mod session_marker;

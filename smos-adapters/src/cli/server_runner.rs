@@ -3,11 +3,14 @@
 //! Owns the §12 drain ordering (HTTP → extraction → watcher) and the
 //! optional-watcher degrade behaviour.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use smos_application::helpers::person_router::{PersonEntry, ProviderEntry};
 use tokio::sync::mpsc;
 
+use crate::cli::llama_runner::spawn_llama_cpp;
 use crate::cli::shutdown::shutdown_signal;
 use crate::cli::tracing_setup::init_tracing_for_server;
 use crate::config::SmosConfig;
@@ -15,7 +18,7 @@ use crate::dreaming::start_scheduler;
 use crate::http::axum_server::{AppState, build_router, is_loopback_host, serve_with_shutdown};
 use crate::nli::build_classifier;
 use crate::runtime::{ExtractionSupervisor, SessionWatcher};
-use crate::upstream::ReqwestUpstreamPool;
+use crate::upstream::ReqwestUpstreamRouter;
 use crate::{
     LlamaCppReranker, OllamaEmbedding, OllamaExtractor, SurrealStore, SystemClock,
     SystemIdGenerator,
@@ -37,6 +40,21 @@ type AuditHandle = Option<tokio_cron_scheduler::JobScheduler>;
 
 /// Start the SMOS proxy (default `smos serve` mode).
 pub async fn run_server(config_path: &str) -> Result<()> {
+    // Auto-materialise ~/.smos (or $SMOS_HOME) on boot so the operator can
+    // drop a binary on a fresh box and `smos serve` immediately — no
+    // mandatory `smos init` step. A failure here is logged but never fatal:
+    // a read-only home directory is recoverable (the operator can point
+    // SMOS_HOME at a writable location) and chat completions would still
+    // work as long as SurrealDB finds a writable path through its own
+    // default config.
+    if let Err(e) = crate::paths::ensure_smos_home() {
+        tracing::warn!(
+            error = %e,
+            "failed to create ~/.smos (or $SMOS_HOME); startup continues but \
+             config / logs / persona files may not be readable"
+        );
+    }
+
     let config = SmosConfig::load(config_path)?;
     init_tracing_for_server(&config.server);
 
@@ -44,8 +62,8 @@ pub async fn run_server(config_path: &str) -> Result<()> {
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        upstream_providers = config.upstream.providers.len(),
-        upstream_strategy = %config.upstream.strategy.mode,
+        providers = config.providers.len(),
+        persons = config.persons.len(),
         extraction_url = %config.llm_extraction.url,
         embedding_url = %config.embedding.url,
         reranker = %config.reranker.url,
@@ -61,6 +79,20 @@ pub async fn run_server(config_path: &str) -> Result<()> {
     )
     .await?;
     store.run_migrations().await?;
+
+    // llama.cpp auto-launch. Spawns `llama-server` for every configured
+    // service (embedding / reranker / extraction) when `auto_launch = true`.
+    // A startup failure is logged at WARN but never fatal — the HTTP server
+    // keeps running and the operator can launch the servers by hand. The
+    // manager handle is held until shutdown so spawned children survive for
+    // the lifetime of the server and are killed in `shutdown_all`.
+    //
+    // The git-sync manager is NOT opened here. It is opened in the
+    // `smos finalize` runner where FinalizeSession actually executes, so
+    // the clone is touched only when there is something to export. The
+    // server's own watcher does not (yet) wire git sync through — that
+    // would require a SessionWatcher signature change.
+    let llama_manager = spawn_llama_cpp(&config.llama_cpp).await;
 
     // ExtractionSupervisor is `#[derive(Clone)]` with shared `Arc` interior,
     // so both clones observe the same in-flight counter — required for the
@@ -101,6 +133,13 @@ pub async fn run_server(config_path: &str) -> Result<()> {
     // line). Dropping triggers the scheduler's internal shutdown path.
     drop(audit_handle);
 
+    // Kill every spawned `llama-server`. Done after the audit + watcher
+    // drains so a pending FinalizeSession that still talks to the
+    // reranker / extractor does not see its upstream vanish mid-request.
+    if let Some(mgr) = llama_manager.as_ref() {
+        mgr.shutdown_all().await;
+    }
+
     tracing::info!("SMOS proxy stopped");
     Ok(())
 }
@@ -111,25 +150,27 @@ pub async fn run_server(config_path: &str) -> Result<()> {
 fn warn_on_insecure_config(config: &SmosConfig) {
     let is_loopback = is_loopback_host(&config.server.host);
 
-    // Inspect every configured provider's api_key. A placeholder key is
-    // acceptable on loopback (local Ollama); on a non-localhost bind it is
-    // an outright insecure configuration and gets an ERROR-level log so
-    // the operator notices before going to production.
-    for provider in &config.upstream.providers {
-        if is_placeholder_key(&provider.api_key) {
+    // Inspect every configured provider's resolved api-key. A placeholder
+    // key is acceptable on loopback (local Ollama); on a non-localhost bind
+    // it is an outright insecure configuration and gets an ERROR-level log
+    // so the operator notices before going to production.
+    for provider in &config.providers {
+        let api_key = provider.resolve_api_key();
+        if is_placeholder_key(&api_key) {
             if is_loopback {
                 tracing::warn!(
                     provider = %provider.name,
-                    api_key = %provider.api_key,
-                    "upstream api_key is a known placeholder; set SMOS__UPSTREAM__API_KEY \
-                     before exposing the proxy on a non-localhost interface"
+                    api_key = %api_key,
+                    "upstream api_key is a known placeholder; set the env var \
+                     named in api_key_env before exposing the proxy on a \
+                     non-localhost interface"
                 );
             } else {
                 tracing::error!(
                     provider = %provider.name,
                     host = %config.server.host,
-                    "api_key is a known placeholder AND host is non-localhost — this is \
-                     insecure. Set a real api_key before deploying."
+                    "api_key is a known placeholder AND host is non-localhost — \
+                     this is insecure. Set a real api_key before deploying."
                 );
             }
         }
@@ -172,7 +213,7 @@ fn build_app_state(
     store: SurrealStore,
     extraction_supervisor: ExtractionSupervisor,
 ) -> Result<AppState> {
-    let upstream = ReqwestUpstreamPool::new(&config.upstream)?;
+    let upstream = ReqwestUpstreamRouter::from_config(&config.providers)?;
     let embedder = OllamaEmbedding::new(Arc::new(config.embedding.clone()))?;
     let reranker = LlamaCppReranker::new(Arc::new(config.reranker.clone()))?;
     let extractor = OllamaExtractor::new(Arc::new(config.llm_extraction.clone()))?;
@@ -182,6 +223,14 @@ fn build_app_state(
     let heat_cfg = Arc::new(config.heat.clone());
     let confidence_cfg = Arc::new(config.confidence.clone());
     let extraction_cfg = Arc::new(config.extraction.clone());
+
+    // Pre-build the IO-free routing views once at startup so the
+    // chat-completion handler does not pay per-request allocation cost.
+    // Live config reload (if ever added) MUST swap these Arcs atomically
+    // (e.g. via `ArcSwap`) so a request in flight observes a consistent
+    // persons + providers snapshot.
+    let persons_view = Arc::new(build_person_view(&config.persons));
+    let providers_view = Arc::new(build_provider_view(&config.providers));
 
     Ok(AppState {
         config: Arc::new(config.clone()),
@@ -197,7 +246,40 @@ fn build_app_state(
         confidence_cfg,
         extraction_cfg,
         extraction_supervisor,
+        persons_view,
+        providers_view,
     })
+}
+
+/// Project `smos_adapters::config::PersonConfig` into the IO-free
+/// [`PersonEntry`] view consumed by the routing layer.
+fn build_person_view(
+    persons: &std::collections::HashMap<String, crate::config::PersonConfig>,
+) -> HashMap<String, PersonEntry> {
+    persons
+        .iter()
+        .map(|(name, p)| {
+            (
+                name.clone(),
+                PersonEntry {
+                    provider: p.provider.clone(),
+                    model: p.model.clone(),
+                    persona: p.persona.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Project `smos_adapters::config::ProviderConfig` into the IO-free
+/// [`ProviderEntry`] view.
+fn build_provider_view(providers: &[crate::config::ProviderConfig]) -> Vec<ProviderEntry> {
+    providers
+        .iter()
+        .map(|p| ProviderEntry {
+            name: p.name.clone(),
+        })
+        .collect()
 }
 
 /// Spawn the NLI backend (optional) and the [`SessionWatcher`] that uses

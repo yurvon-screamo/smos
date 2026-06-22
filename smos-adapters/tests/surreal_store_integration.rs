@@ -686,10 +686,16 @@ async fn collect_expired_returns_only_stale_sessions() {
         .expect("goc2");
 
     // Backdate id1 via the raw_db() escape hatch — no public mutator exists.
-    // Use `<datetime>` cast because the SDK passes the string through as-is.
+    // Both `created_at` and `last_active` are backdated together so the row
+    // still satisfies `SessionState::rehydrate`'s `last_active >= created_at`
+    // invariant. Backdating only `last_active` would trip that check and the
+    // row would be silently dropped as "corrupt" by `collect_expired`.
     let _ = store
         .raw_db()
-        .query("UPDATE type::thing('session', $id) SET last_active = <datetime>$ts;")
+        .query(
+            "UPDATE type::thing('session', $id) SET \
+             created_at = <datetime>$ts, last_active = <datetime>$ts;",
+        )
         .bind(("id", id1.as_str().to_string()))
         .bind(("ts", "2020-01-01T00:00:00Z".to_string()))
         .await

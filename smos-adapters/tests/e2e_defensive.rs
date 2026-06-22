@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{chat_body, session_id_in, spawn_smos};
+use common::{TEST_PERSON, chat_body, session_id_in, spawn_smos};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -26,7 +26,7 @@ async fn streaming_emits_synthetic_marker_when_no_stop_and_no_done() {
         .await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("m", vec![("stream", json!(true))]);
+    let body = chat_body(TEST_PERSON, vec![("stream", json!(true))]);
     let raw = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
         .json(&body)
@@ -66,7 +66,7 @@ data: [DONE]\n\n";
         .await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("m", vec![("stream", json!(true))]);
+    let body = chat_body(TEST_PERSON, vec![("stream", json!(true))]);
     let raw = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
         .json(&body)
@@ -104,7 +104,7 @@ data: [DONE]\n\n";
         .await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("m", vec![("stream", json!(true))]);
+    let body = chat_body(TEST_PERSON, vec![("stream", json!(true))]);
     let raw = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
         .json(&body)
@@ -124,7 +124,7 @@ data: [DONE]\n\n";
 async fn unreachable_upstream_returns_502() {
     // Point SMOS at a port where nothing listens — connect fails → 502.
     let smos = spawn_smos("http://127.0.0.1:1").await;
-    let body = chat_body("m", vec![]);
+    let body = chat_body(TEST_PERSON, vec![]);
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
         .json(&body)
@@ -148,7 +148,7 @@ async fn upstream_4xx_body_is_propagated_verbatim() {
         .await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("m", vec![]);
+    let body = chat_body(TEST_PERSON, vec![]);
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
         .json(&body)
@@ -174,7 +174,7 @@ async fn upstream_5xx_body_does_not_leak_to_client() {
         .await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("m", vec![]);
+    let body = chat_body(TEST_PERSON, vec![]);
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
         .json(&body)

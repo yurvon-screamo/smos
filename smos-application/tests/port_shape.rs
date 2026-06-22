@@ -145,7 +145,11 @@ impl LlmExtractor for StubLlmExtractor {
 struct StubLlmUpstream;
 
 impl LlmUpstream for StubLlmUpstream {
-    async fn complete(&self, _request: ChatRequest) -> Result<ChatResponse, UpstreamError> {
+    async fn complete(
+        &self,
+        _provider_name: &str,
+        _request: ChatRequest,
+    ) -> Result<ChatResponse, UpstreamError> {
         Ok(ChatResponse::NonStreaming(
             serde_json::json!({"choices": []}),
         ))
@@ -288,7 +292,7 @@ async fn llm_extractor_returns_extracted_strings() {
 async fn llm_upstream_returns_non_streaming_value() {
     let u = StubLlmUpstream;
     let resp = u
-        .complete(ChatRequest::new("m", Vec::new()))
+        .complete("any", ChatRequest::new("m", Vec::new()))
         .await
         .expect("complete");
     match resp {

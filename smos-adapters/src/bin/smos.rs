@@ -6,6 +6,8 @@
 //!
 //! ## Subcommands
 //!
+//! - `smos init` — first-time setup: materialise `~/.smos` and write the
+//!   default `config.toml`.
 //! - `smos serve` — HTTP proxy server (proxy + watcher + native NLI).
 //! - `smos import` — import an opencode session transcript.
 //! - `smos doctor` — environment validation, stats, Markdown report.
@@ -19,23 +21,22 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use smos_adapters::cli::{
-    AuditArgs, AuditProvider, DoctorArgs, ImportArgs, ServiceAction, run_audit_cli, run_doctor,
-    run_finalize, run_import, run_server, run_service,
+    AuditArgs, AuditProvider, DoctorArgs, ImportArgs, ImportGitArgs, ServiceAction, run_audit_cli,
+    run_doctor, run_finalize, run_import, run_import_git, run_init, run_server, run_service,
 };
-
-const DEFAULT_CONFIG_PATH: &str = "smos.toml";
 
 #[derive(Parser, Debug)]
 #[command(
     name = "smos",
     version,
     about = "SMOS — Semantic Memory OS",
-    long_about = "Unified SMOS binary. Subcommands: serve, import, doctor, finalize, service."
+    long_about = "Unified SMOS binary. Subcommands: init, serve, import, doctor, finalize, service."
 )]
 struct Cli {
-    /// Path to the config file. Defaults to `smos.toml` in the CWD.
-    #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH)]
-    config: String,
+    /// Path to the config file. When omitted, the proxy resolves
+    /// `./smos.toml` (CWD) first, then `~/.smos/config.toml`.
+    #[arg(long, global = true)]
+    config: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -43,6 +44,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Initialize SMOS home directory (~/.smos) with default config.
+    Init,
+
     /// Start the HTTP proxy server (proxy + watcher + native NLI).
     Serve,
 
@@ -84,6 +88,17 @@ enum Command {
         /// List discovered sessions and exit.
         #[arg(long)]
         list: bool,
+    },
+
+    /// Import facts from a git repo previously written by SMOS git-sync.
+    ///
+    /// Clones (or opens) `url` into a temporary local path, reads every
+    /// `facts/<memory_key>/<id>.md` file, and re-hydrates the facts into
+    /// SurrealDB. The clone is left on disk so a subsequent invocation
+    /// can re-use it (incremental pull).
+    ImportGit {
+        /// Git repository URL. Private repos use the system's SSH credentials.
+        url: String,
     },
 
     /// Environment validation, stats, and Markdown report generator.
@@ -142,9 +157,25 @@ enum Command {
 async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
 
+    // Resolve the effective config path once. `resolve_config_path` already
+    // implements the full fallback chain (`--config` > `./smos.toml` >
+    // `~/.smos/config.toml`), so we just hand it the CLI override (if any)
+    // and stringify the result. `smos init` ignores this path because it
+    // bootstraps `~/.smos/config.toml` itself.
+    let config_path: String = match cli.config.as_deref() {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => smos_adapters::cli::resolve_effective_config_path(cli.config.as_deref())
+            .to_string_lossy()
+            .into_owned(),
+    };
+
     match cli.command {
+        Command::Init => {
+            run_init()?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Serve => {
-            run_server(&cli.config).await?;
+            run_server(&config_path).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Import {
@@ -169,7 +200,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 dry_run,
                 list,
             };
-            run_import(&cli.config, args).await?;
+            run_import(&config_path, args).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Doctor {
@@ -184,17 +215,22 @@ async fn main() -> anyhow::Result<ExitCode> {
                 skip_ollama,
                 color,
             };
-            run_doctor(&cli.config, args).await
+            run_doctor(&config_path, args).await
         }
         Command::Finalize {
             session_id,
             memory_key,
         } => {
-            run_finalize(&cli.config, &session_id, memory_key.as_deref()).await?;
+            run_finalize(&config_path, &session_id, memory_key.as_deref()).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::ImportGit { url } => {
+            let args = ImportGitArgs { url };
+            run_import_git(&config_path, args).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Service { action } => {
-            run_service(action, &cli.config).await?;
+            run_service(action, &config_path).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Audit { provider, dry_run } => {
@@ -203,7 +239,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 None => None,
             };
             let args = AuditArgs { provider, dry_run };
-            run_audit_cli(&cli.config, args).await?;
+            run_audit_cli(&config_path, args).await?;
             Ok(ExitCode::SUCCESS)
         }
     }

@@ -9,13 +9,14 @@ use serde::{Deserialize, Serialize};
 
 /// Outcome of a single doctor probe.
 ///
-/// `Warn` is reserved for REQUIRED-but-degradable infrastructure (the
-/// reranker): SMOS keeps serving requests without it, but the enrich
-/// pipeline runs in degraded mode (vector-order-only ranking), so a warning
-/// never fails the doctor run while still surfacing the quality drop to the
-/// operator. `Fail` always marks a missing hard dependency (an Ollama model,
-/// the binary, the database) and must be fixed before the operator proceeds
-/// with the smoke test.
+/// `Warn` covers infrastructure that is real but not on the chat hot path —
+/// for example, partial SurrealDB stats failures, or the Ollama
+/// connectivity / model-availability rows when the HTTP client itself
+/// cannot be constructed. These never block `smos serve` startup directly,
+/// so a warning keeps the doctor non-fatal for them while still surfacing
+/// the issue. `Fail` always marks a hard dependency — an Ollama model, the
+/// binary, the database, AND the reranker (every chat-completion request
+/// returns HTTP 503 while the reranker is down).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckStatus {
     Pass,

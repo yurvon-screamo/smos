@@ -32,10 +32,20 @@ pub enum UpstreamError {
     #[error("upstream serialization error: {0}")]
     SerializationError(String),
 
-    /// Every provider in an [`UpstreamConfig`] multi-provider list failed.
-    /// Carries the last provider's error message so the caller still sees a
-    /// meaningful cause; earlier errors are logged at `WARN` by the pool's
-    /// failover path before this variant is constructed.
+    /// Returned by `ReqwestUpstreamRouter::complete` when the named
+    /// provider is missing from the `[[providers]]` map. Should be
+    /// unreachable in practice (the routing layer validates the
+    /// person → provider reference at startup), but is retained for
+    /// defensive depth: a hot config edit could otherwise produce a
+    /// confusing 404-from-the-upstream instead of a clear 502.
+    ///
+    /// Historically this variant was constructed by the round-robin /
+    /// failover pool's failover path when every configured provider
+    /// failed; the new per-person router does not exercise that path,
+    /// so the variant is now produced only by the unknown-provider
+    /// branch above. Kept (rather than removed) because the HTTP error
+    /// mapper still classifies it as 502 and the type is part of the
+    /// public API surface (`pub enum`).
     #[error("all upstream providers failed; last error: {0}")]
     AllProvidersFailed(String),
 }

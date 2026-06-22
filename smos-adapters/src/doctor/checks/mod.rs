@@ -44,7 +44,9 @@ fn try_build_http_client() -> Option<reqwest::Client> {
 
 /// Build the check-result rows emitted when the HTTP client itself could not
 /// be constructed. All probes share the same root cause, so the
-/// recommendation is identical.
+/// recommendation is identical. The reranker row is a FAIL (not a WARN)
+/// because the reranker is a hard dependency — every chat-completion request
+/// would return HTTP 503 until the TLS stack is fixed.
 fn http_client_unavailable_rows() -> Vec<CheckResult> {
     vec![
         CheckResult::warn(
@@ -57,14 +59,13 @@ fn http_client_unavailable_rows() -> Vec<CheckResult> {
             "HTTP client construction failed (TLS init error)",
         )
         .with_recommendation("verify rustls/native-tls setup and re-run"),
-        CheckResult::warn(
+        CheckResult::fail(
             llm_providers::RERANKER_CHECK_NAME,
             "HTTP client construction failed (TLS init error)",
         )
         .with_recommendation(
-            "reranker REQUIRED for production-quality enrichment — resolve \
-             TLS setup and re-run; without it the enrich pipeline runs in \
-             degraded mode (vector-order-only ranking)",
+            "resolve TLS setup and re-run; every chat-completion request fails \
+             with HTTP 503 while the reranker is unreachable",
         ),
     ]
 }
@@ -182,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn http_client_unavailable_rows_emit_three_warn_results_with_hints() {
+    fn http_client_unavailable_rows_emit_two_warn_one_fail_with_hints() {
         let rows = http_client_unavailable_rows();
         assert_eq!(
             rows.len(),
@@ -200,18 +201,17 @@ mod tests {
             "Ollama hint must point at TLS setup"
         );
         assert_eq!(rows[1].name, "Ollama connectivity (embedding)");
-        assert_eq!(
-            rows[2].name,
-            "Reranker (REQUIRED for production-quality enrichment)"
-        );
-        assert_eq!(rows[2].status, CheckStatus::Warn);
+        assert_eq!(rows[2].name, "Reranker");
+        // Reranker is a hard dependency — TLS init failure must FAIL, not
+        // WARN, because every chat-completion request would 503 without it.
+        assert_eq!(rows[2].status, CheckStatus::Fail);
         assert!(
             rows[2]
                 .recommendation
                 .as_deref()
                 .unwrap()
-                .contains("REQUIRED"),
-            "reranker is REQUIRED for production-quality enrichment, hint must say so"
+                .contains("HTTP 503"),
+            "reranker is a hard dependency, hint must mention HTTP 503"
         );
     }
 }

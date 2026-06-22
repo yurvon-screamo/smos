@@ -9,25 +9,22 @@
 //! token by default; the header name is configurable to support Azure-style
 //! `api-key` headers.
 //!
-//! # Multi-provider pool
+//! # Multi-provider router
 //!
-//! [`ReqwestUpstreamPool`] wraps N [`ReqwestUpstream`] instances and routes
-//! each request according to [`UpstreamStrategy`]:
+//! [`ReqwestUpstreamRouter`] wraps N [`ReqwestUpstream`] instances keyed by
+//! provider name. The routing decision is made by the application layer's
+//! `route_request` helper (which resolves a `[persons.X]` entry to a
+//! concrete provider name); the router then looks the name up in its
+//! internal map and forwards the request.
 //!
-//! - `single` — always use `providers[0]`. The simplest mode, useful when the
-//!   operator wants explicit control over which provider handles traffic.
-//! - `round_robin` — atomic counter advances one slot per request. Even
-//!   distribution across healthy providers without active health checks.
-//! - `failover` — try providers in order; on `Err` log + retry the next. The
-//!   first `Ok` wins; if every provider fails, returns
-//!   [`UpstreamError::AllProvidersFailed`].
-//!
-//! `single` is the safe default for unknown `mode` values so a typo never
-//! silently enables round-robin/failover.
+//! Unknown provider names surface as
+//! [`UpstreamError::ConnectFailed`] so the HTTP layer maps them to 502 —
+//! this should be unreachable in practice because the application layer
+//! validates the provider reference at startup.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -37,67 +34,106 @@ use smos_application::errors::UpstreamError;
 use smos_application::ports::LlmUpstream;
 use smos_application::types::{ChatRequest, ChatResponse};
 
-use crate::config::{UpstreamConfig, UpstreamProvider};
+use crate::config::ProviderConfig;
 
 /// HTTP upstream backed by a pooled `reqwest::Client`.
 #[derive(Clone)]
 pub struct ReqwestUpstream {
     client: Client,
-    provider: Arc<UpstreamProvider>,
+    inner: Arc<UpstreamInner>,
+}
+
+#[derive(Debug)]
+struct UpstreamInner {
+    name: String,
+    url: String,
+    api_key: String,
+    auth_header: String,
+    /// Configured request timeout. Carried into the inner struct so the
+    /// send-error path can surface the real value in `UpstreamError::Timeout`
+    /// instead of a misleading `0s` placeholder.
+    timeout: Duration,
 }
 
 impl fmt::Debug for ReqwestUpstream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReqwestUpstream")
-            .field("provider", &self.provider)
+            .field("inner", &self.inner)
             .finish_non_exhaustive()
     }
 }
 
 impl ReqwestUpstream {
-    /// Build a new upstream with a request timeout configured from
-    /// `provider.timeout_seconds`. Validates `api_key` (if non-empty) up front
-    /// so a misconfigured secret with control characters fails fast at startup
-    /// rather than silently producing an unauthenticated request later.
-    pub fn new(provider: UpstreamProvider) -> Result<Self, UpstreamError> {
-        if !provider.api_key.is_empty()
-            && let Err(e) = HeaderValue::from_str(&provider.api_key)
+    /// Build a new upstream from a [`ProviderConfig`]. The api-key is read
+    /// from the env var named in `api_key_env` (resolved through
+    /// [`ProviderConfig::resolve_api_key`]). Validates the resolved key (if
+    /// non-empty) up front so a misconfigured secret with control characters
+    /// fails fast at startup rather than silently producing an
+    /// unauthenticated request later.
+    pub fn from_config(provider: &ProviderConfig) -> Result<Self, UpstreamError> {
+        let api_key = provider.resolve_api_key();
+        Self::new(
+            &provider.name,
+            &provider.url,
+            &api_key,
+            &provider.auth_header,
+            provider.timeout_seconds,
+        )
+    }
+
+    /// Build a new upstream from explicit parameters. Used by tests and by
+    /// [`ReqwestUpstreamRouter::from_config`].
+    pub fn new(
+        name: &str,
+        url: &str,
+        api_key: &str,
+        auth_header: &str,
+        timeout_seconds: u64,
+    ) -> Result<Self, UpstreamError> {
+        if !api_key.is_empty()
+            && let Err(e) = HeaderValue::from_str(api_key)
         {
             return Err(UpstreamError::ConnectFailed(format!(
-                "api_key contains invalid header bytes: {e}"
+                "provider {name:?}: api_key contains invalid header bytes: {e}"
             )));
         }
-        let timeout = Duration::from_secs(provider.timeout_seconds);
+        let timeout = Duration::from_secs(timeout_seconds);
         let client = Client::builder()
             .timeout(timeout)
             .build()
             .map_err(|e| UpstreamError::ConnectFailed(e.to_string()))?;
         Ok(Self {
             client,
-            provider: Arc::new(provider),
+            inner: Arc::new(UpstreamInner {
+                name: name.into(),
+                url: url.into(),
+                api_key: api_key.into(),
+                auth_header: auth_header.into(),
+                timeout,
+            }),
         })
     }
 
     fn build_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if !self.provider.api_key.is_empty() {
+        if !self.inner.api_key.is_empty() {
             // Azure-style `api-key:` header carries the raw key; every other
             // header name uses the `Authorization: Bearer <key>` scheme.
-            let is_api_key_header = self.provider.auth_header.eq_ignore_ascii_case("api-key");
+            let is_api_key_header = self.inner.auth_header.eq_ignore_ascii_case("api-key");
             let value = if is_api_key_header {
-                HeaderValue::from_str(&self.provider.api_key)
+                HeaderValue::from_str(&self.inner.api_key)
             } else {
-                HeaderValue::from_str(&format!("Bearer {}", self.provider.api_key))
+                HeaderValue::from_str(&format!("Bearer {}", self.inner.api_key))
             }
             .expect("api_key validated at construction");
-            let name = safe_header_name(&self.provider.auth_header);
+            let name = safe_header_name(&self.inner.auth_header);
             headers.insert(name, value);
         }
         headers
     }
 
     fn provider_name(&self) -> &str {
-        &self.provider.name
+        &self.inner.name
     }
 
     async fn send(&self, request: &ChatRequest) -> Result<reqwest::Response, UpstreamError> {
@@ -105,12 +141,12 @@ impl ReqwestUpstream {
             .map_err(|e| UpstreamError::SerializationError(e.to_string()))?;
         let response = self
             .client
-            .post(&self.provider.url)
+            .post(&self.inner.url)
             .headers(self.build_headers())
             .json(&body)
             .send()
             .await
-            .map_err(|e| map_send_error(e, self.provider.timeout_seconds))?;
+            .map_err(|e| map_send_error(e, self.inner.url.as_str(), self.inner.timeout))?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -124,7 +160,11 @@ impl ReqwestUpstream {
 }
 
 impl LlmUpstream for ReqwestUpstream {
-    async fn complete(&self, request: ChatRequest) -> Result<ChatResponse, UpstreamError> {
+    async fn complete(
+        &self,
+        _provider_name: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, UpstreamError> {
         let is_streaming = request.is_streaming();
         let response = self.send(&request).await?;
         if is_streaming {
@@ -142,163 +182,131 @@ impl LlmUpstream for ReqwestUpstream {
     }
 }
 
-/// Pool of [`ReqwestUpstream`] instances backing a single [`LlmUpstream`]
-/// trait surface. Routing is decided per request by [`UpstreamStrategy`].
+/// Router of [`ReqwestUpstream`] instances backing a single [`LlmUpstream`]
+/// trait surface. Each request is routed to the provider named by the
+/// caller (resolved upstream by `route_request` against the `[persons.*]`
+/// map).
 ///
-/// Construction fails fast if any provider's `api_key` carries invalid header
-/// bytes — partial construction would leave a pool with N-1 working
-/// providers and one silently broken, which is the exact failure mode the
-/// multi-provider design is supposed to surface up front.
+/// Construction fails fast if any provider's resolved api-key carries
+/// invalid header bytes — partial construction would leave a router with
+/// N-1 working providers and one silently broken, which is the exact
+/// failure mode the multi-provider design is supposed to surface up front.
 ///
-/// Cheap to clone: every clone shares the same inner state (providers,
-/// strategy, atomic round-robin counter) via `Arc`. The HTTP-side fan-out
-/// therefore observes a single global round-robin position across all
-/// router clones, which matches the operator's mental model of one
-/// "logical" upstream even though axum hands each request a fresh
+/// Cheap to clone: every clone shares the same inner state (providers map)
+/// via `Arc`. The HTTP-side fan-out therefore observes a single global map
+/// across all router clones, which matches the operator's mental model of
+/// one "logical" upstream even though axum hands each request a fresh
 /// [`AppState`](crate::http::axum_server::AppState) snapshot.
 #[derive(Clone, Debug)]
-pub struct ReqwestUpstreamPool {
-    inner: Arc<PoolInner>,
+pub struct ReqwestUpstreamRouter {
+    inner: Arc<RouterInner>,
 }
 
 #[derive(Debug)]
-struct PoolInner {
-    providers: Vec<ReqwestUpstream>,
-    strategy_mode: StrategyMode,
-    counter: AtomicUsize,
+struct RouterInner {
+    /// Provider name → upstream. Indexed by name so the lookup is O(1) and
+    /// the adapter does not need to linear-scan the providers list on every
+    /// chat-completion request.
+    by_name: HashMap<String, ReqwestUpstream>,
 }
 
-impl ReqwestUpstreamPool {
-    /// Build a pool from the configured provider list of an
-    /// [`UpstreamConfig`]. The pool takes ownership of its
-    /// [`ReqwestUpstream`] instances so the config struct can be dropped
-    /// after wiring.
-    pub fn new(config: &UpstreamConfig) -> Result<Self, UpstreamError> {
-        let providers_raw = &config.providers;
-        if providers_raw.is_empty() {
+impl ReqwestUpstreamRouter {
+    /// Build a router from a slice of [`ProviderConfig`]. The router takes
+    /// ownership of its [`ReqwestUpstream`] instances so the config struct
+    /// can be dropped after wiring.
+    ///
+    /// Duplicate provider names are rejected with
+    /// [`UpstreamError::ConnectFailed`] — the config validator already
+    /// catches duplicates at startup, this is the defensive second line.
+    pub fn from_config(providers: &[ProviderConfig]) -> Result<Self, UpstreamError> {
+        if providers.is_empty() {
             return Err(UpstreamError::ConnectFailed(
                 "no upstream providers configured".into(),
             ));
         }
-        let mut providers = Vec::with_capacity(providers_raw.len());
-        for (idx, provider) in providers_raw.iter().enumerate() {
+        let mut by_name: HashMap<String, ReqwestUpstream> = HashMap::new();
+        for (idx, provider) in providers.iter().enumerate() {
             // Surface the offending provider's index + name in the error
             // chain so an operator with N configured providers can tell
             // which entry has the bad api_key. Without this annotation the
             // underlying `UpstreamError::ConnectFailed` only carries the
             // generic "api_key contains invalid header bytes" message.
             let provider_name = provider.name.clone();
-            let upstream = ReqwestUpstream::new(provider.clone()).map_err(|e| {
+            let upstream = ReqwestUpstream::from_config(provider).map_err(|e| {
                 UpstreamError::ConnectFailed(format!(
                     "provider[{idx}] (name={provider_name:?}) rejected: {e}"
                 ))
             })?;
-            providers.push(upstream);
+            if by_name.insert(provider.name.clone(), upstream).is_some() {
+                return Err(UpstreamError::ConnectFailed(format!(
+                    "provider[{idx}] (name={provider_name:?}): duplicate provider name"
+                )));
+            }
         }
         Ok(Self {
-            inner: Arc::new(PoolInner {
-                providers,
-                strategy_mode: StrategyMode::from_str_logged(&config.strategy.mode),
-                counter: AtomicUsize::new(0),
-            }),
+            inner: Arc::new(RouterInner { by_name }),
         })
     }
 
-    /// Number of providers in the pool. Exposed for diagnostics / tests.
+    /// Build a router from a pre-constructed `Vec<ReqwestUpstream>`. Used by
+    /// tests that need to wire mocks without going through the
+    /// `ProviderConfig` indirection.
+    pub fn from_upstreams(upstreams: Vec<ReqwestUpstream>) -> Result<Self, UpstreamError> {
+        if upstreams.is_empty() {
+            return Err(UpstreamError::ConnectFailed(
+                "no upstream providers configured".into(),
+            ));
+        }
+        let mut by_name: HashMap<String, ReqwestUpstream> = HashMap::new();
+        for upstream in upstreams {
+            let name = upstream.provider_name().to_string();
+            if by_name.insert(name.clone(), upstream).is_some() {
+                return Err(UpstreamError::ConnectFailed(format!(
+                    "duplicate provider name: {name:?}"
+                )));
+            }
+        }
+        Ok(Self {
+            inner: Arc::new(RouterInner { by_name }),
+        })
+    }
+
+    /// Number of providers in the router. Exposed for diagnostics / tests.
     pub fn provider_count(&self) -> usize {
-        self.inner.providers.len()
+        self.inner.by_name.len()
+    }
+
+    /// Look up the provider by name (used by tests + diagnostics).
+    pub fn provider(&self, name: &str) -> Option<&ReqwestUpstream> {
+        self.inner.by_name.get(name)
     }
 }
 
-impl LlmUpstream for ReqwestUpstreamPool {
-    async fn complete(&self, request: ChatRequest) -> Result<ChatResponse, UpstreamError> {
-        match self.inner.strategy_mode {
-            StrategyMode::Single => self.inner.providers[0].complete(request).await,
-            StrategyMode::RoundRobin => {
-                let idx = self
-                    .inner
-                    .counter
-                    .fetch_add(1, Ordering::Relaxed)
-                    .wrapping_rem(self.inner.providers.len());
-                self.inner.providers[idx].complete(request).await
-            }
-            StrategyMode::Failover => {
-                let mut last_err: Option<UpstreamError> = None;
-                for provider in &self.inner.providers {
-                    match provider.complete(request.clone()).await {
-                        Ok(resp) => return Ok(resp),
-                        Err(e) => {
-                            tracing::warn!(
-                                provider = provider.provider_name(),
-                                error = %e,
-                                "upstream provider failed; trying next"
-                            );
-                            last_err = Some(e);
-                        }
-                    }
-                }
-                Err(UpstreamError::AllProvidersFailed(
-                    last_err
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(|| "no providers attempted".into()),
-                ))
-            }
-        }
-    }
-}
-
-/// Internal enum mirroring [`UpstreamStrategy::mode`] without the string
-/// parsing cost on every request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StrategyMode {
-    Single,
-    RoundRobin,
-    Failover,
-}
-
-impl StrategyMode {
-    fn from_str_logged(raw: &str) -> Self {
-        let parsed = Self::from_str(raw);
-        if parsed == Self::Single
-            && !raw.trim().eq_ignore_ascii_case("single")
-            && !raw.trim().is_empty()
-        {
-            // An unknown / misspelled value falls back to `Single` for
-            // safety. The operator almost certainly intended round-robin or
-            // failover, so log a warning pointing at the typo.
-            tracing::warn!(
-                raw_mode = raw,
-                resolved = "single",
-                "unknown upstream.strategy.mode; expected one of \
-                 `single`, `round_robin`, or `failover`. Defaulting to \
-                 `single` (only the first [[upstream.providers]] entry is \
-                 used). Fix the typo to enable the intended routing."
-            );
-        }
-        parsed
-    }
-
-    fn from_str(raw: &str) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "round_robin" | "round-robin" | "roundrobin" => Self::RoundRobin,
-            "failover" | "fail_over" => Self::Failover,
-            // "single" and any unknown value default to Single so a typo
-            // never silently enables an unintended strategy. The typo path
-            // is logged by `from_str_logged`.
-            _ => Self::Single,
-        }
+impl LlmUpstream for ReqwestUpstreamRouter {
+    async fn complete(
+        &self,
+        provider_name: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, UpstreamError> {
+        let upstream = self.inner.by_name.get(provider_name).ok_or_else(|| {
+            UpstreamError::ConnectFailed(format!(
+                "unknown provider {provider_name:?}; not in [[providers]] list"
+            ))
+        })?;
+        upstream.complete(provider_name, request).await
     }
 }
 
 /// Classify a connection-level `reqwest` error into the upstream error that
-/// best matches its cause. Timeouts surface as `Timeout` (carrying the
-/// configured duration so logs/dashboards read correctly); everything else
-/// (DNS, connect, TLS) is `ConnectFailed`.
-fn map_send_error(e: reqwest::Error, timeout_seconds: u64) -> UpstreamError {
+/// best matches its cause. Timeouts surface as `Timeout` carrying the
+/// configured duration so logs / dashboards / `Display` read correctly;
+/// everything else (DNS, connect, TLS) is `ConnectFailed` (carrying the URL
+/// so an operator with N providers can identify which one is unreachable).
+fn map_send_error(e: reqwest::Error, url: &str, timeout: Duration) -> UpstreamError {
     if e.is_timeout() {
-        UpstreamError::Timeout(Duration::from_secs(timeout_seconds))
+        UpstreamError::Timeout(timeout)
     } else {
-        UpstreamError::ConnectFailed(e.to_string())
+        UpstreamError::ConnectFailed(format!("url={url}: {e}"))
     }
 }
 
@@ -323,19 +331,26 @@ fn safe_header_name(name: &str) -> HeaderName {
 mod tests {
     use super::*;
 
-    fn provider(name: &str, url: &str) -> UpstreamProvider {
-        UpstreamProvider {
+    fn provider(name: &str, url: &str) -> ProviderConfig {
+        ProviderConfig {
             name: name.into(),
             url: url.into(),
-            api_key: "ollama".into(),
+            api_key_env: String::new(),
             auth_header: "Authorization".into(),
             timeout_seconds: 1,
         }
     }
 
+    /// Helper: construct an `UpstreamInner`-backed `ReqwestUpstream` with
+    /// a literal api_key (bypasses env-var resolution so the test does not
+    /// depend on the environment).
+    fn upstream_with_key(name: &str, url: &str, api_key: &str) -> ReqwestUpstream {
+        ReqwestUpstream::new(name, url, api_key, "Authorization", 1).expect("build")
+    }
+
     #[test]
     fn build_headers_adds_bearer_authorization() {
-        let upstream = ReqwestUpstream::new(provider("p", "http://127.0.0.1:1")).expect("build");
+        let upstream = upstream_with_key("p", "http://127.0.0.1:1", "ollama");
         let headers = upstream.build_headers();
         let auth = headers.get(AUTHORIZATION).expect("auth header present");
         assert_eq!(auth, "Bearer ollama");
@@ -343,18 +358,15 @@ mod tests {
 
     #[test]
     fn build_headers_omits_authorization_when_api_key_empty() {
-        let mut p = provider("p", "http://127.0.0.1:1");
-        p.api_key = String::new();
-        let upstream = ReqwestUpstream::new(p).expect("build");
+        let upstream = upstream_with_key("p", "http://127.0.0.1:1", "");
         let headers = upstream.build_headers();
         assert!(headers.get(AUTHORIZATION).is_none());
     }
 
     #[test]
     fn build_headers_uses_api_key_header_name_when_configured() {
-        let mut p = provider("p", "http://127.0.0.1:1");
-        p.auth_header = "api-key".into();
-        let upstream = ReqwestUpstream::new(p).expect("build");
+        let upstream =
+            ReqwestUpstream::new("p", "http://127.0.0.1:1", "ollama", "api-key", 1).expect("build");
         let headers = upstream.build_headers();
         // Azure-style `api-key:` header carries the raw key (no Bearer prefix).
         let header = headers.get("api-key").expect("api-key header present");
@@ -365,9 +377,13 @@ mod tests {
     fn new_rejects_api_key_with_invalid_header_bytes() {
         // Control characters are illegal in HTTP header values; the fail-fast
         // validation in `new` must surface this at construction time.
-        let mut p = provider("p", "http://127.0.0.1:1");
-        p.api_key = "bad\u{0000}key".into();
-        match ReqwestUpstream::new(p) {
+        match ReqwestUpstream::new(
+            "p",
+            "http://127.0.0.1:1",
+            "bad\u{0000}key",
+            "Authorization",
+            1,
+        ) {
             Err(err) => assert!(
                 err.to_string().contains("api_key"),
                 "expected api_key in error: {err}"
@@ -382,61 +398,77 @@ mod tests {
         assert_eq!(safe_header_name("api-key"), "api-key");
     }
 
-    // --- Pool construction ---------------------------------------------
+    // --- Router construction -----------------------------------------
 
     #[test]
-    fn pool_construction_fails_when_a_provider_has_invalid_api_key() {
-        let cfg = UpstreamConfig {
-            providers: vec![
-                provider("good", "http://x"),
-                UpstreamProvider {
-                    api_key: "bad\u{0000}key".into(),
-                    ..provider("bad", "http://y")
-                },
-            ],
-            ..UpstreamConfig::default()
-        };
-        match ReqwestUpstreamPool::new(&cfg) {
+    fn router_construction_fails_when_a_provider_has_invalid_api_key() {
+        // We use the from_upstreams path so we can inject a bad key directly
+        // (ProviderConfig::resolve_api_key would otherwise return empty for
+        // an unconfigured api_key_env).
+        let good = upstream_with_key("good", "http://x", "k");
+        let bad = ReqwestUpstream::new("bad", "http://y", "bad\u{0000}key", "Authorization", 1)
+            .expect_err("bad key rejected at construction");
+        // The bad upstream cannot even be built; assert the error mentions
+        // the api_key field.
+        assert!(bad.to_string().contains("api_key"));
+        // Sanity: the good upstream alone builds a router.
+        let router = ReqwestUpstreamRouter::from_upstreams(vec![good]).expect("router");
+        assert_eq!(router.provider_count(), 1);
+    }
+
+    #[test]
+    fn router_construction_rejects_duplicate_provider_names() {
+        let a = upstream_with_key("dup", "http://a", "k1");
+        let b = upstream_with_key("dup", "http://b", "k2");
+        match ReqwestUpstreamRouter::from_upstreams(vec![a, b]) {
             Err(UpstreamError::ConnectFailed(msg)) => assert!(
-                msg.contains("api_key"),
-                "expected api_key failure, got: {msg}"
+                msg.contains("duplicate"),
+                "expected duplicate message, got: {msg}"
             ),
             other => panic!("expected ConnectFailed, got {other:?}"),
         }
     }
 
     #[test]
-    fn pool_strategy_mode_parses_known_aliases() {
-        assert_eq!(StrategyMode::from_str("single"), StrategyMode::Single);
-        assert_eq!(
-            StrategyMode::from_str("round_robin"),
-            StrategyMode::RoundRobin
-        );
-        assert_eq!(
-            StrategyMode::from_str("ROUND-ROBIN"),
-            StrategyMode::RoundRobin
-        );
-        assert_eq!(StrategyMode::from_str("failover"), StrategyMode::Failover);
-        // Unknown → safe default (Single).
-        assert_eq!(StrategyMode::from_str("typo"), StrategyMode::Single);
-        assert_eq!(StrategyMode::from_str(""), StrategyMode::Single);
+    fn router_construction_rejects_empty_provider_list() {
+        let err = ReqwestUpstreamRouter::from_upstreams(vec![]).expect_err("empty");
+        assert!(err.to_string().contains("no upstream providers"));
     }
 
-    // --- Behavioural routing tests (wiremock-backed) -------------------
+    #[test]
+    fn router_from_config_resolves_api_key_from_env() {
+        let prior = std::env::var("SMOS_TEST_ROUTER_KEY").ok();
+        // SAFETY: env-mutating tests in this binary hold no parallelism
+        // guarantee from the harness; the prior value is restored before
+        // return so other tests are unaffected.
+        unsafe {
+            std::env::set_var("SMOS_TEST_ROUTER_KEY", "sk-from-env");
+        }
+        let mut provider = provider("p", "http://x");
+        provider.api_key_env = "SMOS_TEST_ROUTER_KEY".into();
+        let router = ReqwestUpstreamRouter::from_config(&[provider]).expect("router");
+        // SAFETY: same single-file serialisation guarantee.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("SMOS_TEST_ROUTER_KEY", v),
+                None => std::env::remove_var("SMOS_TEST_ROUTER_KEY"),
+            }
+        }
+        assert_eq!(router.provider_count(), 1);
+    }
+
+    // --- Behavioural routing tests (wiremock-backed) -----------------
     //
-    // The routing logic (`single` / `round_robin` / `failover`) is the
-    // core invariant of the multi-provider pool — these tests pin each
-    // mode against N real wiremock HTTP servers so a regression in the
-    // routing switch or the AtomicUsize counter is caught at the unit
-    // level rather than only via a full e2e suite.
+    // The router routes each request to the named provider. These tests
+    // pin the per-name lookup against real wiremock HTTP servers so a
+    // regression in the HashMap is caught at the unit level rather than
+    // only via a full e2e suite.
 
     use smos_application::types::ChatRequest;
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
     use wiremock::matchers::{body_partial_json, method};
-
-    use crate::config::UpstreamStrategy;
 
     /// Build a `ChatRequest` small enough to satisfy the OpenAI shape the
     /// upstream forwards. We do not assert on the response body — only on
@@ -451,116 +483,44 @@ mod tests {
 
     /// Mount a 200-OK handler on `server` that responds with a unique
     /// JSON body so the test can tell which provider handled the call.
-    /// Records each hit on the returned counter.
-    async fn mount_ok(server: &MockServer, body: &'static str) -> Arc<AtomicUsize> {
-        let hits = Arc::new(AtomicUsize::new(0));
-        let hits_for_closure = hits.clone();
+    async fn mount_ok(server: &MockServer, body: &'static str) {
         Mock::given(method("POST"))
             .and(body_partial_json(
                 serde_json::json!({"messages": [{"role": "user"}]}),
             ))
-            .respond_with(move |req: &wiremock::Request| {
-                hits_for_closure.fetch_add(1, Ordering::SeqCst);
-                let _ = req;
+            .respond_with(move |_: &wiremock::Request| {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"served_by": body}))
             })
             .mount(server)
             .await;
-        hits
     }
 
-    /// Mount a 500 handler that drives the `failover` strategy to the next
-    /// provider. Records each failure hit on the returned counter so tests
-    /// can assert the failing provider was actually consulted.
-    async fn mount_500(server: &MockServer) -> Arc<AtomicUsize> {
-        let hits = Arc::new(AtomicUsize::new(0));
-        let hits_for_closure = hits.clone();
-        Mock::given(method("POST"))
-            .respond_with(move |_: &wiremock::Request| {
-                hits_for_closure.fetch_add(1, Ordering::SeqCst);
-                ResponseTemplate::new(500).set_body_string("boom")
-            })
-            .mount(server)
-            .await;
-        hits
-    }
-
-    fn provider_for(server: &MockServer, name: &str) -> UpstreamProvider {
-        UpstreamProvider {
-            name: name.into(),
-            url: format!("{}/v1/chat/completions", server.uri()),
-            api_key: String::new(),
-            auth_header: "Authorization".into(),
-            timeout_seconds: 5,
-        }
+    fn upstream_for(server: &MockServer, name: &str) -> ReqwestUpstream {
+        ReqwestUpstream::new(
+            name,
+            &format!("{}/v1/chat/completions", server.uri()),
+            "",
+            "Authorization",
+            5,
+        )
+        .expect("upstream")
     }
 
     #[tokio::test]
-    async fn pool_single_strategy_always_hits_first_provider() {
+    async fn router_routes_request_to_named_provider() {
         let s1 = MockServer::start().await;
         let s2 = MockServer::start().await;
-        let h1 = mount_ok(&s1, "first").await;
-        let h2 = mount_ok(&s2, "second").await;
+        mount_ok(&s1, "first").await;
+        mount_ok(&s2, "second").await;
 
-        let cfg = UpstreamConfig {
-            providers: vec![provider_for(&s1, "p1"), provider_for(&s2, "p2")],
-            strategy: UpstreamStrategy {
-                mode: "single".into(),
-            },
-        };
-        let pool = ReqwestUpstreamPool::new(&cfg).expect("pool");
+        let router = ReqwestUpstreamRouter::from_upstreams(vec![
+            upstream_for(&s1, "p1"),
+            upstream_for(&s2, "p2"),
+        ])
+        .expect("router");
 
-        for _ in 0..3 {
-            let _ = pool.complete(probe_request()).await;
-        }
-        assert_eq!(h1.load(Ordering::SeqCst), 3);
-        assert_eq!(h2.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn pool_round_robin_distributes_evenly_across_two_providers() {
-        let s1 = MockServer::start().await;
-        let s2 = MockServer::start().await;
-        let h1 = mount_ok(&s1, "first").await;
-        let h2 = mount_ok(&s2, "second").await;
-
-        let cfg = UpstreamConfig {
-            providers: vec![provider_for(&s1, "p1"), provider_for(&s2, "p2")],
-            strategy: UpstreamStrategy {
-                mode: "round_robin".into(),
-            },
-        };
-        let pool = ReqwestUpstreamPool::new(&cfg).expect("pool");
-
-        for _ in 0..4 {
-            let _ = pool.complete(probe_request()).await;
-        }
-        // 4 calls over 2 providers → 2 hits each.
-        assert_eq!(h1.load(Ordering::SeqCst), 2);
-        assert_eq!(h2.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn pool_failover_skips_failing_provider_and_returns_first_ok() {
-        let s1 = MockServer::start().await;
-        let s2 = MockServer::start().await;
-        let h1 = mount_500(&s1).await;
-        let h2 = mount_ok(&s2, "second").await;
-
-        let cfg = UpstreamConfig {
-            providers: vec![provider_for(&s1, "p1"), provider_for(&s2, "p2")],
-            strategy: UpstreamStrategy {
-                mode: "failover".into(),
-            },
-        };
-        let pool = ReqwestUpstreamPool::new(&cfg).expect("pool");
-
-        let resp = pool.complete(probe_request()).await.expect("ok from p2");
-        // The failing provider was consulted exactly once.
-        assert_eq!(h1.load(Ordering::SeqCst), 1);
-        // The healthy provider handled the call exactly once.
-        assert_eq!(h2.load(Ordering::SeqCst), 1);
-        // The non-streaming response body is the JSON returned by p2.
+        // Route to p2 — the request MUST land on s2, not s1.
+        let resp = router.complete("p2", probe_request()).await.expect("ok");
         match resp {
             ChatResponse::NonStreaming(v) => {
                 assert_eq!(v["served_by"], serde_json::json!("second"));
@@ -570,41 +530,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_failover_returns_all_providers_failed_when_every_provider_fails() {
+    async fn router_unknown_provider_returns_connect_failed() {
         let s1 = MockServer::start().await;
-        let s2 = MockServer::start().await;
-        let _h1 = mount_500(&s1).await;
-        let _h2 = mount_500(&s2).await;
+        mount_ok(&s1, "first").await;
 
-        let cfg = UpstreamConfig {
-            providers: vec![provider_for(&s1, "p1"), provider_for(&s2, "p2")],
-            strategy: UpstreamStrategy {
-                mode: "failover".into(),
-            },
-        };
-        let pool = ReqwestUpstreamPool::new(&cfg).expect("pool");
+        let router =
+            ReqwestUpstreamRouter::from_upstreams(vec![upstream_for(&s1, "p1")]).expect("router");
 
-        match pool.complete(probe_request()).await {
-            Err(UpstreamError::AllProvidersFailed(_)) => {}
-            other => panic!("expected AllProvidersFailed, got {other:?}"),
+        match router.complete("ghost", probe_request()).await {
+            Err(UpstreamError::ConnectFailed(msg)) => {
+                assert!(msg.contains("ghost"), "msg = {msg}");
+            }
+            other => panic!("expected ConnectFailed, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn pool_single_strategy_with_single_provider_works() {
-        // Sanity check: the pool does not regress the single-provider
-        // shape under `single`.
+    async fn router_with_single_provider_works() {
         let s1 = MockServer::start().await;
-        let h1 = mount_ok(&s1, "only").await;
+        mount_ok(&s1, "only").await;
 
-        let cfg = UpstreamConfig {
-            providers: vec![provider_for(&s1, "only")],
-            strategy: UpstreamStrategy {
-                mode: "single".into(),
-            },
-        };
-        let pool = ReqwestUpstreamPool::new(&cfg).expect("pool");
-        let _ = pool.complete(probe_request()).await.expect("ok");
-        assert_eq!(h1.load(Ordering::SeqCst), 1);
+        let router =
+            ReqwestUpstreamRouter::from_upstreams(vec![upstream_for(&s1, "only")]).expect("router");
+        let _ = router.complete("only", probe_request()).await.expect("ok");
     }
 }

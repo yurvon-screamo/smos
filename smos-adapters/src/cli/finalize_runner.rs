@@ -1,16 +1,20 @@
 //! `smos finalize` — manual single-session drain trigger.
 //!
 //! Smoke-test entry point that drains one session's pending facts through
-//! the full NLI pipeline.
+//! the full NLI pipeline. After the drain completes (and only when
+//! `[git].repo_url` is set), the runner exports every accepted fact in
+//! each touched namespace to the configured git clone and commits + pushes
+//! so two SMOS instances can share memory through git.
 
 use anyhow::Result;
 
 use crate::SurrealStore;
 use crate::cli::tracing_setup::init_tracing_for_server;
 use crate::config::SmosConfig;
+use crate::git_sync::GitSyncManager;
 use smos_application::ports::FactRepository;
 use smos_application::use_cases::{FinalizeSession, FinalizeStats};
-use smos_domain::{MemoryKey, SessionId};
+use smos_domain::{Fact, MemoryKey, SessionId};
 
 /// Run a single `FinalizeSession` drain against `session_id_str` and exit.
 ///
@@ -71,8 +75,60 @@ pub async fn run_finalize(
 
     print_finalize_report(&aggregated, memory_keys.len());
 
+    // Git-sync: export accepted facts for every scanned namespace so the
+    // remote clone reflects the post-finalize state. The clone is opened
+    // lazily here (not in `run_server`) so `smos finalize` stays usable
+    // even when the server is not running. A git failure is logged but
+    // never fatal — the finalize itself already succeeded and the operator
+    // can re-run the export manually.
+    if !config.git.repo_url.trim().is_empty()
+        && let Err(e) = export_to_git(&config, &store, &memory_keys).await
+    {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            "git sync export failed; finalize result is still valid"
+        );
+    }
+
     tracing::info!(session = %session_id, "finalize trigger complete");
     Ok(())
+}
+
+/// Open the configured git clone and dump every accepted fact in
+/// `memory_keys` to disk, then commit + push. Called only when
+/// `[git].repo_url` is non-empty.
+async fn export_to_git(
+    config: &SmosConfig,
+    store: &SurrealStore,
+    memory_keys: &[MemoryKey],
+) -> Result<()> {
+    let mgr = GitSyncManager::open_or_clone(&config.git)?;
+    let facts = collect_accepted_facts(store, memory_keys).await?;
+    if facts.is_empty() {
+        tracing::info!("git sync: no accepted facts to export");
+        return Ok(());
+    }
+    mgr.export_facts(&facts)?;
+    let pushed = config.git.auto_push;
+    let message = format!("memory: sync {} facts", facts.len());
+    mgr.commit_and_push(&message)?;
+    tracing::info!(facts_exported = facts.len(), pushed, "git sync completed");
+    Ok(())
+}
+
+/// Gather every accepted fact across `memory_keys` for the export step.
+/// The watcher already ran FinalizeSession for the requested session, so
+/// any fact that has just crossed the accept threshold is included.
+async fn collect_accepted_facts(
+    store: &SurrealStore,
+    memory_keys: &[MemoryKey],
+) -> Result<Vec<Fact>> {
+    let mut all = Vec::new();
+    for mk in memory_keys {
+        let facts = FactRepository::list_accepted(store, mk).await?;
+        all.extend(facts);
+    }
+    Ok(all)
 }
 
 /// Resolve the memory_key set to scan. The explicit `--memory-key` path

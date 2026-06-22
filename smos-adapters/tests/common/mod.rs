@@ -20,9 +20,9 @@ use axum::Router;
 use serde_json::{Value, json};
 use smos_adapters::SystemClock;
 use smos_adapters::SystemIdGenerator;
-use smos_adapters::config::{ServerConfig, SmosConfig, UpstreamProvider};
+use smos_adapters::config::{ProviderConfig, ServerConfig, SmosConfig};
 use smos_adapters::http::axum_server::{AppState, build_router};
-use smos_adapters::upstream::ReqwestUpstreamPool;
+use smos_adapters::upstream::ReqwestUpstreamRouter;
 use smos_adapters::{LlamaCppReranker, OllamaEmbedding, OllamaExtractor, SurrealStore};
 use smos_application::ports::{Clock, FactRepository, IdGenerator};
 use smos_domain::{
@@ -44,18 +44,80 @@ data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\
 \n\
 data: [DONE]\n\n";
 
-/// Build an SMOS config whose upstream `[[upstream.providers]]` pool points
-/// at `upstream_base`.
+/// The canonical person name used by every passthrough / enrichment test.
+/// Tests that mount a person-specific mock MUST configure `[persons.origa]`
+/// via [`config_pointing_at`] / [`config_with_mocks`] so the routing layer
+/// can resolve `request.model = "origa"` to the test upstream.
+pub const TEST_PERSON: &str = "origa";
+/// Upstream model id the mock expects on the wire (after routing rewrites
+/// `request.model` from `"origa"` to this value).
+pub const TEST_UPSTREAM_MODEL: &str = "gpt-4o";
+
+/// Build an SMOS config whose `[[providers]]` array + `[persons.origa]` map
+/// route `request.model = "origa"` to the supplied `upstream_base`.
+#[allow(clippy::field_reassign_with_default)]
 pub fn config_pointing_at(upstream_base: &str) -> SmosConfig {
     let mut config = SmosConfig::default();
-    config.upstream.providers = vec![UpstreamProvider {
+    config.providers = vec![ProviderConfig {
         name: "test-upstream".into(),
         url: format!("{upstream_base}/v1/chat/completions"),
-        api_key: String::new(),
+        api_key_env: String::new(),
         auth_header: "Authorization".into(),
         timeout_seconds: 5,
     }];
+    // Route person `origa` to the test provider, expecting the upstream
+    // model `gpt-4o` on the wire. The legacy `parse_model("origa:gpt-4o")`
+    // shape is gone — the routing now happens via the persons map.
+    config.persons.insert(
+        TEST_PERSON.into(),
+        smos_adapters::config::PersonConfig {
+            provider: "test-upstream".into(),
+            model: TEST_UPSTREAM_MODEL.into(),
+            persona: String::new(),
+        },
+    );
     config.server = ServerConfig::default();
+    config
+}
+
+#[allow(clippy::field_reassign_with_default)]
+/// Build a SmosConfig whose adapter URLs point at the supplied wiremock
+/// servers. The default embedding dimensionality is 8 for fast fixture
+/// construction; tests that exercise vector search use the same dimension.
+///
+/// Extraction is DISABLED by default: enrichment-focused tests do not mount
+/// `/api/chat`, and an extraction attempt against the embeddings-only mock
+/// would otherwise retry (1 s + 2 s) on every request. Extraction tests build
+/// their own config with extraction enabled.
+pub fn config_with_mocks(
+    upstream_server: &MockServer,
+    ollama_server: &MockServer,
+    reranker_server: &MockServer,
+) -> SmosConfig {
+    let mut config = SmosConfig::default();
+    config.providers = vec![ProviderConfig {
+        name: "test-upstream".into(),
+        url: format!("{}/v1/chat/completions", upstream_server.uri()),
+        api_key_env: String::new(),
+        auth_header: "Authorization".into(),
+        timeout_seconds: 5,
+    }];
+    config.persons.insert(
+        TEST_PERSON.into(),
+        smos_adapters::config::PersonConfig {
+            provider: "test-upstream".into(),
+            model: TEST_UPSTREAM_MODEL.into(),
+            persona: String::new(),
+        },
+    );
+    config.llm_extraction.url = ollama_server.uri();
+    config.llm_extraction.timeout_seconds = 5;
+    config.embedding.url = ollama_server.uri();
+    config.embedding.timeout_seconds = 5;
+    config.reranker.url = reranker_server.uri();
+    config.reranker.timeout_seconds = 5;
+    config.server = ServerConfig::default();
+    config.server.enable_response_extraction = false;
     config
 }
 
@@ -108,7 +170,7 @@ pub async fn build_state(mut config: SmosConfig) -> Arc<AppState> {
     let store = SurrealStore::from_client(db);
     store.run_migrations().await.expect("migrations");
 
-    let upstream = ReqwestUpstreamPool::new(&config.upstream).expect("upstream pool");
+    let upstream = ReqwestUpstreamRouter::from_config(&config.providers).expect("upstream router");
     let embedder = OllamaEmbedding::new(Arc::new(config.embedding.clone())).expect("embedder");
     let reranker = LlamaCppReranker::new(Arc::new(config.reranker.clone())).expect("reranker");
     let extractor =
@@ -120,6 +182,12 @@ pub async fn build_state(mut config: SmosConfig) -> Arc<AppState> {
     let confidence_cfg = Arc::new(config.confidence.clone());
     let extraction_cfg = Arc::new(config.extraction.clone());
     let extraction_supervisor = smos_adapters::runtime::ExtractionSupervisor::new();
+
+    // Pre-build the IO-free routing views the handler reads. Tests use the
+    // same projection helper the production runner uses so the path stays
+    // covered.
+    let persons_view = Arc::new(build_person_view(&config.persons));
+    let providers_view = Arc::new(build_provider_view(&config.providers));
 
     let state = Arc::new(AppState {
         config: Arc::new(config),
@@ -135,9 +203,48 @@ pub async fn build_state(mut config: SmosConfig) -> Arc<AppState> {
         confidence_cfg,
         extraction_cfg,
         extraction_supervisor,
+        persons_view,
+        providers_view,
     });
     std::mem::forget(tmp);
     state
+}
+
+/// Project `smos_adapters::config::PersonConfig` into the IO-free
+/// [`PersonEntry`] view consumed by the routing layer. Mirrors the
+/// production helper in `cli::server_runner::build_person_view` so the
+/// test fixtures exercise the same code path.
+fn build_person_view(
+    persons: &std::collections::HashMap<String, smos_adapters::config::PersonConfig>,
+) -> std::collections::HashMap<String, smos_application::helpers::person_router::PersonEntry> {
+    persons
+        .iter()
+        .map(|(name, p)| {
+            (
+                name.clone(),
+                smos_application::helpers::person_router::PersonEntry {
+                    provider: p.provider.clone(),
+                    model: p.model.clone(),
+                    persona: p.persona.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Project `smos_adapters::config::ProviderConfig` into the IO-free
+/// [`ProviderEntry`] view.
+fn build_provider_view(
+    providers: &[smos_adapters::config::ProviderConfig],
+) -> Vec<smos_application::helpers::person_router::ProviderEntry> {
+    providers
+        .iter()
+        .map(
+            |p| smos_application::helpers::person_router::ProviderEntry {
+                name: p.name.clone(),
+            },
+        )
+        .collect()
 }
 
 /// Spawn SMOS with the supplied state on an ephemeral port; return its URL.
@@ -354,36 +461,4 @@ pub async fn seed_expired_fact(
     let id = fact.id().clone();
     FactRepository::save(store, &fact).await.expect("save fact");
     id
-}
-
-/// Build a SmosConfig whose adapter URLs point at the supplied wiremock
-/// servers. The default embedding dimensionality is 8 for fast fixture
-/// construction; tests that exercise vector search use the same dimension.
-///
-/// Extraction is DISABLED by default: enrichment-focused tests do not mount
-/// `/api/chat`, and an extraction attempt against the embeddings-only mock
-/// would otherwise retry (1 s + 2 s) on every request. Extraction tests build
-/// their own config with extraction enabled.
-pub fn config_with_mocks(
-    upstream_server: &MockServer,
-    ollama_server: &MockServer,
-    reranker_server: &MockServer,
-) -> SmosConfig {
-    let mut config = SmosConfig::default();
-    config.upstream.providers = vec![UpstreamProvider {
-        name: "test-upstream".into(),
-        url: format!("{}/v1/chat/completions", upstream_server.uri()),
-        api_key: String::new(),
-        auth_header: "Authorization".into(),
-        timeout_seconds: 5,
-    }];
-    config.llm_extraction.url = ollama_server.uri();
-    config.llm_extraction.timeout_seconds = 5;
-    config.embedding.url = ollama_server.uri();
-    config.embedding.timeout_seconds = 5;
-    config.reranker.url = reranker_server.uri();
-    config.reranker.timeout_seconds = 5;
-    config.server = ServerConfig::default();
-    config.server.enable_response_extraction = false;
-    config
 }

@@ -41,7 +41,7 @@ async fn cors_allow_origin_header_is_present_on_chat() {
         .post(format!("{smos}/v1/chat/completions"))
         .header("origin", "https://example.com")
         .header("access-control-request-method", "POST")
-        .json(&json!({"model": "m", "messages": []}))
+        .json(&json!({"model": "origa", "messages": []}))
         .send()
         .await
         .expect("send");
@@ -66,7 +66,7 @@ async fn upstream_500_propagates_as_502_bad_gateway() {
     let smos = spawn_smos(&upstream.uri()).await;
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
-        .json(&json!({"model": "m", "messages": []}))
+        .json(&json!({"model": "origa", "messages": []}))
         .send()
         .await
         .expect("send");

@@ -16,7 +16,8 @@
 //!|---------------------|----------------------------|--------------------------------|
 //! | `[surreal]`         | [`SurrealConfig`]          |                                |
 //! | `[server]`          | [`ServerConfig`]           |                                |
-//! | `[upstream]`        | [`UpstreamConfig`]         | Multi-provider via `[[upstream.providers]]`. |
+//! | `[[providers]]`     | [`ProviderConfig`]         | OpenAI-compatible LLM endpoints. |
+//! | `[persons.*]`       | [`PersonConfig`]           | LLM personas = memory keys.    |
 //! | `[llm_extraction]`  | [`LlmExtractionConfig`]    |                                |
 //! | `[embedding]`       | [`EmbeddingConfig`]        |                                |
 //! | `[reranker]`        | [`RerankerConfig`]         |                                |
@@ -29,6 +30,9 @@
 //! | `[extraction]`      | [`ExtractionConfig`]       | Re-exported from `smos-domain`.|
 //! | `[session]`         | [`SessionConfig`]          |                                |
 //! | `[audit]`           | [`AuditConfig`]            | Dreaming agent (LLM audit).    |
+//! | `[llama_cpp]`       | [`LlamaCppConfig`]         | Auto-launch `llama-server`     |
+//! |                     |                            | processes on `smos serve`.     |
+//! | `[git]`             | [`GitConfig`]              | Git-backed memory sync.        |
 
 use serde::{Deserialize, Serialize};
 pub use smos_domain::config::{
@@ -64,8 +68,8 @@ pub enum ConfigError {
 /// Sections that originate in `smos-domain` (`retrieval`, `merge`,
 /// `confidence`, `heat`, `nli`) are re-exported from this module so callers
 /// have a single import path. Sections that only make sense at the adapter
-/// boundary (`surreal`, `server`, `upstream`, `llm_extraction`, `embedding`,
-/// `reranker`, `session`) live here.
+/// boundary (`surreal`, `server`, `providers`, `persons`, `llm_extraction`,
+/// `embedding`, `reranker`, `session`) live here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SmosConfig {
     #[serde(default)]
@@ -74,8 +78,19 @@ pub struct SmosConfig {
     #[serde(default)]
     pub server: ServerConfig,
 
+    /// LLM chat-completion endpoints declared via `[[providers]]`. Each
+    /// entry is one OpenAI-compatible upstream (Ollama, OpenRouter, etc.).
+    /// The proxy forwards each request to exactly one provider, chosen by
+    /// the person → provider map (`[persons.*]`).
     #[serde(default)]
-    pub upstream: UpstreamConfig,
+    pub providers: Vec<ProviderConfig>,
+
+    /// LLM personas — the routing map. Each person is simultaneously a
+    /// memory key (the namespace under which extracted facts land) and a
+    /// routing entry (which provider to use, which upstream model, and
+    /// which persona `.md` to inject as the system message).
+    #[serde(default)]
+    pub persons: std::collections::HashMap<String, PersonConfig>,
 
     /// Provider-agnostic config for the fact-extraction LLM
     /// (`/api/chat`-style endpoint).
@@ -128,6 +143,22 @@ pub struct SmosConfig {
     /// never silently spends LLM tokens.
     #[serde(default)]
     pub audit: AuditConfig,
+
+    /// llama.cpp auto-launch. When enabled, `smos serve` spawns the configured
+    /// `llama-server` processes for embedding / reranker / extraction at
+    /// startup so the operator does not have to start them by hand. Each
+    /// section's `port` is probed first; an already-running service is
+    /// reused as-is.
+    #[serde(default)]
+    pub llama_cpp: crate::llama_server::LlamaCppConfig,
+
+    /// Git-backed memory sync. When `repo_url` is set, SMOS writes extracted
+    /// facts to a local clone of the repo as markdown files (frontmatter +
+    /// body) and commits + (optionally) pushes after every FinalizeSession.
+    /// The `smos import git <url>` subcommand reads the same layout back
+    /// into SurrealDB so two SMOS instances can share memory through git.
+    #[serde(default)]
+    pub git: GitConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,57 +180,72 @@ pub struct ServerConfig {
     pub log_format: String,
 }
 
-/// Upstream chat-completion proxy config.
-///
-/// Declares the provider pool via `[[upstream.providers]]` plus a routing
-/// [`UpstreamStrategy`]. A minimal config:
+/// One LLM chat-completion provider. Multiple providers can be declared via
+/// `[[providers]]`; the active one per request is chosen by the person →
+/// provider map (`[persons.*].provider`).
 ///
 /// ```toml
-/// [[upstream.providers]]
+/// [[providers]]
 /// name = "ollama-local"
 /// url = "http://localhost:11434/v1/chat/completions"
-/// api_key = "ollama"
-/// auth_header = "Authorization"
-/// timeout_seconds = 120
+/// api_key_env = ""        # env var name; empty = no auth header sent
 ///
-/// [upstream.strategy]
-/// mode = "single"   # or "round_robin" / "failover"
+/// timeout_seconds = 120   # optional, defaults to 120
+/// auth_header = "Authorization"  # optional, defaults to "Authorization"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct UpstreamConfig {
-    #[serde(default)]
-    pub providers: Vec<UpstreamProvider>,
-    #[serde(default)]
-    pub strategy: UpstreamStrategy,
-}
-
-/// One upstream LLM provider entry. Multiple providers can be declared via
-/// `[[upstream.providers]]`; the active one is chosen by
-/// [`UpstreamStrategy`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpstreamProvider {
-    /// Operator-facing identifier used in logs (`upstream failed, trying next:
-    /// <name>`). Defaults to the URL if omitted in TOML.
+pub struct ProviderConfig {
+    /// Operator-facing identifier referenced from `[persons.*].provider`.
+    /// MUST be unique within the `[[providers]]` array; a duplicate is a
+    /// config error surfaced by [`SmosConfig::validate`].
     pub name: String,
     /// Full chat-completions URL (with path).
     pub url: String,
+    /// Name of the environment variable that carries the API key. Empty
+    /// means "no auth" (suitable for local Ollama). Resolved at startup via
+    /// `std::env::var`, never written to disk. Keeping the env-var name
+    /// (rather than the literal key) follows the same secret-hygiene rule
+    /// as the dreaming agent's `${ENV_VAR}` placeholder.
     #[serde(default)]
-    pub api_key: String,
+    pub api_key_env: String,
+    /// Header name to carry the auth token. Defaults to `Authorization`
+    /// (OpenAI / Ollama). Override to `api-key` for Azure-style endpoints.
     #[serde(default = "default_auth_header")]
     pub auth_header: String,
-    #[serde(default = "default_upstream_timeout")]
+    /// Per-request HTTP timeout. Defaults to 120 s.
+    #[serde(default = "default_provider_timeout")]
     pub timeout_seconds: u64,
 }
 
-/// Routing strategy across [`UpstreamConfig::providers`].
+/// LLM persona — simultaneously a memory key and a routing entry.
+///
+/// Each person is the value of `request.model` on the wire: a client that
+/// wants persona `bob` sends `{"model": "bob", ...}`. The proxy resolves
+/// the person to:
+/// - a memory key (the person name, validated through `MemoryKey::from_raw`),
+/// - a provider (looked up by `provider` in the `[[providers]]` array),
+/// - an upstream model id (rewritten into `request.model` before forward),
+/// - an optional persona `.md` (loaded from `persona` and prepended to the
+///   system message).
+///
+/// ```toml
+/// [persons.bob]
+/// provider = "ollama-local"
+/// model = "granite4.1:3b"
+/// persona = "~/.smos/persons/bob.md"  # optional
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct UpstreamStrategy {
-    /// `"round_robin"` (default), `"failover"`, or `"single"`. Unknown values
-    /// fall back to `single` at the adapter call site so a typo never silently
-    /// enables an unintended strategy.
-    pub mode: String,
+pub struct PersonConfig {
+    /// Name of the provider entry (MUST match one `[[providers]].name`).
+    pub provider: String,
+    /// Upstream model id forwarded as `request.model`.
+    pub model: String,
+    /// Filesystem path to the persona `.md` file. The `~` prefix is expanded
+    /// to the user home directory at load time. Empty path = no persona
+    /// injection (the request is forwarded verbatim, the person name is
+    /// still used as the memory key).
+    #[serde(default)]
+    pub persona: String,
 }
 
 /// LLM fact-extraction endpoint config (provider-agnostic).
@@ -363,6 +409,42 @@ pub struct AuditConfig {
     pub report_dir: String,
 }
 
+/// Git-backed memory sync configuration.
+///
+/// When `repo_url` is non-empty, SMOS dual-writes extracted facts to a local
+/// clone of the repo as markdown files (one fact per `.md`, frontmatter +
+/// body) and commits + (optionally) pushes after every FinalizeSession. The
+/// layout is read back by `smos import git <url>` so two SMOS instances can
+/// share memory through git.
+///
+/// Empty `repo_url` disables sync — the section stays in the default config
+/// as documentation but no clone, commit, or push happens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitConfig {
+    /// Git repository URL. Private repos use the system's SSH credentials
+    /// (no inline tokens). Empty disables sync.
+    pub repo_url: String,
+    /// Branch to commit + push to. Defaults to `main`.
+    pub branch: String,
+    /// When `true`, `commit_and_push` runs `git push` after the commit. Off
+    /// by default — pushing is an opt-in side effect; the operator who
+    /// wants live remote sync flips this once `[git].repo_url` is wired up
+    /// and the credentials are verified working.
+    pub auto_push: bool,
+    /// Local clone path. `~` expands to the user home at load time. Defaults
+    /// to `~/.smos/git/memory` so the canonical SMOS home layout stays
+    /// self-contained.
+    pub local_path: String,
+    /// Disable GPG-signing the SMOS commits even when the operator's global
+    /// git config sets `commit.gpgsign = true`. Defaults to `true`: a SMOS
+    /// process running under a service account rarely has a configured GPG
+    /// agent, and a missing passphrase prompt would block `commit_and_push`
+    /// forever. Set to `false` to honour the operator's global signing
+    /// setting (requires the agent to be reachable from the SMOS process).
+    pub disable_gpg_sign: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Default impls
 // ---------------------------------------------------------------------------
@@ -382,18 +464,11 @@ impl Default for ServerConfig {
 
 impl Default for SurrealConfig {
     fn default() -> Self {
+        let paths = crate::paths::SmosPaths::resolve();
         Self {
-            path: "./data/smos.db".into(),
+            path: paths.db.join("smos.db").to_string_lossy().into_owned(),
             namespace: "smos".into(),
             database: "smos".into(),
-        }
-    }
-}
-
-impl Default for UpstreamStrategy {
-    fn default() -> Self {
-        Self {
-            mode: default_strategy_mode().into(),
         }
     }
 }
@@ -435,9 +510,10 @@ impl Default for RerankerConfig {
 
 impl Default for NliBackendConfig {
     fn default() -> Self {
+        let paths = crate::paths::SmosPaths::resolve();
         Self {
             model: "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli".into(),
-            cache_dir: "./data/nli_cache".into(),
+            cache_dir: paths.models.to_string_lossy().into_owned(),
         }
     }
 }
@@ -454,6 +530,7 @@ impl Default for SessionConfig {
 
 impl Default for AuditConfig {
     fn default() -> Self {
+        let paths = crate::paths::SmosPaths::resolve();
         Self {
             enabled: false,
             schedule: "0 3 * * *".into(),
@@ -465,7 +542,25 @@ impl Default for AuditConfig {
             local_url: "http://localhost:11434".into(),
             max_deletions_per_run: 50,
             max_merges_per_run: 100,
-            report_dir: "./reports".into(),
+            report_dir: paths.reports.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        let paths = crate::paths::SmosPaths::resolve();
+        Self {
+            repo_url: String::new(),
+            branch: "main".into(),
+            auto_push: false,
+            local_path: paths
+                .home
+                .join("git")
+                .join("memory")
+                .to_string_lossy()
+                .into_owned(),
+            disable_gpg_sign: true,
         }
     }
 }
@@ -478,28 +573,38 @@ fn default_auth_header() -> String {
     "Authorization".into()
 }
 
-fn default_upstream_timeout() -> u64 {
+fn default_provider_timeout() -> u64 {
     120
 }
 
-fn default_strategy_mode() -> &'static str {
-    "round_robin"
-}
-
 // ---------------------------------------------------------------------------
-// UpstreamConfig helpers
+// ProviderConfig helpers
 // ---------------------------------------------------------------------------
 
-impl UpstreamProvider {
-    /// Construct with the canonical defaults for the optional fields.
+impl ProviderConfig {
+    /// Construct with the canonical defaults for the optional fields. Used by
+    /// tests and by `smos init` when scaffolding a default config.
     pub fn new(name: &str, url: &str) -> Self {
         Self {
             name: name.into(),
             url: url.into(),
-            api_key: String::new(),
+            api_key_env: String::new(),
             auth_header: default_auth_header(),
-            timeout_seconds: default_upstream_timeout(),
+            timeout_seconds: default_provider_timeout(),
         }
+    }
+
+    /// Resolve the API key by reading the env var named in `api_key_env`.
+    /// Returns an empty string when `api_key_env` is empty (the "no auth"
+    /// case for local Ollama). A missing env var also yields an empty string
+    /// so a misconfigured `api_key_env` surfaces as an unauthenticated
+    /// request (visible as a 401 from the upstream) rather than a startup
+    /// panic.
+    pub fn resolve_api_key(&self) -> String {
+        if self.api_key_env.is_empty() {
+            return String::new();
+        }
+        std::env::var(&self.api_key_env).unwrap_or_default()
     }
 }
 
@@ -514,26 +619,33 @@ impl SmosConfig {
     /// file also fall back to their defaults via `#[serde(default)]`.
     ///
     /// Environment overrides use the `SMOS__` prefix and a `__` section
-    /// separator. For the multi-provider shape (`[[upstream.providers]]`),
-    /// the convenience env var `SMOS__UPSTREAM__API_KEY` is broadcast onto
-    /// every provider entry whose TOML `api_key` was left empty — so an
-    /// operator can keep all per-provider secrets out of the on-disk TOML
-    /// by writing `api_key = ""` next to each provider and exporting
-    /// `SMOS__UPSTREAM__API_KEY`. Per-provider overrides still work via
-    /// `SMOS__UPSTREAM__PROVIDERS__<idx>__API_KEY`.
+    /// separator.
     pub fn load(path: &str) -> Result<Self, ConfigError> {
         let mut builder = ::config::Config::builder();
         if std::path::Path::new(path).exists() {
             builder = builder.add_source(::config::File::with_name(path));
         }
         builder = builder.add_source(::config::Environment::with_prefix("SMOS").separator("__"));
-        let mut cfg: SmosConfig = builder.build()?.try_deserialize()?;
-        apply_env_api_key_to_providers(&mut cfg);
+        let cfg: SmosConfig = builder.build()?.try_deserialize()?;
         // Fail-fast on invalid config: an operator who ships a config with a
         // bad confidence range or a missing embedding dimension should hear
         // about it at startup, not on the first request that hits the broken
         // path. `validate` collects EVERY problem in one pass so a single
         // startup error is enough to fix a half-broken TOML.
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Load directly from a TOML string. Used by `smos init`'s self-test
+    /// so the canonical default config (shipped via `include_str!`) is
+    /// validated without going through the file system. Environment
+    /// overrides are NOT applied here — the caller already controls the
+    /// input verbatim.
+    pub fn load_from_str(toml: &str) -> Result<Self, ConfigError> {
+        let cfg: SmosConfig = ::config::Config::builder()
+            .add_source(::config::File::from_str(toml, ::config::FileFormat::Toml))
+            .build()?
+            .try_deserialize()?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -553,13 +665,20 @@ impl SmosConfig {
     /// - `llm_extraction.temperature` in `[0, 2]`.
     /// - `session.timeout_seconds > 0`.
     /// - `server.port > 0`.
-    /// - `reranker.url` non-empty (reranker is required for enrichment;
-    ///   the pipeline degrades to vector-order-only ranking when the URL
-    ///   is missing, so an operator who blanks the field gets a startup
+    /// - `retrieval.top_k_initial > 0` and `retrieval.top_k_final > 0`
+    ///   (a zero would either short-circuit the pipeline or surface as a
+    ///   mysterious HTTP 503 once the reranker is consulted).
+    /// - `reranker.url` non-empty (reranker is a hard dependency: every
+    ///   request fails with HTTP 503 while the URL is missing or the server
+    ///   is unreachable; an operator who blanks the field gets a startup
     ///   error instead of a silent quality drop).
-    /// - `upstream.providers` non-empty (the proxy needs at least one
-    ///   provider to forward chat completions to) and every provider carries
-    ///   a non-empty URL + non-zero timeout.
+    /// - `providers` non-empty (the proxy needs at least one provider to
+    ///   forward chat completions to) and every provider carries a non-empty
+    ///   URL + non-zero timeout + a unique name.
+    /// - Every `[persons.*].provider` MUST reference an existing
+    ///   `[[providers]].name` (a typo would surface as a 503 on the first
+    ///   request that uses the person; surfacing it at startup keeps the
+    ///   failure mode loud and immediate).
     /// - `nli.contradiction_threshold` in `[0, 1]`.
     /// - `merge.cosine_threshold` in `[-1, 1]`.
     /// - `audit.*` semantic checks — only enforced when `audit.enabled = true`
@@ -623,25 +742,29 @@ impl SmosConfig {
             errors.push("server.port must be > 0".into());
         }
 
+        if self.retrieval.top_k_final == 0 {
+            // `top_k_final == 0` would make `RerankProvider::rerank` return
+            // `Ok(vec![])` (the legitimate "nothing to do" path), which the
+            // fail-closed enrich pipeline converts into
+            // `ProviderError::InvalidResponse("reranker returned empty
+            // results")` → every chat-completion request fails with HTTP
+            // 503. Reject at startup so the operator hears about it as a
+            // config error, not as a mysterious 503.
+            errors.push("retrieval.top_k_final must be > 0".into());
+        }
+
+        if self.retrieval.top_k_initial == 0 {
+            errors.push("retrieval.top_k_initial must be > 0".into());
+        }
+
         if self.reranker.url.trim().is_empty() {
             errors.push(
                 "reranker.url must not be empty — reranker is required for enrichment".into(),
             );
         }
 
-        if self.upstream.providers.is_empty() {
-            errors.push("upstream.providers must not be empty".into());
-        }
-        for (i, p) in self.upstream.providers.iter().enumerate() {
-            if p.timeout_seconds == 0 {
-                errors.push(format!(
-                    "upstream.providers[{i}].timeout_seconds must be > 0"
-                ));
-            }
-            if p.url.is_empty() {
-                errors.push(format!("upstream.providers[{i}].url must not be empty"));
-            }
-        }
+        validate_providers(&self.providers, &mut errors);
+        validate_persons(&self.persons, &self.providers, &mut errors);
 
         if !(0.0..=1.0).contains(&self.nli.contradiction_threshold) {
             errors.push(format!(
@@ -710,67 +833,97 @@ impl SmosConfig {
     }
 }
 
-/// Apply `SMOS__UPSTREAM__API_KEY` to multi-provider entries.
+/// Validate the `[[providers]]` array in isolation.
 ///
-/// Reads the env var directly so the broadcast can detect "set but empty"
-/// vs "unset" reliably.
-///
-/// # Dual-path note
-///
-/// The `config` crate also sees `SMOS__UPSTREAM__API_KEY` and tries to map
-/// it to `upstream.api_key`. That field no longer exists on
-/// [`UpstreamConfig`] (the legacy single-provider shape was removed), so
-/// the `config` crate silently drops the value. This function then reads
-/// the env var a second time via [`std::env::var`] and broadcasts it onto
-/// every `[[upstream.providers]]` entry whose TOML `api_key == ""`. The
-/// double-read is intentional: per-provider env overrides
-/// (`SMOS__UPSTREAM__PROVIDERS__<idx>__API_KEY`) still flow through the
-/// `config` crate, while the convenience broadcast key flows through here.
-///
-/// Broadcast rule: when the env var is non-empty, every provider in
-/// `cfg.upstream.providers` whose TOML `api_key == ""` inherits the env
-/// value. Providers that already carry a non-empty TOML key keep theirs;
-/// a `tracing::warn!` is emitted in that case so the operator notices the
-/// env var was a no-op for those providers (likely a stale export).
-fn apply_env_api_key_to_providers(cfg: &mut SmosConfig) {
-    let Ok(env_key) = std::env::var("SMOS__UPSTREAM__API_KEY") else {
-        return;
-    };
-    if env_key.is_empty() {
+/// Pushed out of [`SmosConfig::validate`] so the body of `validate` stays
+/// readable. The same checks run whether the array came from TOML or from
+/// `SmosConfig::default` + programmatic edits (which is how the E2E helpers
+/// build a config).
+fn validate_providers(providers: &[ProviderConfig], errors: &mut Vec<String>) {
+    if providers.is_empty() {
+        errors.push("providers must not be empty".into());
         return;
     }
-    let mut any_skipped = false;
-    for provider in cfg.upstream.providers.iter_mut() {
-        if provider.api_key.is_empty() {
-            provider.api_key = env_key.clone();
-        } else {
-            any_skipped = true;
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (i, p) in providers.iter().enumerate() {
+        if p.timeout_seconds == 0 {
+            errors.push(format!("providers[{i}].timeout_seconds must be > 0"));
+        }
+        if p.url.is_empty() {
+            errors.push(format!("providers[{i}].url must not be empty"));
+        }
+        if p.name.is_empty() {
+            errors.push(format!("providers[{i}].name must not be empty"));
+            continue;
+        }
+        if !seen.insert(p.name.as_str()) {
+            errors.push(format!(
+                "providers[{i}].name = {:?} is duplicated; provider names must be unique",
+                p.name
+            ));
         }
     }
-    if any_skipped {
-        tracing::warn!(
-            env_var = "SMOS__UPSTREAM__API_KEY",
-            "the env-supplied upstream api_key was NOT applied to every \
-             [[upstream.providers]] entry because at least one provider already \
-             carries a non-empty `api_key` in TOML. Clear those entries \
-             (`api_key = \"\"`) to let the env var take effect, or remove \
-             the env var."
-        );
+}
+
+/// Validate the `[persons.*]` map. Each person MUST:
+/// - reference a provider that exists in the `[[providers]]` array,
+/// - declare a non-empty upstream model,
+/// - carry a name that is a valid `MemoryKey` (the name is used as the
+///   memory namespace at runtime — `[persons."a/b"]` would 400 every
+///   request because the router rejects path-traversal characters).
+///
+/// Surfacing these at startup matches the documented "loud and immediate"
+/// validation philosophy (see [`SmosConfig::validate`]).
+fn validate_persons(
+    persons: &std::collections::HashMap<String, PersonConfig>,
+    providers: &[ProviderConfig],
+    errors: &mut Vec<String>,
+) {
+    let provider_names: std::collections::HashSet<&str> =
+        providers.iter().map(|p| p.name.as_str()).collect();
+    for (name, person) in persons {
+        // Validate the person name as a MemoryKey. The router re-validates
+        // per request (defence in depth against programmatic edits), but a
+        // typo in the TOML key SHOULD surface at startup rather than as a
+        // 400 on the first request.
+        if let Err(e) = smos_domain::MemoryKey::from_raw(name) {
+            errors.push(format!(
+                "persons.{name:?}: invalid memory key — {e}. \
+                 Person names MUST satisfy the MemoryKey rules (alphanumeric \
+                 first char, no path separators, no '..')."
+            ));
+        }
+        if !provider_names.contains(person.provider.as_str()) {
+            errors.push(format!(
+                "persons.{name}.provider = {:?} does not match any [[providers]].name; \
+                 known providers: {{{}}}",
+                person.provider,
+                providers
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if person.model.is_empty() {
+            errors.push(format!("persons.{name}.model must not be empty"));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::collections::HashMap;
 
-    // Env vars are process-global; config tests that exercise `SMOS__*`
-    // overrides must not run concurrently with other config loads. A single
-    // module-level mutex serialises every config test for env-safety.
-    static CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
-
+    /// Acquire the workspace-wide env-test lock. See
+    /// [`crate::test_env_lock`] for why this is required.
     fn _lock() -> std::sync::MutexGuard<'static, ()> {
-        CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::test_env_lock::lock()
+    }
+
+    fn one_provider() -> ProviderConfig {
+        ProviderConfig::new("u", "http://u")
     }
 
     #[test]
@@ -779,31 +932,68 @@ mod tests {
         let cfg = SmosConfig::default();
         assert_eq!(cfg.server.port, 8888);
         assert_eq!(cfg.server.host, "127.0.0.1");
-        assert!(cfg.upstream.providers.is_empty());
+        assert!(cfg.providers.is_empty());
+        assert!(cfg.persons.is_empty());
         assert_eq!(cfg.surreal.namespace, "smos");
         assert_eq!(cfg.nli.contradiction_threshold, 0.5);
         assert_eq!(cfg.nli.entailment_threshold, 0.6);
         assert!(cfg.nli_backend.model.starts_with("MoritzLaurer/"));
-        assert_eq!(cfg.nli_backend.cache_dir, "./data/nli_cache");
         assert_eq!(cfg.llm_extraction.model, "qwen3.5:2b");
         assert_eq!(cfg.llm_extraction.seed, 42);
         assert_eq!(cfg.embedding.dimensions, 1024);
     }
 
+    /// The surreal + nli_backend defaults now anchor on `~/.smos` (or
+    /// `SMOS_HOME` when set). Pinned so a refactor that drops the
+    /// `SmosPaths::resolve` call from the default impl does not silently
+    /// regress to the legacy `./data` path.
+    #[test]
+    fn default_paths_are_anchored_on_smos_home() {
+        let _g = _lock();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let prior = std::env::var("SMOS_HOME").ok();
+        // SAFETY: this test holds `CONFIG_TEST_LOCK`, serialising every
+        // config test in this binary.
+        unsafe {
+            std::env::set_var("SMOS_HOME", tmp.path());
+        }
+        let cfg = SmosConfig::default();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("SMOS_HOME", v),
+                None => std::env::remove_var("SMOS_HOME"),
+            }
+        }
+        assert!(
+            cfg.surreal
+                .path
+                .starts_with(tmp.path().to_string_lossy().as_ref()),
+            "expected surreal.path under SMOS_HOME, got {}",
+            cfg.surreal.path
+        );
+        assert!(
+            cfg.nli_backend
+                .cache_dir
+                .starts_with(tmp.path().to_string_lossy().as_ref()),
+            "expected nli_backend.cache_dir under SMOS_HOME, got {}",
+            cfg.nli_backend.cache_dir
+        );
+    }
+
     #[test]
     fn load_missing_file_falls_back_to_defaults_then_fails_validation_on_empty_providers() {
-        // Defaults parse fine when the file is missing, but `load()` now
-        // runs `validate()` after parsing. The default config has
-        // `upstream.providers = []`, which violates the "must not be empty"
-        // rule — so the operator-facing result is a clear Validation error
-        // that points at the missing providers rather than a silent zero
-        // providers state that would only surface at the first request.
+        // Defaults parse fine when the file is missing, but `load()` runs
+        // `validate()` after parsing. The default config has `providers = []`,
+        // which violates the "must not be empty" rule — so the operator-
+        // facing result is a clear Validation error that points at the
+        // missing providers rather than a silent zero-providers state that
+        // would only surface at the first request.
         let _g = _lock();
         let result = SmosConfig::load("definitely-does-not-exist.toml");
         let err = result.expect_err("defaults without providers must fail validation");
         let msg = err.to_string();
         assert!(
-            msg.contains("upstream.providers must not be empty"),
+            msg.contains("providers must not be empty"),
             "expected validation message about empty providers, got: {msg}"
         );
     }
@@ -820,7 +1010,7 @@ mod tests {
         std::fs::write(
             tmp.path(),
             "[server]\nhost = \"0.0.0.0\"\nport = 9999\n\
-             [[upstream.providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n",
+             [[providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n",
         )
         .expect("write");
         let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse + validate");
@@ -837,8 +1027,7 @@ mod tests {
         let toml = "[surreal]\npath = \"./x.db\"\nnamespace = \"ns\"\ndatabase = \"db\"\n\
                     [server]\nhost = \"h\"\nport = 1\nshutdown_extraction_grace_seconds = 5\n\
                     enable_response_extraction = false\ngraceful_degradation = false\nlog_format = \"pretty\"\n\
-                    [[upstream.providers]]\nname = \"u\"\nurl = \"u\"\napi_key = \"k\"\nauth_header = \"api-key\"\ntimeout_seconds = 9\n\
-                    [upstream.strategy]\nmode = \"single\"\n\
+                    [[providers]]\nname = \"u\"\nurl = \"u\"\napi_key_env = \"SMOS_KEY\"\nauth_header = \"api-key\"\ntimeout_seconds = 9\n\
                     [llm_extraction]\nurl = \"http://llm:11434\"\nmodel = \"qwen\"\ntimeout_seconds = 11\n\
                     temperature = 0.2\nseed = 7\n\
                     [embedding]\nurl = \"http://embed:11434\"\nmodel = \"jina\"\ndimensions = 1024\ntimeout_seconds = 11\n\
@@ -861,10 +1050,10 @@ mod tests {
         assert_eq!(cfg.server.port, 1);
         assert!(!cfg.server.enable_response_extraction);
         assert_eq!(cfg.server.log_format, "pretty");
-        assert_eq!(cfg.upstream.providers.len(), 1);
-        assert_eq!(cfg.upstream.providers[0].auth_header, "api-key");
-        assert_eq!(cfg.upstream.providers[0].timeout_seconds, 9);
-        assert_eq!(cfg.upstream.strategy.mode, "single");
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers[0].auth_header, "api-key");
+        assert_eq!(cfg.providers[0].timeout_seconds, 9);
+        assert_eq!(cfg.providers[0].api_key_env, "SMOS_KEY");
         assert_eq!(cfg.surreal.path, "./x.db");
         assert_eq!(cfg.llm_extraction.url, "http://llm:11434");
         assert_eq!(cfg.llm_extraction.model, "qwen");
@@ -904,7 +1093,7 @@ mod tests {
         std::fs::write(
             tmp.path(),
             "[server]\nport = 7777\n\
-             [[upstream.providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n",
+             [[providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n",
         )
         .expect("write");
         let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse + validate");
@@ -923,131 +1112,102 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: SmosConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.server.port, cfg.server.port);
-        assert_eq!(back.upstream.providers.len(), cfg.upstream.providers.len());
+        assert_eq!(back.providers.len(), cfg.providers.len());
     }
 
-    // --- Upstream multi-provider behaviour ------------------------------
+    // --- Provider / person parsing -------------------------------------
 
+    /// The canonical `[[providers]]` + `[persons.X]` shape parses into the
+    /// two collections the routing layer expects.
     #[test]
-    fn upstream_strategy_default_is_round_robin() {
-        assert_eq!(default_strategy_mode(), "round_robin");
-        assert_eq!(UpstreamStrategy::default().mode, "round_robin");
-    }
-
-    /// Multi-provider TOML shape parses into `providers` + `strategy`.
-    #[test]
-    fn multi_provider_upstream_section_parses() {
+    fn providers_and_persons_section_parses() {
         let _g = _lock();
-        let toml = "[[upstream.providers]]\n\
+        let toml = "[[providers]]\n\
                     name = \"ollama-local\"\n\
                     url = \"http://localhost:11434/v1/chat/completions\"\n\
-                    api_key = \"ollama\"\n\
+                    api_key_env = \"\"\n\
                     auth_header = \"Authorization\"\n\
                     timeout_seconds = 120\n\
-                    [[upstream.providers]]\n\
+                    [[providers]]\n\
                     name = \"openrouter\"\n\
                     url = \"https://openrouter.ai/api/v1/chat/completions\"\n\
-                    api_key = \"sk-or-xxx\"\n\
+                    api_key_env = \"OPENROUTER_API_KEY\"\n\
                     timeout_seconds = 90\n\
-                    [upstream.strategy]\n\
-                    mode = \"failover\"\n";
+                    [persons.bob]\n\
+                    provider = \"ollama-local\"\n\
+                    model = \"granite4.1:3b\"\n\
+                    persona = \"~/.smos/persons/bob.md\"\n\
+                    [persons.alice]\n\
+                    provider = \"openrouter\"\n\
+                    model = \"z-ai/glm-5.2\"\n";
         let tmp = tempfile::Builder::new()
             .suffix(".toml")
             .tempfile()
             .expect("tempfile");
         std::fs::write(tmp.path(), toml).expect("write");
-        let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse");
-        let list = cfg.upstream.providers;
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].name, "ollama-local");
-        assert_eq!(list[1].name, "openrouter");
-        assert_eq!(list[1].api_key, "sk-or-xxx");
+        let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse + validate");
+        assert_eq!(cfg.providers.len(), 2);
+        assert_eq!(cfg.providers[0].name, "ollama-local");
+        assert_eq!(cfg.providers[1].name, "openrouter");
+        assert_eq!(cfg.providers[1].api_key_env, "OPENROUTER_API_KEY");
         // Second provider inherits the default `auth_header` since the TOML
         // omits it.
-        assert_eq!(list[1].auth_header, "Authorization");
-        assert_eq!(cfg.upstream.strategy.mode, "failover");
+        assert_eq!(cfg.providers[1].auth_header, "Authorization");
+
+        let bob = cfg.persons.get("bob").expect("person bob");
+        assert_eq!(bob.provider, "ollama-local");
+        assert_eq!(bob.model, "granite4.1:3b");
+        assert_eq!(bob.persona, "~/.smos/persons/bob.md");
+
+        let alice = cfg.persons.get("alice").expect("person alice");
+        assert_eq!(alice.provider, "openrouter");
+        assert_eq!(alice.model, "z-ai/glm-5.2");
+        assert_eq!(alice.persona, "", "persona defaults to empty");
     }
 
-    /// `SMOS__UPSTREAM__API_KEY` is broadcast onto every multi-provider
-    /// entry whose TOML `api_key == ""`, preserving the documented "secrets
-    /// out of TOML" contract.
+    /// `ProviderConfig::resolve_api_key` reads the env var named in
+    /// `api_key_env`. Empty `api_key_env` MUST yield an empty string (the
+    /// "no auth" case for local Ollama) instead of consulting any default
+    /// env var.
     #[test]
-    fn env_api_key_broadcasts_to_empty_provider_entries() {
+    fn resolve_api_key_reads_named_env_var() {
         let _g = _lock();
-        let toml = "[[upstream.providers]]\n\
-                    name = \"p1\"\n\
-                    url = \"http://p1\"\n\
-                    api_key = \"\"\n\
-                    [[upstream.providers]]\n\
-                    name = \"p2\"\n\
-                    url = \"http://p2\"\n\
-                    api_key = \"\"\n";
-        let tmp = tempfile::Builder::new()
-            .suffix(".toml")
-            .tempfile()
-            .expect("tempfile");
-        std::fs::write(tmp.path(), toml).expect("write");
-        let prior = std::env::var("SMOS__UPSTREAM__API_KEY").ok();
-        // SAFETY: this test holds `CONFIG_TEST_LOCK`, which serialises every
-        // config test in this binary.
-        unsafe {
-            std::env::set_var("SMOS__UPSTREAM__API_KEY", "sk-from-env");
-        }
-        let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse");
-        // SAFETY: same serialisation guarantee as above.
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("SMOS__UPSTREAM__API_KEY", v),
-                None => std::env::remove_var("SMOS__UPSTREAM__API_KEY"),
-            }
-        }
-        let providers = cfg.upstream.providers;
-        assert_eq!(providers.len(), 2);
-        assert_eq!(providers[0].api_key, "sk-from-env");
-        assert_eq!(providers[1].api_key, "sk-from-env");
-    }
-
-    /// Provider entries that already carry a non-empty TOML `api_key` keep
-    /// theirs and the env var does NOT silently overwrite them.
-    #[test]
-    fn env_api_key_does_not_overwrite_explicit_provider_key() {
-        let _g = _lock();
-        let toml = "[[upstream.providers]]\n\
-                    name = \"p1\"\n\
-                    url = \"http://p1\"\n\
-                    api_key = \"from-toml\"\n";
-        let tmp = tempfile::Builder::new()
-            .suffix(".toml")
-            .tempfile()
-            .expect("tempfile");
-        std::fs::write(tmp.path(), toml).expect("write");
-        let prior = std::env::var("SMOS__UPSTREAM__API_KEY").ok();
+        let prior = std::env::var("SMOS_TEST_PROVIDER_KEY").ok();
         // SAFETY: this test holds `CONFIG_TEST_LOCK`.
         unsafe {
-            std::env::set_var("SMOS__UPSTREAM__API_KEY", "sk-from-env");
+            std::env::set_var("SMOS_TEST_PROVIDER_KEY", "sk-from-env");
         }
-        let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse");
+        let provider = ProviderConfig {
+            name: "p".into(),
+            url: "http://p".into(),
+            api_key_env: "SMOS_TEST_PROVIDER_KEY".into(),
+            auth_header: "Authorization".into(),
+            timeout_seconds: 9,
+        };
+        assert_eq!(provider.resolve_api_key(), "sk-from-env");
         // SAFETY: same serialisation guarantee.
         unsafe {
             match prior {
-                Some(v) => std::env::set_var("SMOS__UPSTREAM__API_KEY", v),
-                None => std::env::remove_var("SMOS__UPSTREAM__API_KEY"),
+                Some(v) => std::env::set_var("SMOS_TEST_PROVIDER_KEY", v),
+                None => std::env::remove_var("SMOS_TEST_PROVIDER_KEY"),
             }
         }
-        let providers = cfg.upstream.providers;
-        assert_eq!(providers[0].api_key, "from-toml");
+
+        // Empty api_key_env MUST short-circuit to empty string.
+        let unauth = ProviderConfig {
+            api_key_env: String::new(),
+            ..provider
+        };
+        assert_eq!(unauth.resolve_api_key(), "");
     }
 
     // --- Legacy section guards -----------------------------------------
     //
-    // The legacy bridges (`apply_legacy_ollama_section`, `apply_nli_section_merge`,
-    // `UpstreamConfig::effective_providers`, etc.) were removed per the
-    // "old smos.toml configs MUST NOT work" contract. These tests pin the
-    // intentional behaviour: a TOML carrying legacy sections/fields still
-    // LOADS (serde has no `deny_unknown_fields`) but the legacy values
-    // NEVER affect the canonical config. A future engineer who re-adds a
-    // bridge will break one of these tests, which is the point — the
-    // intent is documented in code, not just in commit history.
+    // These tests pin the intentional behaviour: a TOML carrying legacy
+    // sections/fields still LOADS (serde has no `deny_unknown_fields`) but
+    // the legacy values NEVER affect the canonical config. A future engineer
+    // who re-adds a bridge will break one of these tests, which is the
+    // point — the intent is documented in code, not just in commit history.
 
     /// A leftover `[ollama]` section does NOT populate `[llm_extraction]` /
     /// `[embedding]`. The legacy fields are silently dropped at deserialize
@@ -1055,14 +1215,12 @@ mod tests {
     #[test]
     fn legacy_ollama_section_does_not_bridge_into_canonical_sections() {
         let _g = _lock();
-        // Include a provider so validation passes — the test focuses on the
-        // `[ollama]` legacy fields being dropped, not on provider semantics.
         let toml = "[ollama]\n\
                     url = \"http://legacy:11434\"\n\
                     embedding_model = \"legacy-embed\"\n\
                     extraction_model = \"legacy-extract\"\n\
                     timeout_seconds = 17\n\
-                    [[upstream.providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n";
+                    [[providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n";
         let tmp = tempfile::Builder::new()
             .suffix(".toml")
             .tempfile()
@@ -1086,12 +1244,10 @@ mod tests {
     #[test]
     fn nli_backend_section_is_canonical_and_does_not_touch_domain_thresholds() {
         let _g = _lock();
-        // Include a provider so validation passes — the test focuses on the
-        // layering invariant between `[nli_backend]` and `[nli]`.
         let toml = "[nli_backend]\n\
                     model = \"cross-encoder/nli-deberta-v3\"\n\
                     cache_dir = \"/var/cache/smos/nli\"\n\
-                    [[upstream.providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n";
+                    [[providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n";
         let tmp = tempfile::Builder::new()
             .suffix(".toml")
             .tempfile()
@@ -1109,11 +1265,7 @@ mod tests {
 
     /// Putting `model` (an adapter-only field) under `[nli]` MUST fail loudly
     /// at startup. `NliConfig` carries `#[serde(deny_unknown_fields)]` so the
-    /// parser rejects the misplacement instead of silently dropping it — the
-    /// explicit safety mechanism that justifies splitting the sections in
-    /// the first place. A future refactor that removes the attribute will
-    /// break this test, which is the point: the loud-failure contract is
-    /// pinned in CI, not just in code review.
+    /// parser rejects the misplacement instead of silently dropping it.
     #[test]
     fn nli_section_with_adapter_field_fails_loudly() {
         let _g = _lock();
@@ -1171,54 +1323,45 @@ mod tests {
     #[test]
     fn legacy_nli_sidecar_section_is_silently_ignored() {
         let _g = _lock();
-        // Include a provider so validation passes — the test focuses on
-        // `[nli_sidecar]` being silently dropped.
         let toml = "[nli_sidecar]\n\
                     python = \"python\"\n\
                     script = \"x.py\"\n\
                     cache_dir = \"./legacy\"\n\
-                    [[upstream.providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n";
+                    [[providers]]\nname = \"u\"\nurl = \"http://u\"\ntimeout_seconds = 9\n";
         let tmp = tempfile::Builder::new()
             .suffix(".toml")
             .tempfile()
             .expect("tempfile");
         std::fs::write(tmp.path(), toml).expect("write");
         let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse + validate");
-        assert_eq!(cfg.nli_backend.cache_dir, "./data/nli_cache");
+        // The default cache_dir is anchored on SMOS_HOME; the legacy value
+        // `./legacy` did NOT bleed through.
+        assert_ne!(cfg.nli_backend.cache_dir, "./legacy");
     }
 
-    /// The legacy single-provider shape (`[upstream].url` / `.api_key` /
-    /// `.auth_header` / `.timeout_seconds` at the top level of the
-    /// `[upstream]` section, with NO `[[upstream.providers]]` array) does
-    /// NOT synthesise a provider. `cfg.upstream.providers` stays empty and
-    /// the operator gets a startup error from `SmosConfig::validate`
-    /// ("upstream.providers must not be empty") instead of a silently
-    /// working legacy bridge.
+    /// The legacy `[[upstream.providers]]` array (now replaced by
+    /// `[[providers]]`) does NOT populate `cfg.providers`. The fields are
+    /// silently dropped at deserialize time and `cfg.providers` stays empty,
+    /// which the validator flags with the canonical "providers must not be
+    /// empty" error.
     #[test]
-    fn legacy_single_provider_upstream_fields_do_not_synthesise_a_provider() {
+    fn legacy_upstream_providers_section_does_not_bridge_into_providers() {
         let _g = _lock();
-        let toml = "[upstream]\n\
-                    url = \"http://legacy:11434/v1/chat/completions\"\n\
-                    api_key = \"ollama\"\n\
-                    auth_header = \"Authorization\"\n\
-                    timeout_seconds = 120\n";
+        let toml = "[[upstream.providers]]\n\
+                    name = \"legacy\"\n\
+                    url = \"http://legacy\"\n\
+                    api_key = \"legacy\"\n";
         let tmp = tempfile::Builder::new()
             .suffix(".toml")
             .tempfile()
             .expect("tempfile");
         std::fs::write(tmp.path(), toml).expect("write");
-        // Legacy fields at the top of `[upstream]` are silently dropped by
-        // serde (the canonical `UpstreamConfig` only has `providers` +
-        // `strategy`). The proof that NO provider was synthesised is the
-        // validation error: if synthesis had happened, validation would
-        // pass. The error message MUST point at "providers must not be
-        // empty" — anything else means a provider was created.
         let result = SmosConfig::load(tmp.path().to_str().unwrap());
-        let err = result.expect_err("legacy fields must NOT synthesise a provider");
+        let err = result.expect_err("legacy [[upstream.providers]] must NOT bridge");
         let msg = err.to_string();
         assert!(
-            msg.contains("upstream.providers must not be empty"),
-            "expected validation to flag empty providers (proof that no synthesis \
+            msg.contains("providers must not be empty"),
+            "expected validation to flag empty providers (proof that no bridge \
              happened); got: {msg}"
         );
     }
@@ -1232,9 +1375,7 @@ mod tests {
         // The minimum config that should pass validation: defaults + one
         // provider. Anchors the lower bound of what `smos serve` accepts.
         let mut cfg = SmosConfig::default();
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         assert!(cfg.validate().is_ok(), "default + 1 provider must validate");
     }
 
@@ -1242,9 +1383,7 @@ mod tests {
     fn validate_rejects_wrong_embedding_dimensions() {
         let mut cfg = SmosConfig::default();
         cfg.embedding.dimensions = 512;
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         let err = cfg.validate().expect_err("dimensions != 1024 must fail");
         let msg = err.to_string();
         assert!(msg.contains("embedding.dimensions"), "msg = {msg}");
@@ -1255,9 +1394,7 @@ mod tests {
     fn validate_rejects_confidence_out_of_range() {
         let mut cfg = SmosConfig::default();
         cfg.confidence.base = 1.5;
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         let err = cfg.validate().expect_err("base > 1 must fail");
         assert!(err.to_string().contains("confidence.base"));
     }
@@ -1267,9 +1404,7 @@ mod tests {
         let mut cfg = SmosConfig::default();
         cfg.confidence.accept_threshold = 0.3;
         cfg.confidence.pending_threshold = 0.5;
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         let err = cfg.validate().expect_err("accept < pending must fail");
         let msg = err.to_string();
         assert!(msg.contains("accept_threshold"), "msg = {msg}");
@@ -1281,17 +1416,17 @@ mod tests {
         let cfg = SmosConfig::default();
         let err = cfg.validate().expect_err("no providers must fail");
         assert!(
-            err.to_string()
-                .contains("upstream.providers must not be empty")
+            err.to_string().contains("providers must not be empty"),
+            "got: {err}"
         );
     }
 
     #[test]
     fn validate_rejects_provider_with_empty_url() {
         let mut cfg = SmosConfig::default();
-        let mut p = UpstreamProvider::new("u", "");
+        let mut p = ProviderConfig::new("u", "");
         p.timeout_seconds = 9;
-        cfg.upstream.providers.push(p);
+        cfg.providers.push(p);
         let err = cfg.validate().expect_err("empty url must fail");
         assert!(err.to_string().contains("url must not be empty"));
     }
@@ -1299,24 +1434,130 @@ mod tests {
     #[test]
     fn validate_rejects_provider_with_zero_timeout() {
         let mut cfg = SmosConfig::default();
-        let mut p = UpstreamProvider::new("u", "http://u");
+        let mut p = ProviderConfig::new("u", "http://u");
         p.timeout_seconds = 0;
-        cfg.upstream.providers.push(p);
+        cfg.providers.push(p);
         let err = cfg.validate().expect_err("zero timeout must fail");
         assert!(err.to_string().contains("timeout_seconds must be > 0"));
     }
 
     #[test]
+    fn validate_rejects_provider_with_empty_name() {
+        let mut cfg = SmosConfig::default();
+        let mut p = ProviderConfig::new("", "http://u");
+        p.timeout_seconds = 9;
+        cfg.providers.push(p);
+        let err = cfg.validate().expect_err("empty name must fail");
+        assert!(err.to_string().contains("name must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_provider_names() {
+        let mut cfg = SmosConfig::default();
+        cfg.providers.push(ProviderConfig::new("dup", "http://a"));
+        cfg.providers.push(ProviderConfig::new("dup", "http://b"));
+        let err = cfg.validate().expect_err("duplicate name must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("duplicated"), "msg = {msg}");
+        assert!(msg.contains("dup"), "msg = {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_person_referencing_unknown_provider() {
+        let mut cfg = SmosConfig::default();
+        cfg.providers.push(ProviderConfig::new("known", "http://a"));
+        let mut persons = HashMap::new();
+        persons.insert(
+            "bob".into(),
+            PersonConfig {
+                provider: "typo".into(),
+                model: "granite4.1:3b".into(),
+                persona: String::new(),
+            },
+        );
+        cfg.persons = persons;
+        let err = cfg.validate().expect_err("unknown provider must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("persons.bob.provider"), "msg = {msg}");
+        assert!(msg.contains("typo"), "msg = {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_person_with_empty_model() {
+        let mut cfg = SmosConfig::default();
+        cfg.providers.push(ProviderConfig::new("p", "http://a"));
+        let mut persons = HashMap::new();
+        persons.insert(
+            "bob".into(),
+            PersonConfig {
+                provider: "p".into(),
+                model: String::new(),
+                persona: String::new(),
+            },
+        );
+        cfg.persons = persons;
+        let err = cfg.validate().expect_err("empty model must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("persons.bob.model must not be empty"),
+            "msg = {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_person_with_unsafe_name_at_startup() {
+        // A person name with path-traversal characters fails MemoryKey
+        // validation. The startup validator MUST catch this so the
+        // operator hears about it before the first request hits the
+        // routing layer.
+        let mut cfg = SmosConfig::default();
+        cfg.providers.push(ProviderConfig::new("p", "http://a"));
+        let mut persons = HashMap::new();
+        persons.insert(
+            "a/b".into(),
+            PersonConfig {
+                provider: "p".into(),
+                model: "granite4.1:3b".into(),
+                persona: String::new(),
+            },
+        );
+        cfg.persons = persons;
+        let err = cfg
+            .validate()
+            .expect_err("unsafe person name must fail at startup");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid memory key"),
+            "expected 'invalid memory key' in msg, got: {msg}"
+        );
+        assert!(msg.contains("a/b"), "expected person name in msg: {msg}");
+    }
+
+    #[test]
+    fn validate_accepts_person_referencing_known_provider() {
+        let mut cfg = SmosConfig::default();
+        cfg.providers.push(ProviderConfig::new("p", "http://a"));
+        let mut persons = HashMap::new();
+        persons.insert(
+            "bob".into(),
+            PersonConfig {
+                provider: "p".into(),
+                model: "granite4.1:3b".into(),
+                persona: String::new(),
+            },
+        );
+        cfg.persons = persons;
+        assert!(cfg.validate().is_ok(), "valid person must validate");
+    }
+
+    #[test]
     fn validate_rejects_empty_reranker_url() {
-        // The reranker is REQUIRED for production-quality enrichment — an
-        // operator who blanks the URL must get a startup error pointing at
-        // the field instead of a silent quality drop to vector-order-only
-        // ranking.
+        // The reranker is a hard dependency — an operator who blanks the URL
+        // must get a startup error pointing at the field instead of
+        // discovering the dependency via an HTTP 503 on the first request.
         let mut cfg = SmosConfig::default();
         cfg.reranker.url = String::new();
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         let err = cfg.validate().expect_err("empty reranker url must fail");
         let msg = err.to_string();
         assert!(
@@ -1331,9 +1572,7 @@ mod tests {
         // `url = "   "` is treated identically to an empty string.
         let mut cfg = SmosConfig::default();
         cfg.reranker.url = "   ".into();
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         let err = cfg
             .validate()
             .expect_err("whitespace-only reranker url must fail");
@@ -1351,7 +1590,7 @@ mod tests {
         let err = cfg.validate().expect_err("multi-error case");
         let msg = err.to_string();
         assert!(msg.contains("embedding.dimensions"), "msg = {msg}");
-        assert!(msg.contains("upstream.providers"), "msg = {msg}");
+        assert!(msg.contains("providers must not be empty"), "msg = {msg}");
         assert!(
             msg.contains(";"),
             "multiple errors joined by ';' in msg = {msg}"
@@ -1362,13 +1601,13 @@ mod tests {
 
     #[test]
     fn audit_section_disabled_by_default() {
+        let _g = _lock();
         let cfg = SmosConfig::default();
         assert!(!cfg.audit.enabled, "audit must be off by default");
         assert_eq!(cfg.audit.schedule, "0 3 * * *");
         assert_eq!(cfg.audit.llm_provider, "cloud");
         assert_eq!(cfg.audit.max_deletions_per_run, 50);
         assert_eq!(cfg.audit.max_merges_per_run, 100);
-        assert_eq!(cfg.audit.report_dir, "./reports");
     }
 
     #[test]
@@ -1379,9 +1618,7 @@ mod tests {
         let mut cfg = SmosConfig::default();
         cfg.audit.enabled = false;
         cfg.audit.llm_provider = "garbage".into();
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         assert!(cfg.validate().is_ok(), "disabled audit must not validate");
     }
 
@@ -1390,9 +1627,7 @@ mod tests {
         let mut cfg = SmosConfig::default();
         cfg.audit.enabled = true;
         cfg.audit.llm_provider = "garbage".into();
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         let err = cfg.validate().expect_err("bad provider must fail");
         assert!(err.to_string().contains("audit.llm_provider"));
     }
@@ -1402,9 +1637,7 @@ mod tests {
         let mut cfg = SmosConfig::default();
         cfg.audit.enabled = true;
         cfg.audit.schedule = "   ".into();
-        cfg.upstream
-            .providers
-            .push(UpstreamProvider::new("u", "http://u"));
+        cfg.providers.push(one_provider());
         let err = cfg.validate().expect_err("empty schedule must fail");
         assert!(err.to_string().contains("audit.schedule"));
     }

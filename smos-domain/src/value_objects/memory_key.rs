@@ -8,8 +8,9 @@
 use crate::error::DomainError;
 use serde::{Deserialize, Serialize};
 
-/// A safe namespace for memories, parsed from the model prefix via the
-/// application-layer `parse_model` helper (`"origa:gpt-4o" → MemoryKey("origa")`).
+/// A safe namespace for memories. Resolved from the requested person name
+/// by the application-layer `route_request` helper
+/// (`request.model = "bob" → MemoryKey("bob")`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemoryKey(String);
 

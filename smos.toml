@@ -3,9 +3,15 @@
 #   cargo run --bin smos -- serve
 # Any section omitted here falls back to the built-in defaults in
 # smos-adapters/src/config.rs.
+#
+# This same file is installed verbatim under ~/.smos/config.toml by
+# `smos init` — re-running `smos init` is idempotent and NEVER overwrites an
+# existing config.
 
 [surreal]
-path = "./data/smos.db"
+# Defaults to ~/.smos/db/smos.db (resolved by SmosPaths at startup). Override
+# only when you need to point at a different RocksDB path.
+# path = "~/.smos/db/smos.db"
 namespace = "smos"
 database = "smos"
 
@@ -17,28 +23,55 @@ enable_response_extraction = true
 graceful_degradation = true
 log_format = "json"
 
-# Upstream LLM providers for chat completions (forward user requests).
-# Multiple providers supported — `single` (first only), `round_robin`
-# (default, even distribution), or `failover` (try next on error).
-[[upstream.providers]]
+# ---------------------------------------------------------------------------
+# Providers — OpenAI-compatible LLM chat-completion endpoints.
+# ---------------------------------------------------------------------------
+#
+# Each entry is one upstream (Ollama, OpenRouter, OpenAI, vLLM, …). The proxy
+# forwards every chat-completion request to exactly one provider, chosen by
+# the [persons.*] map. There is no round-robin / failover any more: routing
+# is per-person, not per-pool.
+
+[[providers]]
 name = "ollama-local"
 url = "http://localhost:11434/v1/chat/completions"
-api_key = "ollama"
-auth_header = "Authorization"
-timeout_seconds = 120
+api_key_env = ""                    # env var name; empty = no auth header sent
+# auth_header = "Authorization"     # default; set to "api-key" for Azure
+# timeout_seconds = 120             # default
 
-# Optional second provider (consulted under `mode = "failover"`).
-# [[upstream.providers]]
+# Example second provider. Uncomment and set OPENROUTER_API_KEY in the
+# environment to route `[persons.alice]`-style entries through OpenRouter.
+# [[providers]]
 # name = "openrouter"
 # url = "https://openrouter.ai/api/v1/chat/completions"
-# api_key = ""  # set SMOS__UPSTREAM__API_KEY to keep secrets out of TOML
-# auth_header = "Authorization"
-# timeout_seconds = 120
+# api_key_env = "OPENROUTER_API_KEY"
 
-[upstream.strategy]
-mode = "single"
+# ---------------------------------------------------------------------------
+# Persons — LLM personas = memory keys.
+# ---------------------------------------------------------------------------
+#
+# A person is simultaneously:
+#   - a memory key (the namespace under which extracted facts land),
+#   - a provider + upstream model (the routing target),
+#   - an optional persona .md (prepended to the request as a system message).
+#
+# Clients send `{"model": "<person-name>", ...}`; the proxy rewrites
+# `request.model` to the upstream model declared below before forwarding.
 
+[persons.bob]
+provider = "ollama-local"           # MUST match a [[providers]].name
+model = "granite4.1:3b"             # upstream model id
+persona = "~/.smos/persons/bob.md"  # optional; `~` expands to user home
+
+# Example second person.
+# [persons.alice]
+# provider = "openrouter"
+# model = "z-ai/glm-5.2"
+# persona = "~/.smos/persons/alice.md"
+
+# ---------------------------------------------------------------------------
 # LLM for fact extraction (Qwen3.5:2b or any Ollama-/OpenAI-compatible model).
+# ---------------------------------------------------------------------------
 [llm_extraction]
 url = "http://localhost:11434"           # API base (the adapter appends /api/chat)
 model = "qwen3.5:2b"
@@ -59,10 +92,11 @@ dimensions = 1024                          # MUST match the HNSW index DDL
 api_key = ""
 timeout_seconds = 30
 
-# Reranker (REQUIRED for production-quality enrichment).
+# Reranker — hard dependency.
 # The enrich pipeline reranks vector-search survivors via a cross-encoder
-# before injecting them into the request; without it the pipeline runs in
-# degraded mode (vector-order-only ranking) and logs a WARN on every request.
+# before injecting them into the request. If the reranker is unreachable
+# or returns an empty result, every chat-completion request fails with
+# HTTP 503 rather than silently shipping vector-order-only ranking.
 # Start the llama.cpp reranker server with a Qwen3-Reranker GGUF model:
 #   ./llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
 # The adapter expects an OpenAI-compatible /v1/rerank endpoint.
@@ -103,7 +137,8 @@ entailment_threshold = 0.6
 # parser rejects the misplacement instead of silently dropping it.
 [nli_backend]
 model = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
-cache_dir = "./data/nli_cache"
+# Defaults to ~/.smos/models; uncomment to override.
+# cache_dir = "~/.smos/models"
 
 # Semantic dedup safety net for fact extraction (persist_facts step 2).
 # When the extractor rephrases a fact just enough to break the FactId =
@@ -139,4 +174,49 @@ local_model = "granite4.1:3b"
 local_url = "http://localhost:11434"
 max_deletions_per_run = 50
 max_merges_per_run = 100
-report_dir = "./reports"
+# Defaults to ~/.smos/reports; uncomment to override.
+# report_dir = "~/.smos/reports"
+
+# ---------------------------------------------------------------------------
+# llama.cpp auto-launch.
+# ---------------------------------------------------------------------------
+#
+# When `auto_launch = true`, `smos serve` spawns the configured
+# `llama-server` processes at startup so the operator does not have to start
+# them by hand. Each service's port is probed first; an already-running
+# server is reused. Disable if you launch llama-server yourself or use a
+# remote / cloud provider.
+[llama_cpp]
+binary = "llama-server"
+auto_launch = false
+
+[llama_cpp.embedding]
+model_path = "~/.smos/models/jina-embeddings-v5.gguf"
+port = 8081
+extra_args = ["--ctx-size", "2048"]
+
+[llama_cpp.reranker]
+model_path = "~/.smos/models/qwen3-reranker.gguf"
+port = 8181
+extra_args = ["--ctx-size", "8192"]
+
+[llama_cpp.extraction]
+model_path = "~/.smos/models/qwen3.5-2b.gguf"
+port = 8082
+extra_args = ["--ctx-size", "4096"]
+
+# ---------------------------------------------------------------------------
+# Git-backed memory sync.
+# ---------------------------------------------------------------------------
+#
+# When `repo_url` is non-empty, SMOS dual-writes extracted facts to a local
+# clone of the repo as markdown files (one fact per .md) and commits + pushes
+# after every FinalizeSession. The layout is read back by
+# `smos import git <url>` so two SMOS instances can share memory through git.
+#
+# Empty `repo_url` disables sync; the local_path still works for offline use.
+[git]
+repo_url = ""
+branch = "main"
+auto_push = false
+local_path = "~/.smos/git/memory"

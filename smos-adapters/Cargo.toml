@@ -36,6 +36,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 # CLI argument parsing for the unified `smos` binary's subcommands.
 clap = { version = "4", features = ["derive"] }
+# TOML serializer/deserializer for the git-sync markdown frontmatter. The
+# `config` crate already pulls `toml` in transitively (via its `toml`
+# feature), but we declare it explicitly so the git-sync module has a stable
+# import path independent of the `config` crate's internal feature wiring.
+toml = "0.8"
+# Recursive directory walker for the git-sync import path. The std-only
+# alternative (`fs::read_dir` recursion) would re-implement the
+# deterministic-order traversal that `walkdir` already provides.
+walkdir = "2"
 
 # SMOS Dreaming Agent — autonomous memory audit via an LLM with tool-calling.
 # rig-core is pinned to the 0.14 line and stripped of its default reqwest

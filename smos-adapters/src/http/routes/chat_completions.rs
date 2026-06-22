@@ -4,7 +4,10 @@
 //! 1. Hand the request to `HandleChatCompletion`, which:
 //!    - parses `"memory_key:real_model"` and strips the prefix,
 //!    - detects / mints the session id from history,
-//!    - runs `EnrichRequest` (memory retrieval + injection, fail-open),
+//!    - runs `EnrichRequest` (memory retrieval + injection). Enrichment is
+//!      **fail-open** for embedder / vector-search / dedup (forwards the
+//!      original messages) and **fail-closed** for the reranker (provider
+//!      error or empty result → `UseCaseError::Provider(_)` → HTTP 503),
 //!    - forwards to the upstream.
 //! 2. Inject the session marker into the upstream response.
 //!    - Streaming → tunnel chunks 1:1 with the marker appended to the
@@ -57,6 +60,10 @@ pub async fn handle(
     let is_streaming = request.is_streaming();
     let enable_extraction = state.config.server.enable_response_extraction;
 
+    // The routing maps are pre-built once at startup (see AppState) and
+    // cloned via Arc here — no per-request HashMap/Vec allocation. If live
+    // config reload is added later, the Arc will need to be swapped
+    // atomically (e.g. via `ArcSwap`).
     let use_case = HandleChatCompletion {
         facts: state.store.clone(),
         sessions: state.store.clone(),
@@ -67,6 +74,8 @@ pub async fn handle(
         id_generator: FlatIdGenerator(state.id_generator.clone()),
         retrieval_cfg: state.retrieval_cfg.clone(),
         heat_cfg: state.heat_cfg.clone(),
+        persons: state.persons_view.clone(),
+        providers: state.providers_view.clone(),
     };
 
     let (response, session_id, memory_key) = match use_case.execute(request).await {

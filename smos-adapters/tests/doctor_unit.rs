@@ -2,10 +2,9 @@
 //!
 //! These tests cover ONLY pure helpers — model matching, formatting,
 //! aggregation, and end-to-end renderers. The IO entry points
-//! (Ollama / SurrealDB probes) are exercised manually during the
-//! smoke test (`docs/SMOKE_TEST.md`); automating them here would couple
-//! the suite to live external systems and violate the "tests stay fast"
-//! contract of the workspace.
+//! (Ollama / SurrealDB probes) are exercised manually via `smos doctor`;
+//! automating them here would couple the suite to live external systems
+//! and violate the "tests stay fast" contract of the workspace.
 
 use smos_adapters::doctor::terminal::ColorMode;
 use smos_adapters::doctor::{

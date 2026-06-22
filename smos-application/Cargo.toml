@@ -23,3 +23,5 @@ regex.workspace = true
 # The port-shape + use-case tests need a multi-thread runtime to drive the
 # async port traits and the extraction retry loop.
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# Used by helper unit tests that exercise persona loading against a temp file.
+tempfile = "3"

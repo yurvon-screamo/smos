@@ -1,8 +1,8 @@
-//! E2E: non-streaming marker injection, model parsing, session detection.
+//! E2E: non-streaming marker injection, person routing, session detection.
 
 mod common;
 
-use common::{chat_body, session_id_in, spawn_smos};
+use common::{TEST_PERSON, chat_body, session_id_in, spawn_smos};
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -29,7 +29,10 @@ async fn non_streaming_appends_marker_to_message_content() {
     json_upstream(&upstream).await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("origa:gpt-4o", vec![]);
+    // The test fixture configures `[persons.origa]`; the client sends the
+    // person name `origa` and the proxy rewrites `request.model` to the
+    // upstream model declared in the person entry.
+    let body = chat_body(TEST_PERSON, vec![]);
 
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
@@ -51,9 +54,12 @@ async fn non_streaming_appends_marker_to_message_content() {
 }
 
 #[tokio::test]
-async fn model_parsing_strips_memory_key_prefix_for_upstream() {
+async fn person_routing_rewrites_request_model_to_upstream_model() {
     let upstream = MockServer::start().await;
-    // The mock only matches when the forwarded body carries the stripped model.
+    // The mock only matches when the forwarded body carries the upstream
+    // model declared in `[persons.origa].model` (`gpt-4o`). A regression in
+    // the routing layer that forwards the raw person name would 404 the
+    // mock and the test would fail.
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(body_partial_json(json!({"model": "gpt-4o"})))
@@ -65,7 +71,7 @@ async fn model_parsing_strips_memory_key_prefix_for_upstream() {
         .await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("origa:gpt-4o", vec![]);
+    let body = chat_body(TEST_PERSON, vec![]);
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
         .json(&body)
@@ -76,34 +82,37 @@ async fn model_parsing_strips_memory_key_prefix_for_upstream() {
 }
 
 #[tokio::test]
-async fn model_without_colon_is_forwarded_unchanged() {
+async fn unknown_person_is_rejected_with_400() {
+    // The proxy no longer falls back to "no prefix → forward as-is". A
+    // model that does not match any `[persons.*]` entry is rejected at
+    // the routing layer with a 400 Bad Request pointing at the missing
+    // person — so the operator gets a clear error instead of a confusing
+    // 404 from the upstream.
     let upstream = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .and(body_partial_json(json!({"model": "gpt-4o"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
-        })))
-        .expect(1)
-        .mount(&upstream)
-        .await;
-
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("gpt-4o", vec![]);
+    let body = chat_body("not-a-person", vec![]);
+
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
         .json(&body)
         .send()
         .await
         .expect("send");
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 400);
+    let text = resp.text().await.expect("body");
+    assert!(
+        text.contains("unknown person"),
+        "expected body to mention 'unknown person', got: {text}"
+    );
 }
 
 #[tokio::test]
 async fn unsafe_memory_key_is_rejected_with_400() {
     let upstream = MockServer::start().await;
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("../etc:gpt-4o", vec![]);
+    // Path-traversal characters in a person name still fail MemoryKey
+    // validation, even before the persons map is consulted.
+    let body = chat_body("../etc", vec![]);
 
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
@@ -126,7 +135,7 @@ async fn session_detection_picks_up_marker_in_multipart_history() {
 
     let smos = spawn_smos(&upstream.uri()).await;
     let body = json!({
-        "model": "k:m",
+        "model": TEST_PERSON,
         "messages": [{
             "role": "assistant",
             "content": [

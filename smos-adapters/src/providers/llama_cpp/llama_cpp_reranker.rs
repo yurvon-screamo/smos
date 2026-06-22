@@ -6,10 +6,14 @@
 //! response carries a `results` array; each entry's `index` references the
 //! original `documents` slice so callers can map back to their source facts.
 //!
-//! HTTP-level failures are translated to `Ok(vec![])` (empty result) so the
-//! upstream `EnrichRequest` use case can apply its top-N-survivors fallback;
-//! only serialisation failures surface as `Err` (a code bug, not a transient
-//! outage).
+//! HTTP-level failures surface as `Err(ProviderError::…)` so the upstream
+//! `EnrichRequest` use case propagates them as `UseCaseError::Provider(_)`,
+//! which the HTTP handler maps to 503. See `enrich_request.rs` for the
+//! rationale. The ONLY `Ok(vec![])` paths are the legitimate "nothing to
+//! do" cases (empty `documents` slice, `top_k == 0`); a server that
+//! responded with zero results would return an empty `Vec` here and the
+//! use case converts that into
+//! `ProviderError::InvalidResponse("reranker returned empty results")`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -94,31 +98,28 @@ impl RerankProvider for LlamaCppReranker {
             documents,
             top_n: top_k,
         };
-        let response = match self.client.post(self.rerank_url()).json(&body).send().await {
-            Ok(r) => r,
-            Err(e) => {
+        let response = self
+            .client
+            .post(self.rerank_url())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
                 if e.is_timeout() {
-                    tracing::warn!(error = %e, "reranker timeout (fail-open: empty result)");
+                    ProviderError::Timeout(Duration::from_secs(self.config.timeout_seconds))
                 } else {
-                    tracing::warn!(error = %e, "reranker send failed (fail-open: empty result)");
+                    ProviderError::Unavailable(format!("reranker send failed: {e}"))
                 }
-                return Ok(Vec::new());
-            }
-        };
+            })?;
         if !response.status().is_success() {
-            tracing::warn!(
-                status = response.status().as_u16(),
-                "reranker non-2xx (fail-open: empty result)"
-            );
-            return Ok(Vec::new());
+            return Err(ProviderError::RequestFailed(format!(
+                "reranker returned HTTP {}",
+                response.status()
+            )));
         }
-        let parsed: RerankResponse = match response.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "reranker body decode failed (fail-open: empty result)");
-                return Ok(Vec::new());
-            }
-        };
+        let parsed: RerankResponse = response.json().await.map_err(|e| {
+            ProviderError::InvalidResponse(format!("reranker body decode failed: {e}"))
+        })?;
         Ok(materialise_results(parsed, documents, top_k))
     }
 }

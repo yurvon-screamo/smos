@@ -26,7 +26,7 @@ async fn streaming_passthrough_forwards_every_chunk() {
     streaming_upstream(&upstream, SSE_HELLO_WORLD).await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("origa:gpt-4o", vec![("stream", json!(true))]);
+    let body = chat_body("origa", vec![("stream", json!(true))]);
 
     let resp = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
@@ -50,7 +50,7 @@ async fn streaming_appends_marker_to_terminal_stop_chunk() {
     streaming_upstream(&upstream, SSE_HELLO_WORLD).await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("origa:gpt-4o", vec![("stream", json!(true))]);
+    let body = chat_body("origa", vec![("stream", json!(true))]);
 
     let raw = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
@@ -82,7 +82,7 @@ async fn streaming_marker_uses_new_session_when_history_has_none() {
     streaming_upstream(&upstream, SSE_HELLO_WORLD).await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("m", vec![("stream", json!(true))]);
+    let body = chat_body(common::TEST_PERSON, vec![("stream", json!(true))]);
 
     let raw = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
@@ -105,7 +105,7 @@ async fn streaming_reuses_session_id_from_history() {
     let smos = spawn_smos(&upstream.uri()).await;
     // History carries an existing marker the proxy must detect and reuse.
     let body = json!({
-        "model": "k:m",
+        "model": "origa",
         "stream": true,
         "messages": [
             {"role": "user", "content": "hi"},
@@ -139,7 +139,7 @@ data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
     streaming_upstream(&upstream, truncated).await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("m", vec![("stream", json!(true))]);
+    let body = chat_body(common::TEST_PERSON, vec![("stream", json!(true))]);
 
     let raw = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))
@@ -169,7 +169,7 @@ data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
     streaming_upstream(&upstream, body_text).await;
 
     let smos = spawn_smos(&upstream.uri()).await;
-    let body = chat_body("m", vec![("stream", json!(true))]);
+    let body = chat_body(common::TEST_PERSON, vec![("stream", json!(true))]);
 
     let raw = reqwest::Client::new()
         .post(format!("{smos}/v1/chat/completions"))

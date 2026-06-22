@@ -4433,11 +4433,13 @@ dependencies = [
  "tokenizers",
  "tokio",
  "tokio-cron-scheduler",
+ "toml",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "walkdir",
  "wiremock",
 ]
 
@@ -4451,6 +4453,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smos-domain",
+ "tempfile",
  "thiserror 2.0.18",
  "time",
  "tokio",

@@ -4,13 +4,25 @@
 //! to every port the pipeline needs (`FactRepository`, `SessionRepository`,
 //! `EmbeddingProvider`, `RerankProvider`, `Clock`).
 //!
-//! Output: an enriched messages array (with a `<smos-memory>` block prepended
-//! to the first message) or, on any recoverable failure, the original messages
-//! unchanged. The use case NEVER blocks a request because of memory
-//! unavailability (§12 fail-open) — that contract is enforced here, not in the
-//! port adapters, so callers cannot accidentally break it. The signature is
-//! infallible (`Vec<Value>`, not `Result`) precisely because every port-level
-//! error is already fail-open to the original messages inside `execute`.
+//! Output: `Ok(messages)` — an enriched messages array (with a `<smos-memory>`
+//! block prepended to the first message) or, on any recoverable failure, the
+//! original messages unchanged.
+//!
+//! # Fail-open vs fail-closed contract
+//!
+//! The pipeline is **fail-open** for every port EXCEPT the reranker: an
+//! embedder error, an empty vector-search result, a repo failure, or a
+//! dedup hiccup all degrade to forwarding the original messages so a flaky
+//! memory subsystem never breaks the user's chat. The reranker, however, is
+//! **fail-closed**: a provider error or an empty rerank result propagates as
+//! `Err(UseCaseError::Provider(_))` so the HTTP handler returns 503 instead
+//! of silently shipping vector-order-only ranking.
+//!
+//! `execute` therefore returns `Result<Vec<Value>, UseCaseError>`:
+//! - `Ok(messages)` — every fail-open path returns the (possibly enriched)
+//!   messages array. Callers may assign the result unconditionally.
+//! - `Err(UseCaseError::Provider(_))` — only the reranker. The handler maps
+//!   this to HTTP 503 "SMOS provider unavailable: …".
 //!
 //! # Pipeline (mirrors `smos-poc/smos/enrich.py::enrich_request`)
 //!
@@ -29,15 +41,13 @@
 //!      `[persona-...]` block will be added alongside a `PersonaRepository`
 //!      port; the domain builder already accepts `memory_key` for forward
 //!      compatibility.
-//! 8. Rerank survivors with the cross-encoder (REQUIRED for production
-//!    quality; an empty result or provider error degrades to top-N survivors
-//!    and logs at WARN — never silently).
-//! 9. Fallback to top-N survivors when reranking returned nothing
-//!    (degraded mode, logged at WARN).
-//! 10. Session dedup — drop facts already injected into this session.
-//! 11. Short-circuit when no new facts survived dedup.
-//! 12. Build the `<smos-memory>` block from the new facts.
-//! 13. Inject the block into the first message and return.
+//! 8. Rerank survivors with the cross-encoder. A provider error or an empty
+//!    result propagates as `Err(UseCaseError::Provider(_))` and the request
+//!    fails with HTTP 503.
+//! 9. Session dedup — drop facts already injected into this session.
+//! 10. Short-circuit when no new facts survived dedup.
+//! 11. Build the `<smos-memory>` block from the new facts.
+//! 12. Inject the block into the first message and return.
 
 use std::collections::HashSet;
 
@@ -45,6 +55,7 @@ use serde_json::Value;
 use smos_domain::config::{HeatConfig, RetrievalConfig};
 use smos_domain::{FactId, FactStatus, Heat, MemoryKey, SessionId, Timestamp};
 
+use crate::errors::{ProviderError, UseCaseError};
 use crate::helpers::memory_block::{self, MemoryBlockEntry};
 use crate::helpers::request_enricher;
 use crate::helpers::retrieval_planner::{self, RetrievalHit};
@@ -77,13 +88,13 @@ where
 {
     /// Run the enrichment pipeline.
     ///
-    /// Always returns a messages array (fail-open per §12). On any recoverable
-    /// failure the original `messages` are returned unchanged; the only way to
-    /// *lose* the original messages here would be a bug inside this function,
-    /// which the infallible signature makes impossible to express at the
-    /// type level. [`HandleChatCompletion`] therefore consumes the request's
-    /// messages via `std::mem::take` and assigns the enriched result back
-    /// unconditionally — no `Err` arm to forget to repopulate.
+    /// Returns `Ok(messages)` — the enriched array when enrichment succeeded,
+    /// or the original messages unchanged when any fail-open port short-
+    /// circuited (topic too short, embedder error, no vector hits, no
+    /// survivors, no new facts after dedup). The only `Err` path is the
+    /// reranker (§3 step 8): a provider error or an empty rerank result
+    /// propagates as [`UseCaseError::Provider`] so the HTTP handler maps it
+    /// to 503.
     ///
     /// # H-5 wire-shape preservation
     ///
@@ -106,7 +117,7 @@ where
         messages: Vec<Value>,
         memory_key: &MemoryKey,
         session_id: &SessionId,
-    ) -> Vec<Value> {
+    ) -> Result<Vec<Value>, UseCaseError> {
         // Read-only typed projection: used only for topic extraction here
         // (session-marker detection runs in `HandleChatCompletion`, which
         // also uses the read-only projection). NEVER re-serialised — the
@@ -125,7 +136,7 @@ where
                 chars = trimmed_len,
                 "enrichment skipped: topic below min_topic_chars"
             );
-            return messages;
+            return Ok(messages);
         }
 
         // Step 3 — embed. None and errors are both fail-open.
@@ -133,11 +144,11 @@ where
             Ok(Some(v)) => v,
             Ok(None) => {
                 tracing::warn!("embedder returned None; skipping enrichment (fail-open)");
-                return messages;
+                return Ok(messages);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "embedder error; skipping enrichment (fail-open)");
-                return messages;
+                return Ok(messages);
             }
         };
 
@@ -151,12 +162,12 @@ where
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!(error = %e, "vector search failed; skipping enrichment (fail-open)");
-                return messages;
+                return Ok(messages);
             }
         };
         if hits.is_empty() {
             tracing::info!(memory_key = %memory_key, "no vector hits; skipping enrichment");
-            return messages;
+            return Ok(messages);
         }
 
         // Step 5 — pre-filter + heat post-filter (pure domain).
@@ -165,32 +176,41 @@ where
 
         // Step 6 — short-circuit when no survivors remain.
         if survivors.is_empty() {
-            return messages;
+            return Ok(messages);
         }
 
         // Step 7 — heat boost. Best-effort: a failure here is logged but does
         // not abort enrichment (the rerank/dedup still works on stale heat).
         self.boost_heat(&survivors, memory_key, now).await;
 
-        // Step 8 — rerank. Step 9 — empty result falls back to top-N survivors.
-        let ranked_facts = self.rerank_survivors(&topic, &survivors).await;
+        // Step 8 — rerank. Fail-closed: a provider error or an empty result
+        // propagates as `UseCaseError::Provider(_)` so the HTTP handler
+        // returns 503. See the module docs for rationale.
+        let ranked_facts = self.rerank_survivors(&topic, &survivors).await?;
 
-        // Step 10 — short-circuit when reranking produced nothing usable.
+        // Step 9 — defensive guard: `rerank_survivors` already returns Err
+        // when the provider responds with zero results OR when none of the
+        // returned indices map back to survivors. The guard exists only so
+        // a future port implementation that produces an empty `Vec` through
+        // a different code path STILL honours the fail-closed contract
+        // rather than silently building an empty `<smos-memory>` block.
         if ranked_facts.is_empty() {
-            return messages;
+            return Err(UseCaseError::Provider(ProviderError::InvalidResponse(
+                "reranker returned no usable results".to_string(),
+            )));
         }
 
-        // Step 11 — session dedup (atomic via SessionRepository::dedup_and_mark).
+        // Step 10 — session dedup (atomic via SessionRepository::dedup_and_mark).
         let new_facts = self
             .dedup_against_session(&ranked_facts, session_id, memory_key)
             .await;
 
-        // Step 12 — short-circuit when no new facts survived dedup.
+        // Step 11 — short-circuit when no new facts survived dedup.
         if new_facts.is_empty() {
-            return messages;
+            return Ok(messages);
         }
 
-        // Step 13 — build memory block + inject via the JSON-path entry
+        // Step 12 — build memory block + inject via the JSON-path entry
         // point. `inject_value` operates on the raw `Value` and mutates
         // only `messages[0].content`, preserving every other per-message
         // field the typed DTO does not model (name, tool_call_id,
@@ -200,11 +220,11 @@ where
         let messages_value = Value::Array(messages);
         let enriched = request_enricher::inject_value(&messages_value, &block);
         match enriched {
-            Value::Array(arr) => arr,
+            Value::Array(arr) => Ok(arr),
             // Defensive: `inject_value` is documented to always echo the
             // input shape (array in → array out); anything else indicates
             // a domain bug.
-            other => vec![other],
+            other => Ok(vec![other]),
         }
     }
 
@@ -224,53 +244,39 @@ where
         }
     }
 
-    /// Rerank survivors with the cross-encoder; on empty result fall back to
-    /// the first `top_k_final` survivors in retrieval order (parity with POC
-    /// `enrich.py::_rerank_candidates` fallback branch).
+    /// Rerank survivors with the cross-encoder. Fail-closed: a provider
+    /// error or an empty result returns `Err` and the request fails with
+    /// HTTP 503 instead of silently shipping vector-order-only ranking.
     ///
-    /// The reranker is REQUIRED for production-quality enrichment (§3 step 8).
-    /// Both failure modes — `Err` from the provider and an empty `Vec` — fall
-    /// back to top-N survivors so the pipeline stays fail-open and never
-    /// blocks a request, but each branch logs at WARN with an explicit
-    /// "degraded mode" hint so an operator running without the reranker sees
-    /// the drop in retrieval quality in the logs rather than silently
-    /// shipping vector-order-only ranking.
-    async fn rerank_survivors(&self, topic: &str, survivors: &[RetrievalHit]) -> Vec<RetrievalHit> {
+    /// `Ok(_)` is only returned when the provider responded with at least
+    /// one reranked index that maps back to a survivor. An empty `Vec`
+    /// from the provider is treated identically to an `Err` — both
+    /// surface as [`ProviderError::InvalidResponse`] with an explicit
+    /// message so the operator sees a clear root cause in the 503 body.
+    async fn rerank_survivors(
+        &self,
+        topic: &str,
+        survivors: &[RetrievalHit],
+    ) -> Result<Vec<RetrievalHit>, ProviderError> {
         let documents: Vec<String> = survivors.iter().map(|s| s.document.clone()).collect();
-        let ranked = match self
+        let ranked = self
             .reranker
             .rerank(topic, &documents, self.retrieval_cfg.top_k_final)
             .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "reranker unavailable; using survivor fallback \
-                     (degraded mode) — check llama.cpp server"
-                );
-                return survivors
-                    .iter()
-                    .take(self.retrieval_cfg.top_k_final)
-                    .cloned()
-                    .collect();
-            }
-        };
+            .map_err(|e| {
+                tracing::error!(error = %e, "reranker unavailable; request will fail with 503");
+                e
+            })?;
         if ranked.is_empty() {
-            tracing::warn!(
-                "reranker returned empty results; using survivor fallback \
-                 (degraded mode) — verify the reranker model and query"
-            );
-            return survivors
-                .iter()
-                .take(self.retrieval_cfg.top_k_final)
-                .cloned()
-                .collect();
+            tracing::error!("reranker returned empty results; request will fail with 503");
+            return Err(ProviderError::InvalidResponse(
+                "reranker returned empty results".to_string(),
+            ));
         }
-        ranked
+        Ok(ranked
             .into_iter()
             .filter_map(|r| survivors.get(r.index).cloned())
-            .collect()
+            .collect())
     }
 
     /// Atomic dedup against the session's `injected_facts` set. Returns only

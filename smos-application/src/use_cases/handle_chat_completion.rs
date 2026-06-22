@@ -1,14 +1,21 @@
 //! `HandleChatCompletion` — top-level chat-completion use case (§3 + §4).
 //!
 //! Orchestrates the full request-side pipeline:
-//! 1. Parse `"memory_key:real_model"` and strip the prefix.
-//! 2. Detect the session id from the trailing 20 messages' markers (or mint a
-//!    fresh one).
-//! 3. Run [`EnrichRequest`] (memory retrieval + injection). Infallible: the
-//!    use case's fail-open contract is enforced at the type level, so the
-//!    original `messages` are always preserved (the request is forwarded
-//!    unchanged if any enrichment port misbehaves).
-//! 4. Forward the (possibly enriched) request to the LLM upstream.
+//! 1. Resolve the requested person via [`route_request`] and rewrite
+//!    `request.model` to the upstream model id. The person name becomes the
+//!    [`MemoryKey`] used by enrichment + extraction.
+//! 2. Inject the persona `.md` (if any) as the system message so the
+//!    upstream model reads it first.
+//! 3. Detect the session id from the trailing 20 messages' markers (or mint
+//!    a fresh one).
+//! 4. Run [`EnrichRequest`] (memory retrieval + injection). Fail-open for
+//!    every port EXCEPT the reranker: an embedder / vector-search / dedup
+//!    failure forwards the original messages unchanged, but a reranker
+//!    failure (provider error or empty result) propagates as
+//!    `Err(UseCaseError::Provider(_))` so the HTTP handler returns 503.
+//!    See [`EnrichRequest`] for the rationale.
+//! 5. Forward the (possibly enriched) request to the LLM upstream, naming
+//!    the provider that the person routes to.
 //!
 //! Slice-5 extraction is wired in the **adapter** layer (`http/`), not here.
 //! The application layer stays runtime-agnostic: `tokio::spawn` requires a
@@ -21,6 +28,7 @@
 //! Returns `(ChatResponse, SessionId, MemoryKey)` so the HTTP handler injects
 //! the session marker AND the adapter wires extraction with the right project.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -29,7 +37,10 @@ use smos_domain::config::{HeatConfig, RetrievalConfig};
 use smos_domain::{MemoryKey, SessionId};
 
 use crate::errors::UseCaseError;
-use crate::helpers::{model_parser, session_marker};
+use crate::helpers::person_router::{
+    PersonEntry, ProviderEntry, inject_persona_into_messages, load_persona_at, route_request,
+};
+use crate::helpers::session_marker;
 use crate::ports::{
     Clock, EmbeddingProvider, FactRepository, IdGenerator, LlmUpstream, RerankProvider,
     SessionRepository,
@@ -40,8 +51,10 @@ use crate::use_cases::enrich_request::EnrichRequest;
 /// Top-level chat-completion orchestration.
 ///
 /// Owns the ports the REQUEST-side pipeline needs (enrichment + upstream
-/// forwarding). Extraction ports live in `AppState` and are wired by the
-/// adapter — see the module docs for the layering rationale.
+/// forwarding) plus the routing maps (`persons`, `providers`) needed to
+/// resolve a requested person into a concrete upstream route. Extraction
+/// ports live in `AppState` and are wired by the adapter — see the module
+/// docs for the layering rationale.
 pub struct HandleChatCompletion<FR, SR, EP, RP, LU, C, IG> {
     pub facts: FR,
     pub sessions: SR,
@@ -52,6 +65,8 @@ pub struct HandleChatCompletion<FR, SR, EP, RP, LU, C, IG> {
     pub id_generator: IG,
     pub retrieval_cfg: Arc<RetrievalConfig>,
     pub heat_cfg: Arc<HeatConfig>,
+    pub persons: Arc<HashMap<String, PersonEntry>>,
+    pub providers: Arc<Vec<ProviderEntry>>,
 }
 
 impl<FR, SR, EP, RP, LU, C, IG> HandleChatCompletion<FR, SR, EP, RP, LU, C, IG>
@@ -73,9 +88,27 @@ where
         &self,
         mut request: ChatRequest,
     ) -> Result<(ChatResponse, SessionId, MemoryKey), UseCaseError> {
-        // Step 1 — parse model.
-        let (memory_key, real_model) = model_parser::parse_model(&request.model)?;
-        request.model = real_model;
+        // Step 1 — route the requested person to a (memory_key, provider,
+        // upstream_model, persona_path) tuple.
+        let route = route_request(&request.model, &self.persons, &self.providers)?;
+        let memory_key = route.memory_key;
+        request.model = route.upstream_model;
+        let provider_name = route.provider_name;
+
+        // Step 2 — inject the persona as the leading system message when the
+        // person declares one. The persona file is loaded synchronously
+        // here because: (a) persona `.md` files are tiny (<1 KB typical),
+        // (b) after the first access the page cache serves subsequent
+        // reads in microseconds, (c) an LLM proxy's request latency is
+        // dominated by the upstream round-trip (seconds), so the
+        // one-time cold-cache read on the first request is noise. The
+        // fail-soft contract (`None` on missing/unreadable file) preserves
+        // the proxy's overall availability story.
+        if let Some(persona_path) = route.persona_path
+            && let Some(persona_content) = load_persona_at(&persona_path)
+        {
+            inject_persona_into_messages(&mut request.messages, &persona_content);
+        }
 
         // H-5: build a *read-only* typed projection of the messages for
         // the helpers that need to introspect message content (session
@@ -90,7 +123,7 @@ where
         // vision workflows.
         let typed_projection = enrichment_messages_from_json(&request.messages);
 
-        // Step 2 — detect session from the typed projection. Falls back
+        // Step 3 — detect session from the typed projection. Falls back
         // to a freshly-minted id from the injected generator when no
         // marker survived in the trailing window. Generation goes
         // through the `IdGenerator` port so the domain's
@@ -99,39 +132,38 @@ where
         let session_id = session_marker::detect_from_typed_messages(&typed_projection)
             .unwrap_or_else(|| self.id_generator.new_session_id());
 
-        // Step 3 — enrichment (infallible fail-open). `EnrichRequest::
-        // execute` returns `Vec<Value>` directly: every port-level error
-        // already fail-opens to the original messages inside `execute`,
-        // so the type system rules out a future bug where an `Err` arm
-        // silently replaces the consumed `request.messages` with
-        // `Vec::new()`. We `mem::take` because the result is guaranteed
-        // to contain at least the original messages — no extra clone, no
-        // copy-back risk, no wire-shape loss.
+        // Step 4 — enrichment. Fail-open for embedder / vector-search / dedup
+        // (those return the original messages on `Ok`); fail-closed for the
+        // reranker (propagates as `Err(UseCaseError::Provider(_))` → HTTP
+        // 503). `std::mem::take` is safe because every `Ok` path returns at
+        // least the original messages — no `Vec::new()` replacement risk.
+        // The `?` propagates ONLY the reranker error to the handler; every
+        // other failure already fail-opened inside `execute`.
         let enriched_messages = self
             .enrich(
                 std::mem::take(&mut request.messages),
                 &memory_key,
                 &session_id,
             )
-            .await;
+            .await?;
         request.messages = enriched_messages;
 
-        // Step 4 — forward.
-        let response = self.upstream.complete(request).await?;
+        // Step 5 — forward.
+        let response = self.upstream.complete(&provider_name, request).await?;
         Ok((response, session_id, memory_key))
     }
 
-    /// Run `EnrichRequest` and return its result. With the infallible
-    /// `execute` signature there is no error to swallow — the §12 fail-open
-    /// contract is enforced inside `EnrichRequest::execute` (every port-level
-    /// error falls back to the original messages), so this is a thin wrapper
-    /// that exists only to keep `execute` readable.
+    /// Run `EnrichRequest` and propagate its `Result`. The only `Err` path
+    /// is the reranker ([`UseCaseError::Provider`]); every other port-level
+    /// failure already fail-opened inside `execute` and returned the
+    /// original messages. The wrapper exists only to keep `execute`
+    /// readable.
     async fn enrich(
         &self,
         messages: Vec<Value>,
         memory_key: &MemoryKey,
         session_id: &SessionId,
-    ) -> Vec<Value> {
+    ) -> Result<Vec<Value>, UseCaseError> {
         let enrich = EnrichRequest {
             facts: &self.facts,
             sessions: &self.sessions,

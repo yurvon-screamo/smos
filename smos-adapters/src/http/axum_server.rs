@@ -6,11 +6,13 @@
 //! `HandleChatCompletion`; the per-request use-case struct is built inline in
 //! the handler so this state remains flat and easy to assemble in tests.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
 use axum::routing::{get, post};
+use smos_application::helpers::person_router::{PersonEntry, ProviderEntry};
 use smos_application::ports::{Clock, IdGenerator};
 use smos_domain::config::{ConfidenceConfig, ExtractionConfig, HeatConfig, RetrievalConfig};
 use tower_http::cors::CorsLayer;
@@ -21,7 +23,7 @@ use crate::config::SmosConfig;
 use crate::http::routes;
 use crate::providers::{LlamaCppReranker, OllamaEmbedding, OllamaExtractor};
 use crate::runtime::ExtractionSupervisor;
-use crate::upstream::ReqwestUpstreamPool;
+use crate::upstream::ReqwestUpstreamRouter;
 
 /// Shared state handed to every handler via axum's `State` extractor.
 ///
@@ -37,7 +39,7 @@ pub struct AppState {
     pub reranker: LlamaCppReranker,
     /// Slice-5 response extractor (Ollama Qwen3.5-2B via `/api/chat`).
     pub extractor: OllamaExtractor,
-    pub upstream: ReqwestUpstreamPool,
+    pub upstream: ReqwestUpstreamRouter,
     pub clock: Arc<dyn Clock + Send + Sync>,
     /// Fresh session-id source. The domain's `SessionId::new()` constructor
     /// is `pub(crate)`; production wiring goes through this port so id
@@ -54,6 +56,16 @@ pub struct AppState {
     /// Tracks background extraction tasks so `serve` can drain them on
     /// shutdown (see `shutdown_extraction_grace_seconds`).
     pub extraction_supervisor: ExtractionSupervisor,
+    /// Cached projection of the persons map (`[persons.*]`) into the
+    /// IO-free [`PersonEntry`] view consumed by the routing layer. Built
+    /// once at startup so a chat-completion request does not pay the
+    /// per-request HashMap allocation cost. If live config reload is ever
+    /// added, this Arc must be replaced atomically (e.g. via `ArcSwap`).
+    pub persons_view: Arc<HashMap<String, PersonEntry>>,
+    /// Cached projection of the providers list (`[[providers]]`) into the
+    /// IO-free [`ProviderEntry`] view. Same lifecycle as
+    /// [`Self::persons_view`].
+    pub providers_view: Arc<Vec<ProviderEntry>>,
 }
 
 /// Build the router with both routes, conditional CORS, and HTTP tracing.
@@ -184,9 +196,9 @@ where
 /// signal so `axum::serve` stops accepting new connections and drains.
 ///
 /// Signal-handler setup errors are logged and the future returns without
-/// panicking — a missing Ctrl+C handler is a degraded mode (the proxy can
-/// still be killed via SIGKILL or `docker stop`), not a reason to crash
-/// the server we are trying to drain.
+/// panicking — a missing Ctrl+C handler is a graceful-shutdown regression
+/// (the proxy can still be killed via SIGKILL or `docker stop`), not a
+/// reason to crash the server we are trying to drain.
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = tokio::signal::ctrl_c().await {

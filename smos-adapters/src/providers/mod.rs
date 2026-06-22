@@ -5,22 +5,27 @@
 //! - [`llama_cpp`] implements `RerankProvider` against the llama.cpp
 //!   `/v1/rerank` endpoint.
 //!
-//! ## Fail-open layering
+//! ## Fail-open vs fail-closed layering
 //!
-//! Adapters translate HTTP-level failures into recoverable shapes
-//! (`Ok(None)` for embeddings, `Ok(vec![])` for rerank). This is a SECONDARY
-//! defense — the PRIMARY fail-open lives in the `EnrichRequest` use case
-//! (`smos-application/src/use_cases/enrich_request.rs`), which guards both
-//! `Ok(None)` / `Ok(vec![])` AND any `Err` a future adapter might emit. The
-//! adapter-level conversion exists so transient network blips do not even
-//! reach the use case's `Err` arm and so a buggy mock / upgraded server
-//! cannot inject a hard failure into the request path.
+//! The two adapters diverge deliberately:
 //!
-//! > **Note:** the use case MUST remain the source of truth for the fail-open
-//! > policy. Removing the use-case guards and relying solely on the adapter
-//! > behaviour would break the §12 contract — adapters are allowed to evolve
-//! > (e.g. start returning `Err` for quota errors) without breaking the
-//! > pipeline.
+//! - **Embeddings are fail-open.** The Ollama adapter translates HTTP-level
+//!   failures into `Ok(None)`. The `EnrichRequest` use case treats that as
+//!   "skip enrichment, forward the original messages" so a flaky embedder
+//!   never blocks a chat request.
+//! - **Reranker is fail-closed.** The llama.cpp adapter surfaces HTTP-level
+//!   failures as `Err(ProviderError::…)`, and the use case propagates that
+//!   as `Err(UseCaseError::Provider(_))` → HTTP 503. Silent vector-order-only
+//!   ranking is not exposed to the client. See
+//!   `smos-application/src/use_cases/enrich_request.rs` for the rationale.
+//!
+//! > **Note:** the use case is the source of truth for both policies. The
+//! > embedder's `Ok(None)` conversion exists so transient network blips do
+//! > not even reach the use case's `Err` arm; the reranker's `Err`
+//! > conversion exists so the 503 body carries the real root cause
+//! > ("reranker timeout after 60s" vs the generic "reranker returned empty
+//! > results" the use case emits when the server itself responds with
+//! > nothing).
 
 pub mod llama_cpp;
 pub mod noop;

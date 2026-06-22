@@ -100,15 +100,11 @@ mod tests {
             "url: http://localhost:11434\nmodels: 12",
         ));
         r.push(
-            CheckResult::warn(
-                "Reranker (REQUIRED for production-quality enrichment)",
-                "url: http://localhost:8181 unreachable",
-            )
-            .with_recommendation(
-                "reranker REQUIRED for production-quality enrichment — start the \
-                 llama.cpp reranker server; without it the enrich pipeline runs \
-                 in degraded mode (vector-order-only ranking)",
-            ),
+            CheckResult::fail("Reranker", "url: http://localhost:8181 unreachable")
+                .with_recommendation(
+                    "start the llama.cpp reranker server; every chat-completion \
+                     request fails with HTTP 503 while it is down",
+                ),
         );
         r.push(
             CheckResult::fail("granite4.1:3b", "model missing")
@@ -138,14 +134,16 @@ mod tests {
     fn markdown_summary_table_lists_every_check() {
         let md = render_markdown(&sample_report());
         assert!(md.contains("| smos binary | PASS |"));
-        assert!(md.contains("| Reranker (REQUIRED for production-quality enrichment) | WARN |"));
+        // Reranker is a hard dependency → FAIL when unreachable.
+        assert!(md.contains("| Reranker | FAIL |"));
         assert!(md.contains("| granite4.1:3b | FAIL |"));
     }
 
     #[test]
     fn markdown_summary_line_renders_totals() {
         let md = render_markdown(&sample_report());
-        assert!(md.contains("Result: 2/4 PASS, 1 WARN, 1 FAIL"));
+        // 2 PASS + 2 FAIL, 0 WARN after the reranker was promoted to FAIL.
+        assert!(md.contains("Result: 2/4 PASS, 0 WARN, 2 FAIL"));
     }
 
     #[test]
@@ -162,9 +160,7 @@ mod tests {
     fn markdown_recommendations_section_only_non_pass() {
         let md = render_markdown(&sample_report());
         assert!(md.contains("## Recommendations"));
-        assert!(
-            md.contains("Reranker (REQUIRED for production-quality enrichment): reranker REQUIRED")
-        );
+        assert!(md.contains("Reranker: start the llama.cpp reranker server"));
         assert!(md.contains("granite4.1:3b: ollama pull granite4.1:3b"));
         // Passing checks should not be echoed as recommendations.
         assert!(!md.contains("Recommendations\n- smos binary"));
