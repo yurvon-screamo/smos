@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 description = "SMOS adapter layer — concrete implementations of port traits."
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/smos-{ target }-v{ version }.{ archive-format }"
+pkg-fmt = "tgz"
+bin-dir = "smos{ binary-ext }"
+
 [dependencies]
 # Workspace-shared.
 smos-domain.workspace = true

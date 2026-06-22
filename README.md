@@ -32,6 +32,19 @@ SMOS builds on academic research in AI agent memory:
 
 - **[The Price of Meaning: Why Every Semantic Memory System Forgets](https://arxiv.org/html/2603.27116v1)** (2026) — shows interference is fundamental in semantic memory: every store that decides what to keep also decides what to lose. SMOS sidesteps this by preserving both sides of a contradiction and flagging them, instead of picking a winner.
 
+## Install
+
+```bash
+# Option 1: Install from source (compiles, ~15 min)
+cargo install --git https://github.com/yurvon-screamo/smos
+
+# Option 2: Prebuilt binary (after v0.1.0 release)
+cargo binstall smos
+
+# Option 3: npm
+npm install -g @yurvon-screamo/smos
+```
+
 ## Quick Start
 
 ### 1. Prerequisites
@@ -40,12 +53,26 @@ SMOS builds on academic research in AI agent memory:
 - **Ollama** running locally (`ollama serve`) — or any OpenAI-compatible cloud provider
 - **GPU** (recommended): Intel Arc, NVIDIA, or Apple Silicon
 
-### 2. Build
+### Install from source (quickest)
+
+```bash
+# Install directly from GitHub (compiles from source, ~15 min)
+cargo install --git https://github.com/yurvon-screamo/smos
+
+# With GPU support:
+cargo install --git https://github.com/yurvon-screamo/smos --features smos-adapters/nli-directml
+```
+
+Or build from a local clone:
 
 ```bash
 git clone https://github.com/yurvon-screamo/smos.git
 cd smos
+```
 
+### 2. Build
+
+```bash
 # Default build — CPU inference
 cargo build --release --bin smos
 
