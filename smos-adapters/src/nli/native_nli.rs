@@ -172,7 +172,6 @@ fn run_inference(
 
     let input_ids = encoding.get_ids();
     let attention_mask = encoding.get_attention_mask();
-    let token_type_ids = encoding.get_type_ids();
 
     let seq_len = input_ids.len();
     if seq_len == 0 {
@@ -190,26 +189,26 @@ fn run_inference(
     //    map+collect is the cheapest path.
     let input_ids_i64: Vec<i64> = input_ids.iter().map(|&v| v as i64).collect();
     let attention_i64: Vec<i64> = attention_mask.iter().map(|&v| v as i64).collect();
-    let token_type_i64: Vec<i64> = token_type_ids.iter().map(|&v| v as i64).collect();
 
     // 3. Build ort input tensors. Batch dimension is always 1 (one pair per
     //    call); `from_array` copies the Vec into the ONNX Runtime allocator's
     //    owned buffer. Tensor construction failures are runtime/allocator
     //    issues, not malformed model output.
+    //
+    //    DeBERTa-v3 ONNX exports expose only `input_ids` and `attention_mask`:
+    //    the model uses disentangled attention instead of segment embeddings,
+    //    so passing `token_type_ids` triggers
+    //    `Invalid input name: token_type_ids`.
     let input_ids_tensor =
         Tensor::from_array((vec![1_usize, seq_len], input_ids_i64.into_boxed_slice()))
             .map_err(|e| ProviderError::Unavailable(format!("input_ids tensor: {e}")))?;
     let attention_tensor =
         Tensor::from_array((vec![1_usize, seq_len], attention_i64.into_boxed_slice()))
             .map_err(|e| ProviderError::Unavailable(format!("attention_mask tensor: {e}")))?;
-    let token_type_tensor =
-        Tensor::from_array((vec![1_usize, seq_len], token_type_i64.into_boxed_slice()))
-            .map_err(|e| ProviderError::Unavailable(format!("token_type_ids tensor: {e}")))?;
 
     let inputs = ort::inputs! {
         "input_ids" => input_ids_tensor,
         "attention_mask" => attention_tensor,
-        "token_type_ids" => token_type_tensor,
     };
 
     // 4. Run inference. `Session::run` takes `&mut self`, so the lock is
