@@ -4,7 +4,7 @@
 # runs every test that does NOT carry `#[ignore]` — embedded SurrealDB +
 # wiremock + in-process axum are all universal and need no external
 # services. `cargo tall` additionally pulls in the `#[ignore]` tests that
-# require a 643 MB DeBERTa download or a live Ollama server.
+# require a 643 MB DeBERTa download or a live `llama-server`.
 #
 # The `--test-threads` cap keeps CPU usage bounded on laptops so `cargo test`
 # no longer saturates every core. Override per-invocation by passing
@@ -23,5 +23,6 @@ tf = "test -p smos-domain -p smos-application -- --test-threads=4"
 ti = "test --workspace -- --test-threads=2"
 
 # Pre-release tier: includes every `#[ignore]` test (native NLI model
-# download + any test that requires a live Ollama on localhost:11434).
+# download + any test that requires a live `llama-server` on
+# localhost:{28081,28082,28181}).
 tall = "test --workspace --include-ignored -- --test-threads=2"

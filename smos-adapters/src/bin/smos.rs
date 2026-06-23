@@ -20,15 +20,17 @@
 //! - `smos service` — install/uninstall/start/stop/restart/status SMOS as
 //!   a system or user service (Windows: sc.exe, Linux: systemd, macOS:
 //!   launchd).
+//! - `smos config` — read-only inspection of the resolved configuration
+//!   (`show` full TOML, `providers`, `persons`).
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
 use smos::cli::{
-    AuditArgs, AuditProvider, DoctorArgs, ImportArgs, ImportDirArgs, ImportGitArgs, ServiceAction,
-    run_audit_cli, run_dir_import, run_doctor, run_finalize, run_import, run_import_git, run_init,
-    run_server, run_service,
+    AuditArgs, AuditProvider, ConfigAction, DoctorArgs, ImportArgs, ImportDirArgs, ImportGitArgs,
+    ServiceAction, run_audit_cli, run_config, run_dir_import, run_doctor, run_finalize, run_import,
+    run_import_git, run_init, run_server, run_service,
 };
 
 #[derive(Parser, Debug)]
@@ -36,7 +38,7 @@ use smos::cli::{
     name = "smos",
     version,
     about = "SMOS — Semantic Memory OS",
-    long_about = "Unified SMOS binary. Subcommands: init, serve, import, doctor, finalize, service."
+    long_about = "Unified SMOS binary. Subcommands: init, serve, import, doctor, finalize, service, config."
 )]
 struct Cli {
     /// Path to the config file. When omitted, the proxy resolves
@@ -144,8 +146,11 @@ enum Command {
         report: Option<Option<String>>,
 
         /// Skip the llama-server + reranker checks entirely.
-        #[arg(long)]
-        skip_ollama: bool,
+        ///
+        /// `--skip-ollama` is accepted as an alias for operator scripts and
+        /// shell history written before the flag was renamed.
+        #[arg(long = "skip-llama", alias = "skip-ollama")]
+        skip_llama: bool,
 
         /// Force color on (`always`), off (`never`), or auto-detect (`auto`).
         #[arg(long, default_value = "auto")]
@@ -180,6 +185,12 @@ enum Command {
         /// loading the NLI / embedder models.
         #[arg(long)]
         dry_run: bool,
+    },
+
+    /// Inspect the resolved SMOS configuration (read-only).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
 }
 
@@ -236,13 +247,13 @@ async fn main() -> anyhow::Result<ExitCode> {
         Command::Doctor {
             stats,
             report,
-            skip_ollama,
+            skip_llama,
             color,
         } => {
             let args = DoctorArgs {
                 stats,
                 report,
-                skip_ollama,
+                skip_llama,
                 color,
             };
             run_doctor(&config_path, args).await
@@ -285,6 +296,10 @@ async fn main() -> anyhow::Result<ExitCode> {
             };
             let args = AuditArgs { provider, dry_run };
             run_audit_cli(&config_path, args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Config { action } => {
+            run_config(&config_path, action).await?;
             Ok(ExitCode::SUCCESS)
         }
     }

@@ -350,10 +350,10 @@ mod tests {
 
     #[test]
     fn build_headers_adds_bearer_authorization() {
-        let upstream = upstream_with_key("p", "http://127.0.0.1:1", "ollama");
+        let upstream = upstream_with_key("p", "http://127.0.0.1:1", "sample-key");
         let headers = upstream.build_headers();
         let auth = headers.get(AUTHORIZATION).expect("auth header present");
-        assert_eq!(auth, "Bearer ollama");
+        assert_eq!(auth, "Bearer sample-key");
     }
 
     #[test]
@@ -365,12 +365,12 @@ mod tests {
 
     #[test]
     fn build_headers_uses_api_key_header_name_when_configured() {
-        let upstream =
-            ReqwestUpstream::new("p", "http://127.0.0.1:1", "ollama", "api-key", 1).expect("build");
+        let upstream = ReqwestUpstream::new("p", "http://127.0.0.1:1", "sample-key", "api-key", 1)
+            .expect("build");
         let headers = upstream.build_headers();
         // Azure-style `api-key:` header carries the raw key (no Bearer prefix).
         let header = headers.get("api-key").expect("api-key header present");
-        assert_eq!(header, "ollama");
+        assert_eq!(header, "sample-key");
     }
 
     #[test]

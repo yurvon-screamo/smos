@@ -10,7 +10,7 @@
 //! - [`tracing_setup`] — install the tracing subscriber (shared by every
 //!   subcommand).
 //! - [`shutdown`] — Ctrl+C / SIGTERM future (server-only).
-//! - [`init_runner`] — `smos init` (one-command setup: `~/.smos` bootstrap + Ollama / llama-server / reranker / database probes + remediation hints); inline default assets live in [`init_defaults`], the probes in [`init_checks`], the `PATH` lookup in [`init_path`].
+//! - [`init_runner`] — `smos init` (one-command setup: `~/.smos` bootstrap + `llama-server` / reranker / database probes + remediation hints); inline default assets live in [`init_defaults`], the probes in [`init_checks`], the `PATH` lookup in [`init_path`].
 //! - [`server_runner`] — `smos serve` (proxy server).
 //! - [`llama_runner`] — `llama-server` auto-launch helper used by
 //!   [`server_runner`].
@@ -24,6 +24,7 @@
 //!   sc.exe / systemd / launchd).
 
 pub mod audit_runner;
+pub mod config_runner;
 pub mod dir_import_runner;
 pub mod dir_scanner;
 pub mod doctor_runner;
@@ -43,6 +44,7 @@ pub mod shutdown;
 pub mod tracing_setup;
 
 pub use audit_runner::{AuditArgs, AuditProvider, run_audit_cli};
+pub use config_runner::{ConfigAction, run_config};
 pub use dir_import_runner::{ImportDirArgs, run_dir_import};
 pub use doctor_runner::{DoctorArgs, run_doctor};
 pub use finalize_runner::run_finalize;

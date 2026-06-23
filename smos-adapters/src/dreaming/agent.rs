@@ -14,7 +14,7 @@ use anyhow::{Context, anyhow};
 use rig::agent::AgentBuilder;
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
-use rig::providers::{ollama, openrouter};
+use rig::providers::openrouter;
 use smos_application::ports::Clock;
 
 use super::prompts::{self, AUDIT_TRIGGER_PROMPT};
@@ -47,8 +47,8 @@ pub fn resolve_env_var(value: &str) -> String {
 /// Run one audit using the configured provider.
 ///
 /// Dispatches on [`AuditConfig::llm_provider`] and constructs the matching
-/// rig completion model. The two provider branches produce different
-/// concrete `CompletionModel` types, so the actual agent building + prompt
+/// rig completion model. The two provider branches produce the same
+/// concrete `CompletionModel` type, so the actual agent building + prompt
 /// loop is delegated to the generic [`run_audit_with_model`].
 pub async fn run_audit(
     config: &AuditConfig,
@@ -77,7 +77,18 @@ pub async fn run_audit(
             run_audit_with_model(config, model, store, classifier, embedder, clock).await
         }
         "local" => {
-            let client = ollama::Client::from_url(&config.local_url);
+            // The local branch talks to a `llama-server` instance, which
+            // speaks the OpenAI Chat Completions wire format. rig 0.14's
+            // `ollama::Client` posts to the ollama-native `api/chat` path
+            // and its `openai::Client` posts to the OpenAI Responses API
+            // (`/responses`); neither is implemented by `llama-server`. The
+            // `openrouter::Client` targets `/chat/completions` and attaches
+            // only a Bearer header (ignored by an unauthenticated
+            // `llama-server`), so it is the correct OpenAI-compatible
+            // transport for the local model. `local_url` carries the host
+            // root, so `/v1` is appended to match the chat-completions path.
+            let base_url = local_audit_base_url(&config.local_url);
+            let client = openrouter::Client::from_url("", &base_url);
             let model = client.completion_model(&config.local_model);
             run_audit_with_model(config, model, store, classifier, embedder, clock).await
         }
@@ -85,9 +96,21 @@ pub async fn run_audit(
     }
 }
 
+/// Resolve the OpenAI-compatible base URL for the local audit provider.
+///
+/// `audit.local_url` carries the `llama-server` host root (e.g.
+/// `http://localhost:28082`); the OpenAI Chat Completions transport the
+/// local branch uses posts to `{base}/chat/completions`, so `/v1` must be
+/// appended to match the path `llama-server` serves. Trailing slashes are
+/// trimmed first so a configured `http://host:port/` normalises cleanly.
+fn local_audit_base_url(local_url: &str) -> String {
+    format!("{}/v1", local_url.trim_end_matches('/'))
+}
+
 /// Generic audit runner: builds the agent with the supplied completion model
 /// and prompts it. Generic over `M` so the cloud (OpenRouter) and local
-/// (Ollama) provider branches unify on one body.
+/// (`llama-server` via the OpenAI-compatible transport) provider branches
+/// unify on one body.
 async fn run_audit_with_model<M>(
     config: &AuditConfig,
     model: M,

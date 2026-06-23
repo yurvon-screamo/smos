@@ -29,7 +29,7 @@ What happened instead.
 - Rust toolchain: (`rustc --version`)
 - OS:
 - GPU feature enabled (if any): `nli-cuda` / `nli-directml` / `nli-metal` / `nli-webgpu` / none
-- Ollama version (if relevant):
+- `llama-server` version (if relevant):
 - Extraction model:
 - Embedding model:
 

@@ -1,12 +1,13 @@
 //! `EmbeddingProvider` port — text → vector.
 //!
 //! `embed_batch` has a default implementation that loops `embed` per call:
-//! providers with native batch endpoints (Ollama `/api/embed`, OpenAI
-//! `/v1/embeddings` with `input: []`) override it for fewer round-trips.
+//! providers with native batch endpoints (a local `llama-server` `/api/embed`,
+//! OpenAI `/v1/embeddings` with `input: []`) override it for fewer
+//! round-trips.
 
 use crate::errors::ProviderError;
 
-/// Embedding model boundary (Jina v5, Ollama, OpenAI, …).
+/// Embedding model boundary (Jina v5, OpenAI-compatible `llama-server`, …).
 pub trait EmbeddingProvider {
     /// Embed a single text. `None` is returned when the provider cannot
     /// produce an embedding (e.g. input is empty after normalisation).

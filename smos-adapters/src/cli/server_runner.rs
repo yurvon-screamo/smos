@@ -151,9 +151,10 @@ fn warn_on_insecure_config(config: &SmosConfig) {
     let is_loopback = is_loopback_host(&config.server.host);
 
     // Inspect every configured provider's resolved api-key. A placeholder
-    // key is acceptable on loopback (local Ollama); on a non-localhost bind
-    // it is an outright insecure configuration and gets an ERROR-level log
-    // so the operator notices before going to production.
+    // key is acceptable on loopback (a local `llama-server` ignores the
+    // header); on a non-localhost bind it is an outright insecure
+    // configuration and gets an ERROR-level log so the operator notices
+    // before going to production.
     for provider in &config.providers {
         let api_key = provider.resolve_api_key();
         if is_placeholder_key(&api_key) {
@@ -192,13 +193,19 @@ fn warn_on_insecure_config(config: &SmosConfig) {
 
 /// Known placeholder api_keys that MUST NOT be used outside loopback.
 ///
-/// `ollama` is the canonical placeholder for a local `llama-server` (which
-/// ignores the key). `changeme`, `test`, `password`, `secret`, and the
-/// `sk-test*` family are the textbook examples operators reach for when they
-/// "just want to get it running" — flagging them prevents a copy-paste from a
-/// tutorial ending up in production.
+/// `placeholder` and `changeme` are the canonical stand-ins operators reach
+/// for when pointing at a local `llama-server` (which ignores the key).
+/// `test`, `password`, `secret`, and the `sk-test*` family are the textbook
+/// examples operators copy-paste from a tutorial "just to get it running" —
+/// flagging them prevents a placeholder from ending up in production.
 const PLACEHOLDER_API_KEYS: &[&str] = &[
-    "ollama", "changeme", "sk-test", "test", "password", "secret", "",
+    "placeholder",
+    "changeme",
+    "sk-test",
+    "test",
+    "password",
+    "secret",
+    "",
 ];
 
 fn is_placeholder_key(key: &str) -> bool {
@@ -417,7 +424,7 @@ mod tests {
 
     #[test]
     fn is_placeholder_key_flags_known_placeholders() {
-        for k in ["ollama", "changeme", "test", "password", "secret", ""] {
+        for k in ["placeholder", "changeme", "test", "password", "secret", ""] {
             assert!(
                 is_placeholder_key(k),
                 "expected {k:?} to be flagged as a placeholder"

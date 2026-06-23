@@ -18,7 +18,7 @@ const DEFAULT_REPORT_PATH: &str = "smoke_report.md";
 pub struct DoctorArgs {
     pub stats: bool,
     pub report: Option<Option<String>>,
-    pub skip_ollama: bool,
+    pub skip_llama: bool,
     pub color: String,
 }
 
@@ -35,7 +35,7 @@ pub async fn run_doctor(config_path: &str, args: DoctorArgs) -> Result<ExitCode>
         run_stats_only(&config, config_path).await
     } else {
         let flags = DoctorFlags {
-            skip_ollama: args.skip_ollama,
+            skip_llama: args.skip_llama,
         };
         run_full_check(&config, &flags, config_path).await
     };

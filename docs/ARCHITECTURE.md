@@ -28,7 +28,7 @@ SMOS is a 3-crate Cargo workspace in the Hexagonal / DDD style. The dependency d
 ┌──────────────────────────────────────────────────────────────┐
 │                    smos                                      │
 │  SurrealStore · native NLI (ort+ONNX) · axum · reqwest ·     │
-│  Ollama · llama.cpp · CLI · dreaming agent · service install │
+│  llama.cpp · CLI · dreaming agent · service install          │
 └──────────────────────────────────────────────────────────────┘
                             ▲ implements
 ┌──────────────────────────────────────────────────────────────┐
@@ -104,7 +104,7 @@ Every concrete IO implementation in the system. This is the only crate that may 
 | `upstream/reqwest_upstream.rs` | `LlmUpstream` | Streaming SSE forward; `single` / `round_robin` / `failover` strategies. |
 | `upstream/sse_parser.rs` | — | Incremental SSE parser. |
 | `upstream/streaming_buffer.rs` | — | Bounded buffer for streaming responses. |
-| `providers/ollama/` | `LlmExtractor`, `EmbeddingProvider` | Qwen3.5:2b extraction, Jina v5 embeddings. |
+| `providers/ollama/` | `LlmExtractor`, `EmbeddingProvider` | OpenAI-compatible extraction (`llama-server`, Nemotron-3-Nano-4B) + embeddings (Jina v5). Module path is historical. |
 | `providers/llama_cpp/` | `RerankProvider` | Qwen3-Reranker (optional). |
 | `providers/noop/` | — | In-process mocks for tests. |
 | `opencode/` | — | Session discovery for `smos import`. |

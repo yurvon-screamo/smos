@@ -6,10 +6,10 @@
 //!   `/v1/chat/completions` (Nemotron-3-Nano-4B), wired in Slice-5 for
 //!   post-response fact extraction.
 //!
-//! The module path is historical (`providers::ollama`) — the struct names
-//! `OllamaExtractor` / `OllamaEmbedding` are kept as stable public API
-//! surface while the wire protocol they speak is now OpenAI-compatible
-//! (served by `llama-server`).
+//! The module path and the `Ollama*` struct names are historical — they
+//! predate the switch to `llama-server`. Both are kept as a stable public
+//! API surface; the wire protocol these adapters speak is OpenAI-compatible
+//! (served by `llama-server`), not a vendor-native API.
 
 mod ollama_client;
 mod ollama_embedding;

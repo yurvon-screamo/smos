@@ -1,6 +1,7 @@
 //! Pure helpers for `smos import-dir`: recursive directory scan +
 //! content-type-aware text extraction. All functions are sync and IO-light
-//! so the unit tests in this module run without async runtime / Ollama.
+//! so the unit tests in this module run without an async runtime / live
+//! `llama-server`.
 
 use std::path::{Path, PathBuf};
 

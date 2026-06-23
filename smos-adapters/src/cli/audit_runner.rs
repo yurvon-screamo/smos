@@ -114,7 +114,7 @@ pub async fn run_audit_cli(config_path: &str, args: AuditArgs) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("NLI classifier build failed: {e:#}"))?;
     let embedder = OllamaEmbedding::new(Arc::new(config.embedding.clone()))
-        .map_err(|e| anyhow::anyhow!("Ollama embedder build failed: {e:#}"))?;
+        .map_err(|e| anyhow::anyhow!("embedder build failed: {e:#}"))?;
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
 
     let audit_config = config.audit.clone();

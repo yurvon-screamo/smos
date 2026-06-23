@@ -189,7 +189,7 @@ fn color_mode_always_is_unaffected_by_tty() {
 #[test]
 fn doctor_flags_default_matches_smoke_test_spec() {
     let flags = DoctorFlags::default();
-    assert!(!flags.skip_ollama);
+    assert!(!flags.skip_llama);
 }
 
 #[test]

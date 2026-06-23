@@ -23,12 +23,11 @@ use crate::config::SmosConfig;
 /// subcommand args 1:1 so the orchestrator does not depend on `clap`.
 #[derive(Debug, Clone, Default)]
 pub struct DoctorFlags {
-    /// Skip every `llama-server` / embedding / reranker HTTP probe. Kept
-    /// under the historical `skip_ollama` name (now a misnomer — the SMOS
-    /// runtime talks to `llama-server`, not Ollama) so existing operator
-    /// scripts and shell history keep working; the flag's scope is the
-    /// entire LLM/embedding/reranker HTTP-tier.
-    pub skip_ollama: bool,
+    /// Skip every `llama-server` / embedding / reranker HTTP probe. The
+    /// flag's scope is the entire LLM/embedding/reranker HTTP-tier. The CLI
+    /// still accepts the historical `--skip-ollama` alias for operator
+    /// scripts written before the rename.
+    pub skip_llama: bool,
 }
 
 /// Try to build a reqwest client without panicking. Returns `None` if the
@@ -86,7 +85,7 @@ pub async fn run_full_check(
     let binary_results = binaries::check_binaries().await;
     report.extend(binary_results);
 
-    if !flags.skip_ollama {
+    if !flags.skip_llama {
         match try_build_http_client() {
             Some(client) => {
                 let extraction_timeout = Duration::from_secs(config.llm_extraction.timeout_seconds);
@@ -159,7 +158,7 @@ mod tests {
     #[test]
     fn default_flags_match_smoke_test_spec() {
         let f = DoctorFlags::default();
-        assert!(!f.skip_ollama);
+        assert!(!f.skip_llama);
     }
 
     #[test]

@@ -341,18 +341,18 @@ mod tests {
 
     #[test]
     fn route_request_happy_path_returns_memory_key_provider_model() {
-        let providers = build_providers(&["ollama-local"]);
-        let persons = build_persons(&[("bob", "ollama-local", "granite4.1:3b", "")]);
+        let providers = build_providers(&["llama-local"]);
+        let persons = build_persons(&[("bob", "llama-local", "granite4.1:3b", "")]);
         let route = route_request("bob", &persons, &providers).expect("route");
         assert_eq!(route.memory_key.as_str(), "bob");
-        assert_eq!(route.provider_name, "ollama-local");
+        assert_eq!(route.provider_name, "llama-local");
         assert_eq!(route.upstream_model, "granite4.1:3b");
         assert!(route.persona_path.is_none());
     }
 
     #[test]
     fn route_request_unknown_person_returns_unknown_person_error() {
-        let providers = build_providers(&["ollama-local"]);
+        let providers = build_providers(&["llama-local"]);
         let persons = HashMap::new();
         let err = route_request("ghost", &persons, &providers).expect_err("unknown");
         assert!(matches!(err, RouteError::UnknownPerson(name) if name == "ghost"));
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn route_request_unknown_provider_returns_unknown_provider_error() {
-        let providers = build_providers(&["ollama-local"]);
+        let providers = build_providers(&["llama-local"]);
         let persons = build_persons(&[("bob", "typo", "granite4.1:3b", "")]);
         let err = route_request("bob", &persons, &providers).expect_err("unknown");
         match err {
@@ -378,11 +378,11 @@ mod tests {
         // even though the TOML parser would not have accepted it either.
         // The router is defensive: it re-validates so a programmatic config
         // edit cannot bypass the domain invariant.
-        let providers = build_providers(&["ollama-local"]);
+        let providers = build_providers(&["llama-local"]);
         let mut persons = HashMap::new();
         persons.insert(
             "a/b".to_string(),
-            person("ollama-local", "granite4.1:3b", ""),
+            person("llama-local", "granite4.1:3b", ""),
         );
         let err = route_request("a/b", &persons, &providers).expect_err("invalid key");
         assert!(matches!(err, RouteError::InvalidMemoryKey(_, _)));
@@ -392,15 +392,11 @@ mod tests {
     fn route_request_returns_persona_path_when_declared() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         std::fs::write(tmp.path(), "You are Bob.").expect("write");
-        let providers = build_providers(&["ollama-local"]);
+        let providers = build_providers(&["llama-local"]);
         let mut persons = HashMap::new();
         persons.insert(
             "bob".into(),
-            person(
-                "ollama-local",
-                "granite4.1:3b",
-                tmp.path().to_str().unwrap(),
-            ),
+            person("llama-local", "granite4.1:3b", tmp.path().to_str().unwrap()),
         );
         let route = route_request("bob", &persons, &providers).expect("route");
         // route_request returns the EXPANDED path; the actual file read
@@ -411,8 +407,8 @@ mod tests {
 
     #[test]
     fn route_request_persona_path_absent_when_not_declared() {
-        let providers = build_providers(&["ollama-local"]);
-        let persons = build_persons(&[("bob", "ollama-local", "granite4.1:3b", "")]);
+        let providers = build_providers(&["llama-local"]);
+        let persons = build_persons(&[("bob", "llama-local", "granite4.1:3b", "")]);
         let route = route_request("bob", &persons, &providers).expect("route");
         assert!(
             route.persona_path.is_none(),

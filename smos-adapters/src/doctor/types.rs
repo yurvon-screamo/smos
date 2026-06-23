@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize};
 /// Outcome of a single doctor probe.
 ///
 /// `Warn` covers infrastructure that is real but not on the chat hot path —
-/// for example, partial SurrealDB stats failures, or the Ollama
+/// for example, partial SurrealDB stats failures, or the `llama-server`
 /// connectivity / model-availability rows when the HTTP client itself
 /// cannot be constructed. These never block `smos serve` startup directly,
 /// so a warning keeps the doctor non-fatal for them while still surfacing
-/// the issue. `Fail` always marks a hard dependency — an Ollama model, the
-/// binary, the database, AND the reranker (every chat-completion request
-/// returns HTTP 503 while the reranker is down).
+/// the issue. `Fail` always marks a hard dependency — a `llama-server`
+/// model, the binary, the database, AND the reranker (every chat-completion
+/// request returns HTTP 503 while the reranker is down).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckStatus {
     Pass,

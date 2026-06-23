@@ -1203,8 +1203,8 @@ mod tests {
 
     /// `ProviderConfig::resolve_api_key` reads the env var named in
     /// `api_key_env`. Empty `api_key_env` MUST yield an empty string (the
-    /// "no auth" case for local Ollama) instead of consulting any default
-    /// env var.
+    /// "no auth" case for a local `llama-server`) instead of consulting any
+    /// default env var.
     #[test]
     fn resolve_api_key_reads_named_env_var() {
         let _g = _lock();

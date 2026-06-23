@@ -2,8 +2,8 @@
 //!
 //! - [`ollama`] implements `EmbeddingProvider` + `LlmExtractor` against
 //!   OpenAI-compatible `/v1/embeddings` and `/v1/chat/completions` endpoints
-//!   (served by `llama-server`). The module name is historical — the wire
-//!   protocol is OpenAI-compatible, not Ollama-native.
+//!   served by `llama-server`. The module path is historical — the wire
+//!   protocol is OpenAI-compatible (not a vendor-native API).
 //! - [`llama_cpp`] implements `RerankProvider` against the llama.cpp
 //!   `/v1/rerank` endpoint.
 //!

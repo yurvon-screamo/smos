@@ -39,7 +39,7 @@ cargo fmt --all --check
 - [ ] `cargo t` passes (no new `#[ignore]` without a documented external dependency)
 - [ ] `cargo clippy -- -D warnings` passes
 - [ ] `cargo fmt --check` passes
-- [ ] `cargo tall` passes (only if the change touches the native NLI path or a live-Ollama surface)
+- [ ] `cargo tall` passes (only if the change touches the native NLI path or a live-`llama-server` surface)
 
 ## Tests
 

@@ -1,4 +1,4 @@
-//! Shared HTTP helpers for Ollama-style requests.
+//! Shared HTTP helpers for OpenAI-compatible requests against `llama-server`.
 //!
 //! One `reqwest::Client` per adapter is the right granularity: the client pools
 //! connections and amortises TLS handshakes across requests. The builder is
