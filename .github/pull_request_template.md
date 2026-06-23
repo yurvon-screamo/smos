@@ -22,7 +22,7 @@ One or two sentences: what does this PR change and why?
 If this PR touches code in `smos-domain` or `smos-application`:
 
 - [ ] No new IO imports (`tokio`, `serde_json`, `surrealdb`, `axum`, `reqwest`, `ort`) added to `smos-domain` or `smos-application`.
-- [ ] Any new IO boundary is a port trait in `smos-application`, implemented in `smos.
+- [ ] Any new IO boundary is a port trait in `smos-application`, implemented in `smos`.
 
 ## Local gate
 

@@ -26,7 +26,7 @@ SMOS is a 3-crate Cargo workspace in the Hexagonal / DDD style. The dependency d
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    smos                              │
+│                    smos                                      │
 │  SurrealStore · native NLI (ort+ONNX) · axum · reqwest ·     │
 │  Ollama · llama.cpp · CLI · dreaming agent · service install │
 └──────────────────────────────────────────────────────────────┘
