@@ -52,20 +52,20 @@ impl Default for LlamaCppConfig {
         let mk = |name: &str| paths.models.join(name).to_string_lossy().into_owned();
         Self {
             binary: "llama-server".into(),
-            auto_launch: false,
+            auto_launch: true,
             embedding: LlamaCppServiceConfig {
                 model_path: mk("jina-embeddings-v5.gguf"),
-                port: 8081,
+                port: 28081,
                 extra_args: vec!["--ctx-size".into(), "2048".into()],
             },
             reranker: LlamaCppServiceConfig {
                 model_path: mk("qwen3-reranker.gguf"),
-                port: 8181,
+                port: 28181,
                 extra_args: vec!["--ctx-size".into(), "8192".into()],
             },
             extraction: LlamaCppServiceConfig {
-                model_path: mk("qwen3.5-2b.gguf"),
-                port: 8082,
+                model_path: mk("nemotron-3-nano-4b.gguf"),
+                port: 28082,
                 extra_args: vec!["--ctx-size".into(), "4096".into()],
             },
         }
@@ -86,9 +86,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_disables_auto_launch() {
+    fn default_enables_auto_launch() {
         let cfg = LlamaCppConfig::default();
-        assert!(!cfg.auto_launch);
+        assert!(
+            cfg.auto_launch,
+            "auto_launch defaults to true so `smos serve` spawns llama-server \
+             out of the box"
+        );
         assert_eq!(cfg.binary, "llama-server");
     }
 
@@ -106,14 +110,14 @@ mod tests {
         assert!(!unconfigured.is_configured());
 
         let with_port = LlamaCppServiceConfig {
-            port: 8081,
+            port: 28081,
             ..Default::default()
         };
         assert!(!with_port.is_configured(), "empty model still rejected");
 
         let full = LlamaCppServiceConfig {
             model_path: "/x/m.gguf".into(),
-            port: 8081,
+            port: 28081,
             extra_args: vec![],
         };
         assert!(full.is_configured());

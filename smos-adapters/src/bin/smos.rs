@@ -7,8 +7,9 @@
 //! ## Subcommands
 //!
 //! - `smos init` — one-command setup: materialise `~/.smos`, write the
-//!   default `config.toml`, probe Ollama / llama-server / reranker, run DB
-//!   migrations, and report what still needs attention.
+//!   default `config.toml`, probe `llama-server` (PATH + `/health` on the
+//!   three configured ports), run DB migrations, and report what still
+//!   needs attention.
 //! - `smos serve` — HTTP proxy server (proxy + watcher + native NLI).
 //! - `smos import` — import an opencode session transcript.
 //! - `smos import-dir` — bulk import facts from a directory tree
@@ -131,7 +132,7 @@ enum Command {
 
     /// Environment validation, stats, and Markdown report generator.
     Doctor {
-        /// SurrealDB stats only. Skips Ollama + binary checks.
+        /// SurrealDB stats only. Skips the llama-server + binary checks.
         #[arg(long)]
         stats: bool,
 
@@ -141,7 +142,7 @@ enum Command {
         #[arg(long)]
         report: Option<Option<String>>,
 
-        /// Skip the Ollama + reranker checks entirely.
+        /// Skip the llama-server + reranker checks entirely.
         #[arg(long)]
         skip_ollama: bool,
 

@@ -2,14 +2,13 @@
 //!
 //! Each submodule owns one external system:
 //! - [`binaries`] — smos binary presence + version
-//! - [`llm_providers`] — Ollama connectivity + required models + reranker
+//! - [`llm_providers`] — `llama-server` health probes + reranker
 //! - [`surreal`] — SurrealDB connect + migrations + stats snapshot
 //!
 //! All checks return [`CheckResult`] rows; the orchestrator in [`mod`]
 //! concatenates them into a [`DoctorReport`]. Tests live in
-//! `tests/doctor_unit.rs` and cover only the pure helpers (matching,
-//! formatting, aggregation); IO paths are exercised manually during the
-//! smoke test.
+//! `tests/doctor_unit.rs` and cover only the pure helpers (formatting,
+//! aggregation); IO paths are exercised manually during the smoke test.
 
 pub mod binaries;
 pub mod llm_providers;
@@ -24,20 +23,20 @@ use crate::config::SmosConfig;
 /// subcommand args 1:1 so the orchestrator does not depend on `clap`.
 #[derive(Debug, Clone, Default)]
 pub struct DoctorFlags {
-    /// Skip every Ollama / OpenAI-compatible probe (connectivity + expected
-    /// models) AND the reranker probe. Kept under the historical `skip_ollama`
-    /// name (now a slight misnomer post-multi-provider) so existing operator
-    /// scripts and shell history keep working; the flag's scope is the entire
-    /// LLM/embedding/reranker HTTP-tier, not just Ollama.
+    /// Skip every `llama-server` / embedding / reranker HTTP probe. Kept
+    /// under the historical `skip_ollama` name (now a misnomer — the SMOS
+    /// runtime talks to `llama-server`, not Ollama) so existing operator
+    /// scripts and shell history keep working; the flag's scope is the
+    /// entire LLM/embedding/reranker HTTP-tier.
     pub skip_ollama: bool,
 }
 
 /// Try to build a reqwest client without panicking. Returns `None` if the
 /// builder rejects the configured TLS stack (rustls init failure, etc).
-/// The doctor turns a `None` into WARN rows for the Ollama + reranker
-/// checks instead of crashing — a TLS init failure is rare but must NOT
-/// abort a diagnostic tool whose entire purpose is to report degraded
-/// infrastructure.
+/// The doctor turns a `None` into WARN rows for the extraction + embedding
+/// probes and a FAIL row for the reranker instead of crashing — a TLS init
+/// failure is rare but must NOT abort a diagnostic tool whose entire purpose
+/// is to report degraded infrastructure.
 fn try_build_http_client() -> Option<reqwest::Client> {
     reqwest::Client::builder().build().ok()
 }
@@ -50,12 +49,12 @@ fn try_build_http_client() -> Option<reqwest::Client> {
 fn http_client_unavailable_rows() -> Vec<CheckResult> {
     vec![
         CheckResult::warn(
-            "Ollama connectivity (extraction)",
+            "llama-server connectivity (extraction)",
             "HTTP client construction failed (TLS init error)",
         )
         .with_recommendation("verify rustls/native-tls setup and re-run"),
         CheckResult::warn(
-            "Ollama connectivity (embedding)",
+            "llama-server connectivity (embedding)",
             "HTTP client construction failed (TLS init error)",
         )
         .with_recommendation("verify rustls/native-tls setup and re-run"),
@@ -190,7 +189,7 @@ mod tests {
             3,
             "extraction + embedding + reranker probes are all blocked"
         );
-        assert_eq!(rows[0].name, "Ollama connectivity (extraction)");
+        assert_eq!(rows[0].name, "llama-server connectivity (extraction)");
         assert_eq!(rows[0].status, CheckStatus::Warn);
         assert!(
             rows[0]
@@ -198,9 +197,9 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("rustls"),
-            "Ollama hint must point at TLS setup"
+            "extraction hint must point at TLS setup"
         );
-        assert_eq!(rows[1].name, "Ollama connectivity (embedding)");
+        assert_eq!(rows[1].name, "llama-server connectivity (embedding)");
         assert_eq!(rows[2].name, "Reranker");
         // Reranker is a hard dependency — TLS init failure must FAIL, not
         // WARN, because every chat-completion request would 503 without it.

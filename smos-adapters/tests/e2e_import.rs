@@ -1,12 +1,14 @@
 //! E2E: opencode import pipeline.
 //!
-//! Each test wires a fresh `SurrealStore` (RocksDB tempdir) with mock Ollama
-//! HTTP servers for the embedder + extractor, builds an
-//! `ImportOpencodeSession` use case, and asserts on the resulting store
-//! state. The opencode discovery HTTP probe is exercised against wiremock
-//! endpoints returning synthetic opencode-shape responses; the CLI fallback
-//! path is covered by unit-level helpers (it requires the `opencode` binary
-//! on PATH, so an integration test would be flaky).
+//! Each test wires a fresh `SurrealStore` (RocksDB tempdir) with mock
+//! OpenAI-compatible HTTP servers for the embedder + extractor (the wire
+//! shape `OllamaExtractor` / `OllamaEmbedding` speak today — `/v1/chat/
+//! completions` and `/v1/embeddings`), builds an `ImportOpencodeSession`
+//! use case, and asserts on the resulting store state. The opencode
+//! discovery HTTP probe is exercised against wiremock endpoints returning
+//! synthetic opencode-shape responses; the CLI fallback path is covered by
+//! unit-level helpers (it requires the `opencode` binary on PATH, so an
+//! integration test would be flaky).
 
 mod common;
 
@@ -41,7 +43,7 @@ fn sample_transcript() -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Harness — fresh SurrealStore + mock Ollama providers per test.
+// Harness — fresh SurrealStore + mock OpenAI-compatible providers per test.
 // ---------------------------------------------------------------------------
 
 /// Build a fresh store in an isolated RocksDB tempdir + run migrations.
@@ -57,10 +59,11 @@ async fn fresh_store() -> (SurrealStore, TempDir) {
     (store, tmp)
 }
 
-/// Build the import use case wired to mock Ollama endpoints at `ollama.uri()`.
+/// Build the import use case wired to mock OpenAI-compatible endpoints at
+/// `llama.uri()`.
 async fn build_import(
     store: SurrealStore,
-    ollama_uri: String,
+    llama_uri: String,
 ) -> ImportOpencodeSession<
     SurrealStore,
     SurrealStore,
@@ -70,12 +73,12 @@ async fn build_import(
     TokioDelay,
 > {
     let extraction_cfg = smos::config::LlmExtractionConfig {
-        url: ollama_uri.clone(),
+        url: llama_uri.clone(),
         timeout_seconds: 5,
         ..smos::config::LlmExtractionConfig::default()
     };
     let embedding_cfg = smos::config::EmbeddingConfig {
-        url: ollama_uri,
+        url: llama_uri,
         timeout_seconds: 5,
         ..smos::config::EmbeddingConfig::default()
     };
@@ -98,35 +101,41 @@ async fn build_import(
     }
 }
 
-/// Mount Ollama `/api/chat` returning the supplied bullet-list facts.
-async fn mount_chat_facts(ollama: &MockServer, facts: Vec<String>) {
+/// Mount `/v1/chat/completions` returning the supplied bullet-list facts.
+async fn mount_chat_facts(llama: &MockServer, facts: Vec<String>) {
     let body = facts
         .into_iter()
         .map(|f| format!("- {f}"))
         .collect::<Vec<_>>()
         .join("\n");
     Mock::given(method("POST"))
-        .and(path("/api/chat"))
+        .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "message": {"content": body}
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": body},
+                "finish_reason": "stop",
+            }],
         })))
-        .mount(ollama)
+        .mount(llama)
         .await;
 }
 
-/// Mount Ollama `/api/embeddings` returning the SAME 1024-dim unit
-/// embedding (axis 0) for every call. Use this for single-fact imports
-/// where semantic dedup is irrelevant.
-async fn mount_embeddings(ollama: &MockServer) {
+/// Mount `/v1/embeddings` returning the SAME 1024-dim unit embedding
+/// (axis 0) for every call. Use this for single-fact imports where
+/// semantic dedup is irrelevant.
+async fn mount_embeddings(llama: &MockServer) {
     let vector = common::unit_embedding_1024(0).as_slice().to_vec();
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"embedding": vector})))
-        .mount(ollama)
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"index": 0, "embedding": vector}]
+        })))
+        .mount(llama)
         .await;
 }
 
-/// Stateful `/api/embeddings` responder that returns a distinct 1024-dim
+/// Stateful `/v1/embeddings` responder that returns a distinct 1024-dim
 /// unit embedding (axis 0, 1, 2, …) on successive calls, then clamps to the
 /// last axis. Multi-fact imports require per-fact embeddings that are
 /// orthogonal — otherwise the persist-facts Layer 2 semantic dedup sees
@@ -169,18 +178,20 @@ impl Respond for DistinctUnitEmbeddings {
         // declared embedding.
         let axis = idx.min(self.max_axes.saturating_sub(1));
         let vector = common::unit_embedding_1024(axis).as_slice().to_vec();
-        ResponseTemplate::new(200).set_body_json(json!({"embedding": vector}))
+        ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"index": 0, "embedding": vector}]
+        }))
     }
 }
 
-/// Mount Ollama `/api/embeddings` returning a distinct orthogonal unit
-/// embedding for each successive call, so each extracted fact gets its own
-/// vector and the persist-facts Layer 2 dedup does not collapse them.
-async fn mount_distinct_embeddings(ollama: &MockServer, fact_count: usize) {
+/// Mount `/v1/embeddings` returning a distinct orthogonal unit embedding
+/// for each successive call, so each extracted fact gets its own vector and
+/// the persist-facts Layer 2 dedup does not collapse them.
+async fn mount_distinct_embeddings(llama: &MockServer, fact_count: usize) {
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
+        .and(path("/v1/embeddings"))
         .respond_with(DistinctUnitEmbeddings::new(fact_count))
-        .mount(ollama)
+        .mount(llama)
         .await;
 }
 
@@ -215,14 +226,14 @@ async fn parse_synthetic_transcript_drops_user_and_keeps_assistants() {
 
 #[tokio::test]
 async fn import_saves_pending_facts_from_assistant_turns() {
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let (store, _tmp) = fresh_store().await;
     mount_chat_facts(
-        &ollama,
+        &llama,
         vec!["TTL=10 prevents the token refresh loop".to_string()],
     )
     .await;
-    mount_embeddings(&ollama).await;
+    mount_embeddings(&llama).await;
 
     let transcript = sample_transcript();
     // Take only the first assistant turn (msg_2) so the scripted extractor
@@ -230,7 +241,7 @@ async fn import_saves_pending_facts_from_assistant_turns() {
     let mut turns = opencode::parse_transcript(&transcript);
     turns.truncate(1);
 
-    let import = build_import(store.clone(), ollama.uri()).await;
+    let import = build_import(store.clone(), llama.uri()).await;
     let stats = import
         .execute(turns, &memory_key(), &session_id(1), None)
         .await
@@ -251,19 +262,19 @@ async fn import_saves_pending_facts_from_assistant_turns() {
 
 #[tokio::test]
 async fn import_filters_turns_below_min_chars_without_tool_calls() {
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let (store, _tmp) = fresh_store().await;
     // Only one extraction result is scripted; msg_5 ("ok", 2 chars) MUST be
     // skipped so it does not consume the single response.
-    mount_chat_facts(&ollama, vec!["from msg_2 long content".to_string()]).await;
-    mount_embeddings(&ollama).await;
+    mount_chat_facts(&llama, vec!["from msg_2 long content".to_string()]).await;
+    mount_embeddings(&llama).await;
 
     let transcript = sample_transcript();
     let mut turns = opencode::parse_transcript(&transcript);
     // Keep msg_2 (long text + tool call) and msg_5 ("ok", short).
     turns.drain(1..3); // drop msg_3 + msg_4, keep msg_2 and msg_5
 
-    let import = build_import(store.clone(), ollama.uri()).await;
+    let import = build_import(store.clone(), llama.uri()).await;
     let stats = import
         .execute(turns, &memory_key(), &session_id(1), None)
         .await
@@ -276,25 +287,25 @@ async fn import_filters_turns_below_min_chars_without_tool_calls() {
 
 #[tokio::test]
 async fn import_applies_agent_filter() {
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let (store, _tmp) = fresh_store().await;
     // Two extraction results: one for each head-of-development turn (msg_2,
     // msg_3); msg_4 (dreaming) is filtered out and must NOT consume a result.
     mount_chat_facts(
-        &ollama,
+        &llama,
         vec!["from msg_2".to_string(), "from msg_3".to_string()],
     )
     .await;
     // Two extracted facts → two distinct orthogonal embeddings so the
     // persist-facts Layer 2 semantic dedup does not collapse them.
-    mount_distinct_embeddings(&ollama, 2).await;
+    mount_distinct_embeddings(&llama, 2).await;
 
     let transcript = sample_transcript();
     // Keep msg_2 (hod), msg_3 (hod), msg_4 (dreaming).
     let mut turns = opencode::parse_transcript(&transcript);
     turns.truncate(3);
 
-    let import = build_import(store.clone(), ollama.uri()).await;
+    let import = build_import(store.clone(), llama.uri()).await;
     let filter = vec!["head-of-development".to_string()];
     let stats = import
         .execute(turns, &memory_key(), &session_id(1), Some(&filter))
@@ -308,10 +319,10 @@ async fn import_applies_agent_filter() {
 
 #[tokio::test]
 async fn import_offset_limit_window() {
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let (store, _tmp) = fresh_store().await;
-    mount_chat_facts(&ollama, vec!["from msg_3".to_string()]).await;
-    mount_embeddings(&ollama).await;
+    mount_chat_facts(&llama, vec!["from msg_3".to_string()]).await;
+    mount_embeddings(&llama).await;
 
     let transcript = sample_transcript();
     let mut turns = opencode::parse_transcript(&transcript);
@@ -319,7 +330,7 @@ async fn import_offset_limit_window() {
     turns.drain(..1);
     turns.truncate(1);
 
-    let import = build_import(store.clone(), ollama.uri()).await;
+    let import = build_import(store.clone(), llama.uri()).await;
     let stats = import
         .execute(turns, &memory_key(), &session_id(1), None)
         .await
@@ -331,14 +342,14 @@ async fn import_offset_limit_window() {
 
 #[tokio::test]
 async fn import_includes_tool_calls_in_extraction_input() {
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let (store, _tmp) = fresh_store().await;
     // The extractor mock echoes a fact whose content proves it was reached at
     // all — verifying that the tool-call trailer reaches the model is the job
     // of `extract_facts_from_response` unit tests; here we only assert the
     // turn with tool_calls was processed.
-    mount_chat_facts(&ollama, vec!["auth.rs uses JWT".to_string()]).await;
-    mount_embeddings(&ollama).await;
+    mount_chat_facts(&llama, vec!["auth.rs uses JWT".to_string()]).await;
+    mount_embeddings(&llama).await;
 
     // Build a synthetic turn with tool calls and very short text — without the
     // tool_calls it would be filtered by min_chars.
@@ -352,7 +363,7 @@ async fn import_includes_tool_calls_in_extraction_input() {
         }],
     };
 
-    let import = build_import(store.clone(), ollama.uri()).await;
+    let import = build_import(store.clone(), llama.uri()).await;
     let stats = import
         .execute(vec![turn], &memory_key(), &session_id(1), None)
         .await
@@ -372,17 +383,17 @@ async fn import_reuses_extract_facts_use_case_for_dry_run_safety() {
     // after import as after a single live response extraction. The fixture
     // wires the same providers and asserts the resulting fact is Pending with
     // the right source session.
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let (store, _tmp) = fresh_store().await;
-    mount_chat_facts(&ollama, vec!["the canonical fact".to_string()]).await;
-    mount_embeddings(&ollama).await;
+    mount_chat_facts(&llama, vec!["the canonical fact".to_string()]).await;
+    mount_embeddings(&llama).await;
 
     let transcript = sample_transcript();
     let mut turns = opencode::parse_transcript(&transcript);
     turns.truncate(1);
 
     let sid = session_id(7);
-    let import = build_import(store.clone(), ollama.uri()).await;
+    let import = build_import(store.clone(), llama.uri()).await;
     let _ = import
         .execute(turns, &memory_key(), &sid, None)
         .await
@@ -403,13 +414,13 @@ async fn import_is_idempotent_on_repeated_runs() {
     // session must NOT add a duplicate. The original fact's provenance grows
     // instead (and may promote through the validation gate to Accepted — that
     // is the canonical "multi-source confirmation" path).
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let (store, _tmp) = fresh_store().await;
     let shared_fact = "shared knowledge fact across imports";
     // Each turn re-observes the same fact — extractor returns it for every
     // turn. Two sessions observe it once each.
-    mount_chat_facts(&ollama, vec![shared_fact.to_string()]).await;
-    mount_embeddings(&ollama).await;
+    mount_chat_facts(&llama, vec![shared_fact.to_string()]).await;
+    mount_embeddings(&llama).await;
 
     let turn = smos_application::use_cases::import_opencode_session::AssistantTurn {
         message_id: "msg".into(),
@@ -419,7 +430,7 @@ async fn import_is_idempotent_on_repeated_runs() {
     };
 
     // First import — new pending fact.
-    let first = build_import(store.clone(), ollama.uri()).await;
+    let first = build_import(store.clone(), llama.uri()).await;
     let _ = first
         .execute(vec![turn.clone()], &memory_key(), &session_id(1), None)
         .await
@@ -436,7 +447,7 @@ async fn import_is_idempotent_on_repeated_runs() {
     );
 
     // Second import from a different session — confirmation, not a new fact.
-    let second = build_import(store.clone(), ollama.uri()).await;
+    let second = build_import(store.clone(), llama.uri()).await;
     let stats = second
         .execute(vec![turn], &memory_key(), &session_id(2), None)
         .await
@@ -610,13 +621,13 @@ async fn from_file_mode_parses_without_discovery() {
 
 #[tokio::test]
 async fn full_pipeline_imports_fixture_into_store() {
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let (store, _tmp) = fresh_store().await;
     // Scripted extractor: returns one fact per assistant turn (4 turns in the
     // fixture minus msg_5 which is below min_chars and has no tool_calls →
     // 3 processed turns).
     mount_chat_facts(
-        &ollama,
+        &llama,
         vec![
             "fact from msg_2".to_string(),
             "fact from msg_3".to_string(),
@@ -626,12 +637,12 @@ async fn full_pipeline_imports_fixture_into_store() {
     .await;
     // Three extracted facts → three distinct orthogonal embeddings so the
     // persist-facts Layer 2 semantic dedup does not collapse them.
-    mount_distinct_embeddings(&ollama, 3).await;
+    mount_distinct_embeddings(&llama, 3).await;
 
     let transcript = sample_transcript();
     let turns = opencode::parse_transcript(&transcript);
 
-    let import = build_import(store.clone(), ollama.uri()).await;
+    let import = build_import(store.clone(), llama.uri()).await;
     let stats = import
         .execute(turns, &memory_key(), &session_id(1), None)
         .await

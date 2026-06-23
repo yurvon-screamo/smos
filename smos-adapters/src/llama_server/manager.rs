@@ -183,7 +183,7 @@ mod tests {
         let mut cfg = unconfigured();
         cfg.embedding = LlamaCppServiceConfig {
             model_path: "/m/e.gguf".into(),
-            port: 8081,
+            port: 28081,
             extra_args: vec![],
         };
         // reranker + extraction stay default (port 0) and MUST be filtered.

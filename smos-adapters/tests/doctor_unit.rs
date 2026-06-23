@@ -1,56 +1,16 @@
 //! Integration tests for the `smos::doctor` public API.
 //!
-//! These tests cover ONLY pure helpers — model matching, formatting,
-//! aggregation, and end-to-end renderers. The IO entry points
-//! (Ollama / SurrealDB probes) are exercised manually via `smos doctor`;
-//! automating them here would couple the suite to live external systems
-//! and violate the "tests stay fast" contract of the workspace.
+//! These tests cover ONLY pure helpers — formatting, aggregation, and
+//! end-to-end renderers. The IO entry points (`llama-server` / SurrealDB
+//! probes) are exercised manually via `smos doctor`; automating them here
+//! would couple the suite to live external systems and violate the "tests
+//! stay fast" contract of the workspace.
 
 use smos::doctor::terminal::ColorMode;
 use smos::doctor::{
-    CheckResult, CheckStatus, DoctorFlags, DoctorReport, ExpectedModel, StatsSnapshot, aggregate,
-    collect_recommendations, match_expected_models, render_markdown, render_terminal, summary_line,
+    CheckResult, CheckStatus, DoctorFlags, DoctorReport, StatsSnapshot, aggregate,
+    collect_recommendations, render_markdown, render_terminal, summary_line,
 };
-
-// ---------------------------------------------------------------------------
-// Model matching
-// ---------------------------------------------------------------------------
-
-#[test]
-fn model_match_recognises_exact_id() {
-    let expected = vec![
-        ExpectedModel::new("upstream", "granite4.1:3b"),
-        ExpectedModel::new("extraction", "qwen3.5:2b"),
-    ];
-    let available = vec!["granite4.1:3b".to_string(), "qwen3.5:2b".to_string()];
-    let out = match_expected_models(&expected, &available);
-    assert!(out.iter().all(|(_, hit)| *hit));
-}
-
-#[test]
-fn model_match_flags_missing_models_individually() {
-    let expected = vec![
-        ExpectedModel::new("upstream", "granite4.1:3b"),
-        ExpectedModel::new("extraction", "qwen3.5:2b"),
-    ];
-    let available = vec!["granite4.1:3b".to_string()];
-    let out = match_expected_models(&expected, &available);
-    assert!(out[0].1, "upstream model must match");
-    assert!(!out[1].1, "extraction model must be flagged missing");
-}
-
-#[test]
-fn model_match_handles_huggingface_repo_variants() {
-    // Same publisher + repo name, different quantisation tag → match.
-    let expected = vec![ExpectedModel::new(
-        "embedding",
-        "hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest",
-    )];
-    let available =
-        vec!["hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:Q8_0".to_string()];
-    let out = match_expected_models(&expected, &available);
-    assert!(out[0].1);
-}
 
 // ---------------------------------------------------------------------------
 // Aggregation + summary
@@ -87,7 +47,7 @@ fn summary_line_format_matches_smoke_test_spec() {
 fn collect_recommendations_skips_pass_and_drops_empty_hint() {
     let results = vec![
         CheckResult::pass("ok", ""),
-        CheckResult::fail("bad", "").with_recommendation("pull model"),
+        CheckResult::fail("bad", "").with_recommendation("start llama-server"),
         CheckResult::warn("optional", "").with_recommendation("start reranker"),
         CheckResult::fail("silent", ""),
     ];
@@ -95,7 +55,7 @@ fn collect_recommendations_skips_pass_and_drops_empty_hint() {
     assert_eq!(recs.len(), 3);
     assert!(
         recs.iter()
-            .any(|r| r.contains("bad") && r.contains("pull model"))
+            .any(|r| r.contains("bad") && r.contains("start llama-server"))
     );
     assert!(recs.iter().any(|r| r.contains("optional")));
     assert!(recs.iter().any(|r| r.contains("silent")));
@@ -110,8 +70,8 @@ fn markdown_includes_header_summary_stats_and_recommendations() {
     let mut report = DoctorReport::new("2026-06-18T13:45:01Z", "smos.toml");
     report.push(CheckResult::pass("smos binary", "version: 0.1.0"));
     report.push(
-        CheckResult::fail("granite4.1:3b", "missing")
-            .with_recommendation("ollama pull granite4.1:3b"),
+        CheckResult::fail("llama-server (extraction)", "unreachable")
+            .with_recommendation("start llama-server on port 28082"),
     );
     report.stats = Some(StatsSnapshot {
         total_facts: 5,
@@ -128,12 +88,12 @@ fn markdown_includes_header_summary_stats_and_recommendations() {
     assert!(md.contains("**Generated:** 2026-06-18T13:45:01Z"));
     assert!(md.contains("**Config:** smos.toml"));
     assert!(md.contains("| smos binary | PASS |"));
-    assert!(md.contains("| granite4.1:3b | FAIL |"));
+    assert!(md.contains("| llama-server (extraction) | FAIL |"));
     assert!(md.contains("Result: 1/2 PASS, 0 WARN, 1 FAIL"));
     assert!(md.contains("## Stats"));
     assert!(md.contains("Total facts: 5"));
     assert!(md.contains("## Recommendations"));
-    assert!(md.contains("granite4.1:3b: ollama pull granite4.1:3b"));
+    assert!(md.contains("llama-server (extraction): start llama-server on port 28082"));
 }
 
 #[test]

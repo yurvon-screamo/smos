@@ -79,9 +79,9 @@ pub struct SmosConfig {
     pub server: ServerConfig,
 
     /// LLM chat-completion endpoints declared via `[[providers]]`. Each
-    /// entry is one OpenAI-compatible upstream (Ollama, OpenRouter, etc.).
-    /// The proxy forwards each request to exactly one provider, chosen by
-    /// the person → provider map (`[persons.*]`).
+    /// entry is one OpenAI-compatible upstream (`llama-server`, OpenRouter,
+    /// etc.). The proxy forwards each request to exactly one provider,
+    /// chosen by the person → provider map (`[persons.*]`).
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
 
@@ -93,7 +93,7 @@ pub struct SmosConfig {
     pub persons: std::collections::HashMap<String, PersonConfig>,
 
     /// Provider-agnostic config for the fact-extraction LLM
-    /// (`/api/chat`-style endpoint).
+    /// (`/v1/chat/completions`-style endpoint, served by `llama-server`).
     #[serde(default)]
     pub llm_extraction: LlmExtractionConfig,
 
@@ -186,8 +186,8 @@ pub struct ServerConfig {
 ///
 /// ```toml
 /// [[providers]]
-/// name = "ollama-local"
-/// url = "http://localhost:11434/v1/chat/completions"
+/// name = "llama-local"
+/// url = "http://localhost:28082/v1/chat/completions"
 /// api_key_env = ""        # env var name; empty = no auth header sent
 ///
 /// timeout_seconds = 120   # optional, defaults to 120
@@ -202,14 +202,15 @@ pub struct ProviderConfig {
     /// Full chat-completions URL (with path).
     pub url: String,
     /// Name of the environment variable that carries the API key. Empty
-    /// means "no auth" (suitable for local Ollama). Resolved at startup via
-    /// `std::env::var`, never written to disk. Keeping the env-var name
-    /// (rather than the literal key) follows the same secret-hygiene rule
-    /// as the dreaming agent's `${ENV_VAR}` placeholder.
+    /// means "no auth" (suitable for a local `llama-server`). Resolved at
+    /// startup via `std::env::var`, never written to disk. Keeping the
+    /// env-var name (rather than the literal key) follows the same
+    /// secret-hygiene rule as the dreaming agent's `${ENV_VAR}` placeholder.
     #[serde(default)]
     pub api_key_env: String,
     /// Header name to carry the auth token. Defaults to `Authorization`
-    /// (OpenAI / Ollama). Override to `api-key` for Azure-style endpoints.
+    /// (OpenAI / `llama-server`). Override to `api-key` for Azure-style
+    /// endpoints.
     #[serde(default = "default_auth_header")]
     pub auth_header: String,
     /// Per-request HTTP timeout. Defaults to 120 s.
@@ -230,8 +231,8 @@ pub struct ProviderConfig {
 ///
 /// ```toml
 /// [persons.bob]
-/// provider = "ollama-local"
-/// model = "granite4.1:3b"
+/// provider = "llama-local"
+/// model = "nemotron-3-nano-4b"
 /// persona = "~/.smos/persons/bob.md"  # optional
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,50 +252,55 @@ pub struct PersonConfig {
 /// LLM fact-extraction endpoint config (provider-agnostic).
 ///
 /// Backs the post-response extraction pipeline. The endpoint is expected to
-/// be Ollama's `/api/chat` shape (`{model, messages, options: {temperature,
-/// seed}}`); cloud providers are supported as long as they accept that
-/// request envelope. For OpenAI `/v1/chat/completions` shapes, use the
-/// main [`UpstreamConfig`] instead.
+/// be an OpenAI-compatible `/v1/chat/completions` shape
+/// (`{model, messages, temperature, seed, stream}`), e.g. a `llama-server`
+/// instance started with the configured extraction GGUF. Cloud providers are
+/// supported as long as they accept that request envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LlmExtractionConfig {
-    /// API base URL (no path suffix). The extractor appends `/api/chat`.
+    /// API base URL (no path suffix). The extractor appends
+    /// `/v1/chat/completions`.
     pub url: String,
-    /// Model id passed in the `model` field of `/api/chat`.
+    /// Model id passed in the `model` field of `/v1/chat/completions`.
     pub model: String,
-    /// Optional API key for cloud providers (Ollama ignores the field).
+    /// Optional API key for cloud providers (a local `llama-server` ignores
+    /// the field).
     #[serde(default)]
     pub api_key: String,
     /// Per-request HTTP timeout.
     pub timeout_seconds: u64,
-    /// Sampling temperature passed to `options.temperature`. `0.0` (greedy
-    /// decoding) is the near-deterministic baseline.
+    /// Sampling temperature passed as the top-level `temperature`. `0.0`
+    /// (greedy decoding) is the near-deterministic baseline.
     pub temperature: f32,
-    /// Sampling seed passed to `options.seed`. Pairing `temperature = 0.0`
-    /// with a pinned `seed` makes the extractor re-yield the same bullet
-    /// list across runs on the same backend.
+    /// Sampling seed passed as the top-level `seed`. Pairing
+    /// `temperature = 0.0` with a pinned `seed` makes the extractor re-yield
+    /// the same bullet list across runs on the same backend.
     pub seed: u32,
 }
 
 /// Embedding endpoint config (provider-agnostic).
 ///
 /// Backs the topic-embedding step of the enrich pipeline. The endpoint is
-/// expected to be Ollama's `/api/embeddings` shape (`{model, prompt}`); cloud
-/// providers are supported as long as they accept that envelope.
+/// expected to be an OpenAI-compatible `/v1/embeddings` shape
+/// (`{model, input}`), e.g. a `llama-server` instance started with the
+/// configured embedding GGUF. Cloud providers are supported as long as they
+/// accept that envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbeddingConfig {
-    /// API base URL (no path suffix). The adapter appends `/api/embeddings`.
+    /// API base URL (no path suffix). The adapter appends `/v1/embeddings`.
     /// May differ from [`LlmExtractionConfig::url`] so the embedder can run
     /// on a different host (or a different provider entirely).
     pub url: String,
-    /// Model id passed in the `model` field of `/api/embeddings`.
+    /// Model id passed in the `model` field of `/v1/embeddings`.
     pub model: String,
     /// Vector dimensionality. MUST match the HNSW index declared in
     /// `surreal_schema::FACT_DDL`. The default 1024 matches the canonical
     /// Jina v5 retrieval-GGUF config; override only if you re-index.
     pub dimensions: usize,
-    /// Optional API key for cloud providers (Ollama ignores the field).
+    /// Optional API key for cloud providers (a local `llama-server` ignores
+    /// the field).
     #[serde(default)]
     pub api_key: String,
     /// Per-request HTTP timeout.
@@ -372,8 +378,9 @@ pub struct SessionConfig {
 ///   accepts either a literal key or the placeholder `"${ENV_VAR}"`, which
 ///   `dreaming::resolve_env_var` expands via [`std::env::var`]. The
 ///   placeholder form keeps secrets out of `smos.toml`.
-/// - `"local"` — an Ollama-compatible chat server (default
-///   `http://localhost:11434`). No API key required.
+/// - `"local"` — an OpenAI-compatible chat server (default
+///   `http://localhost:28082`, i.e. the `llama-server` extraction port). No
+///   API key required.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuditConfig {
@@ -394,7 +401,8 @@ pub struct AuditConfig {
     pub cloud_api_key: String,
     /// Cloud base URL (no path). Defaults to OpenRouter.
     pub cloud_base_url: String,
-    /// Local model id (Ollama tag, e.g. `granite4.1:3b`).
+    /// Local model id forwarded as `request.model` to the local
+    /// OpenAI-compatible chat server (e.g. `nemotron-3-nano-4b`).
     pub local_model: String,
     /// Local chat-server base URL.
     pub local_url: String,
@@ -485,8 +493,8 @@ impl Default for SurrealConfig {
 impl Default for LlmExtractionConfig {
     fn default() -> Self {
         Self {
-            url: "http://localhost:11434".into(),
-            model: "qwen3.5:2b".into(),
+            url: "http://localhost:28082".into(),
+            model: "nemotron-3-nano-4b".into(),
             api_key: String::new(),
             timeout_seconds: 30,
             temperature: 0.0,
@@ -498,7 +506,7 @@ impl Default for LlmExtractionConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            url: "http://localhost:11434".into(),
+            url: "http://localhost:28081".into(),
             model: "hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest".into(),
             dimensions: 1024,
             api_key: String::new(),
@@ -510,7 +518,7 @@ impl Default for EmbeddingConfig {
 impl Default for RerankerConfig {
     fn default() -> Self {
         Self {
-            url: "http://localhost:8181".into(),
+            url: "http://localhost:28181".into(),
             model: "qwen3-reranker".into(),
             timeout_seconds: 60,
         }
@@ -547,8 +555,8 @@ impl Default for AuditConfig {
             cloud_model: "z-ai/glm-4.6".into(),
             cloud_api_key: String::new(),
             cloud_base_url: "https://openrouter.ai/api/v1".into(),
-            local_model: "granite4.1:3b".into(),
-            local_url: "http://localhost:11434".into(),
+            local_model: "nemotron-3-nano-4b".into(),
+            local_url: "http://localhost:28082".into(),
             max_deletions_per_run: 50,
             max_merges_per_run: 100,
             max_tool_rounds: 10,
@@ -606,10 +614,10 @@ impl ProviderConfig {
 
     /// Resolve the API key by reading the env var named in `api_key_env`.
     /// Returns an empty string when `api_key_env` is empty (the "no auth"
-    /// case for local Ollama). A missing env var also yields an empty string
-    /// so a misconfigured `api_key_env` surfaces as an unauthenticated
-    /// request (visible as a 401 from the upstream) rather than a startup
-    /// panic.
+    /// case for a local `llama-server`). A missing env var also yields an
+    /// empty string so a misconfigured `api_key_env` surfaces as an
+    /// unauthenticated request (visible as a 401 from the upstream) rather
+    /// than a startup panic.
     pub fn resolve_api_key(&self) -> String {
         if self.api_key_env.is_empty() {
             return String::new();
@@ -966,7 +974,7 @@ mod tests {
         assert_eq!(cfg.nli.contradiction_threshold, 0.5);
         assert_eq!(cfg.nli.entailment_threshold, 0.6);
         assert!(cfg.nli_backend.model.starts_with("MoritzLaurer/"));
-        assert_eq!(cfg.llm_extraction.model, "qwen3.5:2b");
+        assert_eq!(cfg.llm_extraction.model, "nemotron-3-nano-4b");
         assert_eq!(cfg.llm_extraction.seed, 42);
         assert_eq!(cfg.embedding.dimensions, 1024);
     }
@@ -1056,10 +1064,10 @@ mod tests {
                     [server]\nhost = \"h\"\nport = 1\nshutdown_extraction_grace_seconds = 5\n\
                     enable_response_extraction = false\ngraceful_degradation = false\nlog_format = \"pretty\"\n\
                     [[providers]]\nname = \"u\"\nurl = \"u\"\napi_key_env = \"SMOS_KEY\"\nauth_header = \"api-key\"\ntimeout_seconds = 9\n\
-                    [llm_extraction]\nurl = \"http://llm:11434\"\nmodel = \"qwen\"\ntimeout_seconds = 11\n\
+                    [llm_extraction]\nurl = \"http://llm:28082\"\nmodel = \"qwen\"\ntimeout_seconds = 11\n\
                     temperature = 0.2\nseed = 7\n\
-                    [embedding]\nurl = \"http://embed:11434\"\nmodel = \"jina\"\ndimensions = 1024\ntimeout_seconds = 11\n\
-                    [reranker]\nurl = \"http://reranker:8181\"\nmodel = \"rr\"\ntimeout_seconds = 7\n\
+                    [embedding]\nurl = \"http://embed:28081\"\nmodel = \"jina\"\ndimensions = 1024\ntimeout_seconds = 11\n\
+                    [reranker]\nurl = \"http://reranker:28181\"\nmodel = \"rr\"\ntimeout_seconds = 7\n\
                     [retrieval]\ntop_k_initial = 30\ntop_k_final = 3\nmin_confidence = 0.6\nmin_topic_chars = 2\n\
                     [merge]\ncosine_threshold = 0.8\n\
                     [confidence]\nbase = 0.4\nmulti_source_bonus = 0.1\nno_contradiction_bonus = 0.05\naccept_threshold = 0.65\npending_threshold = 0.3\n\
@@ -1083,15 +1091,15 @@ mod tests {
         assert_eq!(cfg.providers[0].timeout_seconds, 9);
         assert_eq!(cfg.providers[0].api_key_env, "SMOS_KEY");
         assert_eq!(cfg.surreal.path, "./x.db");
-        assert_eq!(cfg.llm_extraction.url, "http://llm:11434");
+        assert_eq!(cfg.llm_extraction.url, "http://llm:28082");
         assert_eq!(cfg.llm_extraction.model, "qwen");
         assert_eq!(cfg.llm_extraction.timeout_seconds, 11);
         assert_eq!(cfg.llm_extraction.seed, 7);
         assert_eq!(cfg.llm_extraction.temperature, 0.2);
-        assert_eq!(cfg.embedding.url, "http://embed:11434");
+        assert_eq!(cfg.embedding.url, "http://embed:28081");
         assert_eq!(cfg.embedding.model, "jina");
         assert_eq!(cfg.embedding.dimensions, 1024);
-        assert_eq!(cfg.reranker.url, "http://reranker:8181");
+        assert_eq!(cfg.reranker.url, "http://reranker:28181");
         assert_eq!(cfg.reranker.model, "rr");
         assert_eq!(cfg.reranker.timeout_seconds, 7);
         assert_eq!(cfg.retrieval.top_k_initial, 30);
@@ -1151,8 +1159,8 @@ mod tests {
     fn providers_and_persons_section_parses() {
         let _g = _lock();
         let toml = "[[providers]]\n\
-                    name = \"ollama-local\"\n\
-                    url = \"http://localhost:11434/v1/chat/completions\"\n\
+                    name = \"llama-local\"\n\
+                    url = \"http://localhost:28082/v1/chat/completions\"\n\
                     api_key_env = \"\"\n\
                     auth_header = \"Authorization\"\n\
                     timeout_seconds = 120\n\
@@ -1162,8 +1170,8 @@ mod tests {
                     api_key_env = \"OPENROUTER_API_KEY\"\n\
                     timeout_seconds = 90\n\
                     [persons.bob]\n\
-                    provider = \"ollama-local\"\n\
-                    model = \"granite4.1:3b\"\n\
+                    provider = \"llama-local\"\n\
+                    model = \"nemotron-3-nano-4b\"\n\
                     persona = \"~/.smos/persons/bob.md\"\n\
                     [persons.alice]\n\
                     provider = \"openrouter\"\n\
@@ -1175,7 +1183,7 @@ mod tests {
         std::fs::write(tmp.path(), toml).expect("write");
         let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse + validate");
         assert_eq!(cfg.providers.len(), 2);
-        assert_eq!(cfg.providers[0].name, "ollama-local");
+        assert_eq!(cfg.providers[0].name, "llama-local");
         assert_eq!(cfg.providers[1].name, "openrouter");
         assert_eq!(cfg.providers[1].api_key_env, "OPENROUTER_API_KEY");
         // Second provider inherits the default `auth_header` since the TOML
@@ -1183,8 +1191,8 @@ mod tests {
         assert_eq!(cfg.providers[1].auth_header, "Authorization");
 
         let bob = cfg.persons.get("bob").expect("person bob");
-        assert_eq!(bob.provider, "ollama-local");
-        assert_eq!(bob.model, "granite4.1:3b");
+        assert_eq!(bob.provider, "llama-local");
+        assert_eq!(bob.model, "nemotron-3-nano-4b");
         assert_eq!(bob.persona, "~/.smos/persons/bob.md");
 
         let alice = cfg.persons.get("alice").expect("person alice");
@@ -1237,11 +1245,12 @@ mod tests {
     // who re-adds a bridge will break one of these tests, which is the
     // point — the intent is documented in code, not just in commit history.
 
-    /// A leftover `[ollama]` section does NOT populate `[llm_extraction]` /
+    /// A leftover unknown section (e.g. a historical `[ollama]` block from a
+    /// pre-llama.cpp config) does NOT populate `[llm_extraction]` /
     /// `[embedding]`. The legacy fields are silently dropped at deserialize
     /// time and the canonical sections keep their defaults.
     #[test]
-    fn legacy_ollama_section_does_not_bridge_into_canonical_sections() {
+    fn legacy_unknown_section_does_not_bridge_into_canonical_sections() {
         let _g = _lock();
         let toml = "[ollama]\n\
                     url = \"http://legacy:11434\"\n\
@@ -1256,8 +1265,8 @@ mod tests {
         std::fs::write(tmp.path(), toml).expect("write");
         let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse + validate");
         // Defaults preserved — legacy fields did NOT bleed through.
-        assert_eq!(cfg.llm_extraction.url, "http://localhost:11434");
-        assert_eq!(cfg.llm_extraction.model, "qwen3.5:2b");
+        assert_eq!(cfg.llm_extraction.url, "http://localhost:28082");
+        assert_eq!(cfg.llm_extraction.model, "nemotron-3-nano-4b");
         assert_eq!(cfg.llm_extraction.timeout_seconds, 30);
         assert!(cfg.embedding.model.starts_with("hf.co/jinaai"));
         assert_eq!(cfg.embedding.timeout_seconds, 30);
@@ -1499,7 +1508,7 @@ mod tests {
             "bob".into(),
             PersonConfig {
                 provider: "typo".into(),
-                model: "granite4.1:3b".into(),
+                model: "nemotron-3-nano-4b".into(),
                 persona: String::new(),
             },
         );
@@ -1545,7 +1554,7 @@ mod tests {
             "a/b".into(),
             PersonConfig {
                 provider: "p".into(),
-                model: "granite4.1:3b".into(),
+                model: "nemotron-3-nano-4b".into(),
                 persona: String::new(),
             },
         );
@@ -1570,7 +1579,7 @@ mod tests {
             "bob".into(),
             PersonConfig {
                 provider: "p".into(),
-                model: "granite4.1:3b".into(),
+                model: "nemotron-3-nano-4b".into(),
                 persona: String::new(),
             },
         );

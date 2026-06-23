@@ -1,5 +1,6 @@
-//! `OllamaExtractor` — `LlmExtractor` against the Ollama `/api/chat` endpoint
-//! with a Qwen3.5-class model (POC parity with `smos/extract.py`).
+//! `OllamaExtractor` — `LlmExtractor` against an OpenAI-compatible
+//! `/v1/chat/completions` endpoint backed by `llama-server` (Nemotron-class
+//! model by default).
 //!
 //! Sends a system+user prompt pair (few-shot instructions + the response text),
 //! parses the bullet-list reply, and filters prompt-echo noise so SMOS control
@@ -51,7 +52,8 @@ DO NOT extract:\n\
 \n\
 Output as a bullet list, one fact per line starting with \"- \". Quality over quantity.";
 
-/// Ollama-backed fact extractor (Qwen3.5-2B by default).
+/// OpenAI-compatible fact extractor backed by `llama-server`
+/// (Nemotron-3-Nano-4B by default).
 #[derive(Clone)]
 pub struct OllamaExtractor {
     client: Client,
@@ -67,7 +69,10 @@ impl OllamaExtractor {
     }
 
     fn chat_url(&self) -> String {
-        format!("{}/api/chat", self.config.url.trim_end_matches('/'))
+        format!(
+            "{}/v1/chat/completions",
+            self.config.url.trim_end_matches('/')
+        )
     }
 }
 
@@ -76,10 +81,11 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage<'a>>,
     stream: bool,
-    options: ChatOptions,
-    // Qwen3-class models honour `think: false` to suppress reasoning output;
-    // servers that ignore the field are unaffected.
-    think: bool,
+    temperature: f32,
+    /// Pinning the RNG makes the extractor deterministic when paired with
+    /// `temperature: 0.0`: the same input re-yields the same bullet list, so
+    /// `FactId = SHA1(content)` stays stable across re-extraction runs.
+    seed: u32,
 }
 
 #[derive(Serialize)]
@@ -88,17 +94,13 @@ struct ChatMessage<'a> {
     content: String,
 }
 
-#[derive(Serialize)]
-struct ChatOptions {
-    temperature: f32,
-    /// Pinning the RNG makes the extractor deterministic when paired with
-    /// `temperature: 0.0`: the same input re-yields the same bullet list, so
-    /// `FactId = SHA1(content)` stays stable across re-extraction runs.
-    seed: u32,
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatChoice>,
 }
 
 #[derive(Deserialize)]
-struct ChatResponse {
+struct ChatChoice {
     message: Option<ChatResponseBody>,
 }
 
@@ -128,11 +130,8 @@ impl LlmExtractor for OllamaExtractor {
                 },
             ],
             stream: false,
-            options: ChatOptions {
-                temperature: self.config.temperature,
-                seed: self.config.seed,
-            },
-            think: false,
+            temperature: self.config.temperature,
+            seed: self.config.seed,
         };
 
         let response = match self.client.post(self.chat_url()).json(&body).send().await {
@@ -151,7 +150,7 @@ impl LlmExtractor for OllamaExtractor {
         let status = response.status();
         if !status.is_success() {
             return Err(ProviderError::RequestFailed(format!(
-                "ollama /api/chat returned {}",
+                "llama-server /v1/chat/completions returned {}",
                 status
             )));
         }
@@ -159,7 +158,13 @@ impl LlmExtractor for OllamaExtractor {
             .json()
             .await
             .map_err(|e| ProviderError::InvalidResponse(format!("decode chat body: {e}")))?;
-        let content = parsed.message.map(|m| m.content).unwrap_or_default();
+        let content = parsed
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message)
+            .map(|m| m.content)
+            .unwrap_or_default();
         Ok(parse_bullet_facts(&content))
     }
 }
@@ -238,7 +243,7 @@ mod tests {
     fn cfg(url: &str) -> Arc<LlmExtractionConfig> {
         Arc::new(LlmExtractionConfig {
             url: url.into(),
-            model: "qwen3.5:2b".into(),
+            model: "nemotron-3-nano-4b".into(),
             timeout_seconds: 2,
             ..LlmExtractionConfig::default()
         })
@@ -246,14 +251,14 @@ mod tests {
 
     #[test]
     fn chat_url_strips_trailing_slash_and_appends_path() {
-        let ext = OllamaExtractor::new(cfg("http://ollama:11434/")).expect("build");
-        assert_eq!(ext.chat_url(), "http://ollama:11434/api/chat");
+        let ext = OllamaExtractor::new(cfg("http://llama:28082/")).expect("build");
+        assert_eq!(ext.chat_url(), "http://llama:28082/v1/chat/completions");
     }
 
     #[test]
     fn chat_url_for_plain_base() {
-        let ext = OllamaExtractor::new(cfg("http://ollama:11434")).expect("build");
-        assert_eq!(ext.chat_url(), "http://ollama:11434/api/chat");
+        let ext = OllamaExtractor::new(cfg("http://llama:28082")).expect("build");
+        assert_eq!(ext.chat_url(), "http://llama:28082/v1/chat/completions");
     }
 
     #[test]

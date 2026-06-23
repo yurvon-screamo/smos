@@ -1,9 +1,9 @@
 //! E2E: enrichment pipeline.
 //!
-//! Each test spins up three wiremock servers (Ollama embeddings, llama.cpp
-//! reranker, OpenAI-compatible upstream) and an isolated in-process SurrealDB
-//! seeded with fixture facts. The full `HandleChatCompletion` pipeline runs
-//! through the spawned SMOS HTTP server.
+//! Each test spins up three wiremock servers (OpenAI-compatible embeddings,
+//! llama.cpp reranker, OpenAI-compatible upstream chat server) and an
+//! isolated in-process SurrealDB seeded with fixture facts. The full
+//! `HandleChatCompletion` pipeline runs through the spawned SMOS HTTP server.
 //!
 //! Assertions target the externally-observable behaviour: the body the
 //! upstream mock received (memory-block presence, fact id lines) and the
@@ -30,37 +30,38 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 // Mock builders — keep the per-test `Mock::given(...)` chains short.
 // ---------------------------------------------------------------------------
 
-/// Mount a 200 OK mock on Ollama `/api/embeddings` returning a constant
+/// Mount a 200 OK mock on `/v1/embeddings` returning a constant
 /// 8-dimensional embedding. The mock expects exactly one call (the pipeline
 /// embeds the topic once per request).
-async fn mount_ollama_ok(server: &MockServer, embedding: Vec<f32>) {
-    mount_ollama_ok_n(server, embedding, 1).await;
+async fn mount_embeddings_ok(server: &MockServer, embedding: Vec<f32>) {
+    mount_embeddings_ok_n(server, embedding, 1).await;
 }
 
-/// Same as [`mount_ollama_ok`] but lets the caller choose the expected number
-/// of calls (used by tests that issue several enrichment requests against the
-/// same Ollama mock).
-async fn mount_ollama_ok_n(server: &MockServer, embedding: Vec<f32>, expected_calls: u64) {
+/// Same as [`mount_embeddings_ok`] but lets the caller choose the expected
+/// number of calls (used by tests that issue several enrichment requests
+/// against the same embedder mock).
+async fn mount_embeddings_ok_n(server: &MockServer, embedding: Vec<f32>, expected_calls: u64) {
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
+        .and(path("/v1/embeddings"))
         .and(wiremock::matchers::header(
             "content-type",
             "application/json",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "embedding": embedding,
+            "data": [{"index": 0, "embedding": embedding}],
         })))
         .expect(expected_calls)
         .mount(server)
         .await;
 }
 
-/// Mount a 500 on Ollama to drive the fail-open path. `expect(0..=1)` is used
-/// (rather than `expect(0)`) so the assertion is robust to short-topic
-/// short-circuits in tests that also exercise that path.
-async fn mount_ollama_500(server: &MockServer) {
+/// Mount a 500 on the embedder to drive the fail-open path.
+/// `expect(0..=1)` is used (rather than `expect(0)`) so the assertion is
+/// robust to short-topic short-circuits in tests that also exercise that
+/// path.
+async fn mount_embeddings_500(server: &MockServer) {
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
+        .and(path("/v1/embeddings"))
         .respond_with(ResponseTemplate::new(500))
         .mount(server)
         .await;
@@ -159,10 +160,10 @@ impl ReplaceTopic for Value {
 #[tokio::test]
 async fn enrichment_injects_memory_block_with_fact_ids() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let session = fixed_session_id(1);
     let id = seed_accepted_fact(
@@ -175,7 +176,7 @@ async fn enrichment_injects_memory_block_with_fact_ids() {
     )
     .await;
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     mount_reranker_ok(&reranker, vec![(0, 0.95)]).await;
     mount_upstream_ok(&upstream).await;
 
@@ -208,10 +209,10 @@ async fn enrichment_injects_memory_block_with_fact_ids() {
 #[tokio::test]
 async fn enrichment_fail_open_on_embedder_error_forwards_without_block() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     seed_accepted_fact(
         &state.store,
@@ -223,7 +224,7 @@ async fn enrichment_fail_open_on_embedder_error_forwards_without_block() {
     )
     .await;
 
-    mount_ollama_500(&ollama).await;
+    mount_embeddings_500(&llama).await;
     // Reranker should not be called (enrichment short-circuits at embed step).
     Mock::given(method("POST"))
         .and(path("/v1/rerank"))
@@ -270,10 +271,10 @@ async fn enrichment_fail_open_on_embedder_error_forwards_without_block() {
 #[tokio::test]
 async fn enrichment_failure_preserves_original_user_message_verbatim() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     seed_accepted_fact(
         &state.store,
@@ -291,7 +292,7 @@ async fn enrichment_failure_preserves_original_user_message_verbatim() {
     // circuit happens first, but if a future refactor reorders the pipeline
     // the reranker mock would surface as HTTP 503 (fail-closed) and this
     // test would fail loudly rather than silently passing.
-    mount_ollama_500(&ollama).await;
+    mount_embeddings_500(&llama).await;
     mount_reranker_500(&reranker).await;
     mount_upstream_ok(&upstream).await;
 
@@ -355,10 +356,10 @@ async fn enrichment_failure_preserves_original_user_message_verbatim() {
 #[tokio::test]
 async fn enrichment_reranker_error_returns_http_503_and_skips_upstream() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let _ = seed_accepted_fact(
         &state.store,
@@ -370,7 +371,7 @@ async fn enrichment_reranker_error_returns_http_503_and_skips_upstream() {
     )
     .await;
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     mount_reranker_500(&reranker).await;
     // Upstream must NOT be called: the request fails at enrichment time.
     Mock::given(method("POST"))
@@ -419,13 +420,13 @@ async fn enrichment_reranker_error_returns_http_503_and_skips_upstream() {
 #[tokio::test]
 async fn enrichment_forwards_without_block_when_store_empty() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     Mock::given(method("POST"))
         .and(path("/v1/rerank"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
@@ -459,18 +460,21 @@ async fn enrichment_forwards_without_block_when_store_empty() {
 #[tokio::test]
 async fn enrichment_skips_when_topic_below_min_chars_and_skips_embedder() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
 
     // `expect(0)` — the pipeline must short-circuit before embedding.
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"embedding": [0.0]})))
+        .and(path("/v1/embeddings"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": [{"index": 0, "embedding": [0.0]}]})),
+        )
         .expect(0)
-        .mount(&ollama)
+        .mount(&llama)
         .await;
     Mock::given(method("POST"))
         .and(path("/v1/rerank"))
@@ -507,10 +511,10 @@ async fn enrichment_skips_when_topic_below_min_chars_and_skips_embedder() {
 #[tokio::test]
 async fn enrichment_dedup_per_session_on_repeated_request() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let session = fixed_session_id(7);
     seed_accepted_fact(
@@ -525,11 +529,11 @@ async fn enrichment_dedup_per_session_on_repeated_request() {
 
     // The pipeline orders rerank (step 8) BEFORE session dedup (step 11), so
     // both requests hit the reranker even though the second call's dedup will
-    // drop every survivor before injection. The Ollama embedder is also hit
-    // twice (once per request). `mount_reranker_ok` is set up without an
+    // drop every survivor before injection. The embedder is also hit twice
+    // (once per request). `mount_reranker_ok` is set up without an
     // `.expect(...)` count so it tolerates the second rerank call; the dedup
     // outcome is what we assert on below.
-    mount_ollama_ok_n(&ollama, query_embedding(), 2).await;
+    mount_embeddings_ok_n(&llama, query_embedding(), 2).await;
     mount_reranker_ok(&reranker, vec![(0, 0.9)]).await;
     // Two upstream requests expected (first call + second call).
     Mock::given(method("POST"))
@@ -615,10 +619,10 @@ async fn enrichment_dedup_per_session_on_repeated_request() {
 #[tokio::test]
 async fn enrichment_heat_post_filter_drops_stale_facts() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let now = fixed_now();
     // 1000 hours ago — decay rate 0.03/hr → heat_live ≈ exp(-30) ≈ 0.
@@ -633,7 +637,7 @@ async fn enrichment_heat_post_filter_drops_stale_facts() {
     )
     .await;
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     Mock::given(method("POST"))
         .and(path("/v1/rerank"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
@@ -667,10 +671,10 @@ async fn enrichment_heat_post_filter_drops_stale_facts() {
 #[tokio::test]
 async fn enrichment_min_confidence_filter_drops_low_confidence_facts() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     // Seed an Accepted fact with confidence=0.5 (below min_confidence=0.7).
     // We lower the accept_threshold to 0.4 so the domain invariant permits
@@ -686,7 +690,7 @@ async fn enrichment_min_confidence_filter_drops_low_confidence_facts() {
     )
     .await;
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     Mock::given(method("POST"))
         .and(path("/v1/rerank"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
@@ -720,10 +724,10 @@ async fn enrichment_min_confidence_filter_drops_low_confidence_facts() {
 #[tokio::test]
 async fn enrichment_heat_boost_persists_after_retrieval_hit() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let session = fixed_session_id(1);
     let stale_at = Timestamp::from_unix_secs(fixed_now().as_unix_secs() - 3600).expect("1h ago");
@@ -740,7 +744,7 @@ async fn enrichment_heat_boost_persists_after_retrieval_hit() {
     // Sanity: pre-request heat_base < 1.0 after the setter? `new_pending`
     // defaults heat to 1.0; we instead set last_access_at to 1h ago and rely
     // on heat_live decay still being above the threshold (exp(-0.03) ≈ 0.97).
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     mount_reranker_ok(&reranker, vec![(0, 0.9)]).await;
     mount_upstream_ok(&upstream).await;
 
@@ -782,10 +786,10 @@ async fn enrichment_heat_boost_persists_after_retrieval_hit() {
 #[tokio::test]
 async fn enrichment_reranker_empty_results_returns_http_503_and_skips_upstream() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let _ = seed_accepted_fact(
         &state.store,
@@ -797,7 +801,7 @@ async fn enrichment_reranker_empty_results_returns_http_503_and_skips_upstream()
     )
     .await;
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     Mock::given(method("POST"))
         .and(path("/v1/rerank"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
@@ -848,10 +852,10 @@ async fn enrichment_reranker_empty_results_returns_http_503_and_skips_upstream()
 #[tokio::test]
 async fn enrichment_top5_limit_caps_injected_facts() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let session = fixed_session_id(1);
     // Seed 7 accepted facts that all match the query embedding.
@@ -867,7 +871,7 @@ async fn enrichment_top5_limit_caps_injected_facts() {
         .await;
     }
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     // Return all 7 from the reranker; the pipeline must truncate to top_k_final=5.
     mount_reranker_ok(
         &reranker,
@@ -905,10 +909,10 @@ async fn enrichment_top5_limit_caps_injected_facts() {
 #[tokio::test]
 async fn enrichment_filters_out_pending_facts() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let session = fixed_session_id(1);
     let accepted_id = seed_accepted_fact(
@@ -933,7 +937,7 @@ async fn enrichment_filters_out_pending_facts() {
     // SurrealStore's search_similar already filters by status=accepted, so the
     // pending fact never reaches the reranker. The reranker mock only sees the
     // accepted fact (index 0) — we mirror that in the response.
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     mount_reranker_ok(&reranker, vec![(0, 0.9)]).await;
     mount_upstream_ok(&upstream).await;
 
@@ -966,10 +970,10 @@ async fn enrichment_filters_out_pending_facts() {
 #[tokio::test]
 async fn enrichment_filters_out_expired_facts() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let session = fixed_session_id(1);
     let _expired_id = seed_expired_fact(
@@ -990,7 +994,7 @@ async fn enrichment_filters_out_expired_facts() {
     )
     .await;
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     mount_reranker_ok(&reranker, vec![(0, 0.9)]).await;
     mount_upstream_ok(&upstream).await;
 
@@ -1023,10 +1027,10 @@ async fn enrichment_filters_out_expired_facts() {
 #[tokio::test]
 async fn full_pipeline_passthrough_with_enrichment_returns_marker() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = common::config_with_mocks(&upstream, &ollama, &reranker);
+    let config = common::config_with_mocks(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     let session = fixed_session_id(1);
     seed_accepted_fact(
@@ -1039,7 +1043,7 @@ async fn full_pipeline_passthrough_with_enrichment_returns_marker() {
     )
     .await;
 
-    mount_ollama_ok(&ollama, query_embedding()).await;
+    mount_embeddings_ok(&llama, query_embedding()).await;
     mount_reranker_ok(&reranker, vec![(0, 0.95)]).await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))

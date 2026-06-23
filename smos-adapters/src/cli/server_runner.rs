@@ -192,10 +192,10 @@ fn warn_on_insecure_config(config: &SmosConfig) {
 
 /// Known placeholder api_keys that MUST NOT be used outside loopback.
 ///
-/// `ollama` is the canonical placeholder for local Ollama (which ignores
-/// the key). `changeme`, `test`, `password`, `secret`, and the `sk-test*`
-/// family are the textbook examples operators reach for when they "just
-/// want to get it running" — flagging them prevents a copy-paste from a
+/// `ollama` is the canonical placeholder for a local `llama-server` (which
+/// ignores the key). `changeme`, `test`, `password`, `secret`, and the
+/// `sk-test*` family are the textbook examples operators reach for when they
+/// "just want to get it running" — flagging them prevents a copy-paste from a
 /// tutorial ending up in production.
 const PLACEHOLDER_API_KEYS: &[&str] = &[
     "ollama", "changeme", "sk-test", "test", "password", "secret", "",

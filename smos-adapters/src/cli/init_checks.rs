@@ -1,12 +1,11 @@
-//! Inline setup probes for `smos init` — Ollama + llama-server + reranker +
+//! Inline setup probes for `smos init` — `llama-server` health + reranker +
 //! SurrealDB.
 //!
 //! Each probe is deliberately lightweight: it answers "is the box ready to
 //! `smos serve`?" and prints a ✓ / ✗ row with a remediation hint. Detailed
-//! diagnostics (per-model validation, NLI cache, config linting, full stats,
-//! Markdown report) belong to `smos doctor` — `init` never delegates to the
-//! doctor module so the setup wizard stays decoupled from the diagnostic
-//! surface.
+//! diagnostics (NLI cache, config linting, full stats, Markdown report)
+//! belong to `smos doctor` — `init` never delegates to the doctor module so
+//! the setup wizard stays decoupled from the diagnostic surface.
 //!
 //! Lives in its own module so [`super::init_runner`] stays focused on
 //! orchestration; the probes are pure IO + reporting.
@@ -19,114 +18,58 @@ use crate::SurrealStore;
 use crate::cli::init_path::find_in_path;
 use crate::config::{RerankerConfig, SurrealConfig};
 
-const OLLAMA_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const LLAMA_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const RERANKER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Models the default config expects to find in the local Ollama registry.
-///
-/// `smos init` pulls these so a fresh box is ready to `smos serve` without a
-/// second command. The list mirrors the three Ollama-local roles in
-/// [`crate::cli::init_defaults::DEFAULT_CONFIG_TOML`] (chat person "bob",
-/// extraction, embedding). Cloud-routed persons (OpenRouter / OpenAI / …) are
-/// intentionally NOT pulled here — they live outside Ollama, and `smos doctor`
-/// validates them. The subset relation is pinned by
-/// [`tests::required_ollama_models_stay_in_sync_with_default_config`].
-const REQUIRED_OLLAMA_MODELS: &[&str] = &[
-    "granite4.1:3b",
-    "qwen3.5:2b",
-    "hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest",
+/// The three `llama-server` ports the default config points the local roles
+/// at: embedding (28081), extraction (28082), reranker (28181). `init` probes
+/// each one so the operator hears about a missing service before the first
+/// `smos serve` request fails with HTTP 503.
+const LLAMA_PORTS: &[(u16, &str)] = &[
+    (28081, "embedding"),
+    (28082, "extraction"),
+    (28181, "reranker"),
 ];
 
-/// Probe Ollama's `/api/tags`, then ensure every required model is present —
-/// pulling the missing ones via the `ollama` CLI. An unreachable Ollama is
-/// reported with the install hint and the run continues (the operator may
-/// run init again after starting `ollama serve`).
-pub(super) async fn check_ollama_and_pull_models(base_url: &str) {
-    match fetch_ollama_tags(base_url).await {
-        Ok(available) => {
-            println!(
-                "  ✓ Ollama reachable ({} model{} available)",
-                available.len(),
-                if available.len() == 1 { "" } else { "s" }
-            );
-            for model in REQUIRED_OLLAMA_MODELS {
-                if available.iter().any(|a| a == *model) {
-                    println!("  ✓ Model {model} — already pulled");
-                } else {
-                    pull_ollama_model(model).await;
-                }
+/// Probe `/health` on every port in [`LLAMA_PORTS`]. A miss on any port is
+/// reported with a remediation hint that points at `auto_launch` (the
+/// easiest fix) and the manual `llama-server` invocation. An already-running
+/// server is reported as ✓ so the operator sees what was reused vs. what
+/// `smos serve` will spawn via `[llama_cpp].auto_launch`.
+pub(super) async fn check_llama_servers() {
+    let client = match reqwest::Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("  ✗ Cannot construct HTTP client: {e}");
+            println!("    Verify rustls / native-tls setup and re-run");
+            return;
+        }
+    };
+    for (port, role) in LLAMA_PORTS {
+        let url = format!("http://localhost:{port}/health");
+        match probe_http(&client, &url, LLAMA_PROBE_TIMEOUT).await {
+            Ok(()) => println!("  ✓ llama-server ({role}) reachable at http://localhost:{port}"),
+            Err(_) => {
+                println!("  ✗ llama-server ({role}) not reachable at http://localhost:{port}");
+                println!("    Start it: llama-server --model <{role}.gguf> --port {port}");
+                println!("    Or rely on [llama_cpp] auto_launch = true in config.toml");
             }
         }
-        Err(e) => {
-            println!("  ✗ Ollama not reachable at {base_url}");
-            println!("    {e}");
-            println!("    Install from https://ollama.com then run: ollama serve");
-        }
     }
 }
 
-/// Ollama `/api/tags` response shape — only the fields init reads.
-#[derive(Debug, serde::Deserialize)]
-struct TagsResponse {
-    models: Vec<TagsModel>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TagsModel {
-    name: String,
-}
-
-async fn fetch_ollama_tags(base_url: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::builder()
-        .build()
-        .context("HTTP client construction failed")?;
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let response = client
-        .get(&url)
-        .timeout(OLLAMA_PROBE_TIMEOUT)
-        .send()
-        .await
-        .with_context(|| format!("cannot connect to {base_url}"))?;
-    let tags: TagsResponse = response
-        .json()
-        .await
-        .context("Ollama /api/tags returned invalid JSON")?;
-    Ok(tags.models.into_iter().map(|m| m.name).collect())
-}
-
-/// Pull one model via the `ollama` CLI. The CLI streams progress to the
-/// inherited stdout/stderr, so the operator sees a live download bar. Any
-/// non-zero exit or a missing `ollama` binary is reported with a retry hint
-/// rather than aborting the whole init.
-async fn pull_ollama_model(model: &str) {
-    println!("  ⟳ Pulling {model} (this can take a while on first pull)...");
-    let status = tokio::process::Command::new("ollama")
-        .args(["pull", model])
-        .status()
-        .await;
-    match status {
-        Ok(s) if s.success() => println!("  ✓ Model {model} — pulled"),
-        Ok(s) => {
-            println!("  ✗ Model {model} — pull failed (exit {:?})", s.code());
-            println!("    Retry: ollama pull {model}");
-        }
-        Err(e) => {
-            println!("  ✗ Model {model} — cannot run `ollama` CLI: {e}");
-            println!("    Make sure the `ollama` binary is on PATH");
-        }
-    }
-}
-
-/// Check `llama-server` is discoverable on `PATH`. The reranker (and any
-/// `[llama_cpp]` auto-launch) depend on it, so a miss is reported as ✗ with
-/// the build pointer.
+/// Check `llama-server` is discoverable on `PATH`. The auto-launch manager
+/// (and any `[llama_cpp]` startup) depends on it, so a miss is reported as ✗
+/// with the build pointer.
 pub(super) fn check_llama_server() {
     match find_in_path("llama-server") {
         Some(path) => println!("  ✓ Found: {}", path.display()),
         None => {
             println!("  ✗ llama-server not found on PATH");
             println!("    Build it: https://github.com/ggerganov/llama.cpp");
-            println!("    Required for the reranker — enrichment fails without it");
+            println!(
+                "    Required for embedding / extraction / reranker — every chat-completion request fails without it"
+            );
         }
     }
 }
@@ -135,12 +78,20 @@ pub(super) fn check_llama_server() {
 /// fatal: the operator may legitimately start the reranker after init, or
 /// point `[reranker]` at a remote host.
 pub(super) async fn check_reranker(config: &RerankerConfig) {
+    let client = match reqwest::Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("  ✗ Cannot construct HTTP client: {e}");
+            println!("    Verify rustls / native-tls setup and re-run");
+            return;
+        }
+    };
     let url = format!("{}/health", config.url.trim_end_matches('/'));
-    match probe_http(&url, RERANKER_PROBE_TIMEOUT).await {
+    match probe_http(&client, &url, RERANKER_PROBE_TIMEOUT).await {
         Ok(()) => println!("  ✓ Reranker reachable at {}", config.url),
         Err(_) => {
             println!("  ✗ Reranker not reachable at {}", config.url);
-            println!("    Start: llama-server --model <qwen3-reranker.gguf> --port 8181");
+            println!("    Start: llama-server --model <qwen3-reranker.gguf> --port 28181");
             println!("    Or enable [llama_cpp] auto_launch = true in config.toml");
         }
     }
@@ -148,11 +99,10 @@ pub(super) async fn check_reranker(config: &RerankerConfig) {
 
 /// Issue a bounded GET and succeed on any HTTP response — the goal is "is
 /// something listening?", not "did it return 2xx?". A connection failure or
-/// timeout becomes `Err`.
-async fn probe_http(url: &str, timeout: Duration) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .build()
-        .context("HTTP client construction failed")?;
+/// timeout becomes `Err`. The caller supplies a pooled `Client` so the
+/// init wizard amortises connection setup across every probe instead of
+/// paying for a fresh TLS handshake per port.
+async fn probe_http(client: &reqwest::Client, url: &str, timeout: Duration) -> Result<()> {
     client
         .get(url)
         .timeout(timeout)
@@ -190,48 +140,80 @@ pub(super) async fn init_database(config: &SurrealConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::init_defaults::DEFAULT_CONFIG_TOML;
+    use crate::config::{EmbeddingConfig, LlmExtractionConfig, RerankerConfig};
+    use crate::llama_server::LlamaCppConfig;
 
-    /// Acquire the workspace-wide env-test lock — this test parses the
-    /// default config, whose `SurrealConfig::default()` resolves paths via
+    /// Acquire the workspace-wide env-test lock — `LlamaCppConfig::default()`
+    /// resolves model paths through `SmosPaths::resolve()`, which reads
     /// `SMOS_HOME`.
     fn lock() -> std::sync::MutexGuard<'static, ()> {
         crate::test_env_lock::lock()
     }
 
-    /// `REQUIRED_OLLAMA_MODELS` must stay a subset of the Ollama-local model
-    /// ids declared in [`DEFAULT_CONFIG_TOML`] (chat persons + extraction +
-    /// embedding). Pinning the subset catches drift the moment either side
-    /// changes — otherwise `smos init` would silently pull a model the
-    /// default config no longer references (or miss one it newly does).
+    /// Extract the trailing port from a `http://host:port` base URL. Returns
+    /// `None` when the URL does not end with a numeric port (config error —
+    /// the defaults always do).
+    fn port_of(url: &str) -> Option<u16> {
+        url.rsplit(':').next()?.parse().ok()
+    }
+
+    /// The three probed ports must stay distinct — a collision would make
+    /// one role's probe mask another's, so an operator would see a misleading
+    /// ✓ on a service that is actually down.
     #[test]
-    fn required_ollama_models_stay_in_sync_with_default_config() {
+    fn llama_ports_are_distinct() {
+        let ports: std::collections::HashSet<u16> = LLAMA_PORTS.iter().map(|(p, _)| *p).collect();
+        assert_eq!(ports.len(), LLAMA_PORTS.len(), "llama-server ports collide");
+    }
+
+    /// `LLAMA_PORTS` must stay in lock-step with the canonical config
+    /// defaults: each role's probed port equals the port derived from the
+    /// matching config-default URL (`LlmExtractionConfig::default().url`,
+    /// `EmbeddingConfig::default().url`, `RerankerConfig::default().url`)
+    /// AND the per-service `[llama_cpp.*]` port declared by
+    /// `LlamaCppConfig::default()`. A drift here would make `smos init`
+    /// probe a port that no configured URL points at — the operator would
+    /// see a misleading ✓ on a service that is actually down.
+    #[test]
+    fn llama_ports_match_config_defaults() {
         let _g = lock();
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let prior = std::env::var("SMOS_HOME").ok();
-        // SAFETY: same lock-protected guarantee.
-        unsafe {
-            std::env::set_var("SMOS_HOME", tmp.path());
-        }
-        let cfg = crate::config::SmosConfig::load_from_str(DEFAULT_CONFIG_TOML)
-            .expect("default toml must parse");
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("SMOS_HOME", v),
-                None => std::env::remove_var("SMOS_HOME"),
-            }
-        }
+        let by_role: std::collections::HashMap<&str, u16> =
+            LLAMA_PORTS.iter().map(|(p, r)| (*r, *p)).collect();
 
-        let mut declared: Vec<String> = cfg.persons.values().map(|p| p.model.clone()).collect();
-        declared.push(cfg.llm_extraction.model.clone());
-        declared.push(cfg.embedding.model.clone());
+        let extraction_url_port = port_of(&LlmExtractionConfig::default().url)
+            .expect("LlmExtractionConfig::default().url ends with a port");
+        let embedding_url_port = port_of(&EmbeddingConfig::default().url)
+            .expect("EmbeddingConfig::default().url ends with a port");
+        let reranker_url_port = port_of(&RerankerConfig::default().url)
+            .expect("RerankerConfig::default().url ends with a port");
 
-        for required in REQUIRED_OLLAMA_MODELS {
-            assert!(
-                declared.iter().any(|d| d == *required),
-                "REQUIRED_OLLAMA_MODELS lists {required:?} which the default config does not \
-                 declare as a person / extraction / embedding model — the two have drifted.",
-            );
-        }
+        let llama_cpp = LlamaCppConfig::default();
+
+        assert_eq!(
+            by_role["extraction"], extraction_url_port,
+            "extraction: LLAMA_PORTS vs LlmExtractionConfig::default().url"
+        );
+        assert_eq!(
+            by_role["extraction"], llama_cpp.extraction.port,
+            "extraction: LLAMA_PORTS vs [llama_cpp.extraction].port"
+        );
+
+        assert_eq!(
+            by_role["embedding"], embedding_url_port,
+            "embedding: LLAMA_PORTS vs EmbeddingConfig::default().url"
+        );
+        assert_eq!(
+            by_role["embedding"], llama_cpp.embedding.port,
+            "embedding: LLAMA_PORTS vs [llama_cpp.embedding].port"
+        );
+
+        assert_eq!(
+            by_role["reranker"], reranker_url_port,
+            "reranker: LLAMA_PORTS vs RerankerConfig::default().url"
+        );
+        assert_eq!(
+            by_role["reranker"], llama_cpp.reranker.port,
+            "reranker: LLAMA_PORTS vs [llama_cpp.reranker].port"
+        );
     }
 }

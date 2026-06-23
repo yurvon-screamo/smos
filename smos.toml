@@ -27,14 +27,14 @@ log_format = "json"
 # Providers — OpenAI-compatible LLM chat-completion endpoints.
 # ---------------------------------------------------------------------------
 #
-# Each entry is one upstream (Ollama, OpenRouter, OpenAI, vLLM, …). The proxy
-# forwards every chat-completion request to exactly one provider, chosen by
-# the [persons.*] map. There is no round-robin / failover any more: routing
-# is per-person, not per-pool.
+# Each entry is one upstream (llama-server, OpenRouter, OpenAI, vLLM, …). The
+# proxy forwards every chat-completion request to exactly one provider,
+# chosen by the [persons.*] map. There is no round-robin / failover any more:
+# routing is per-person, not per-pool.
 
 [[providers]]
-name = "ollama-local"
-url = "http://localhost:11434/v1/chat/completions"
+name = "llama-local"
+url = "http://localhost:28082/v1/chat/completions"
 api_key_env = ""                    # env var name; empty = no auth header sent
 # auth_header = "Authorization"     # default; set to "api-key" for Azure
 # timeout_seconds = 120             # default
@@ -59,8 +59,8 @@ api_key_env = ""                    # env var name; empty = no auth header sent
 # `request.model` to the upstream model declared below before forwarding.
 
 [persons.bob]
-provider = "ollama-local"           # MUST match a [[providers]].name
-model = "granite4.1:3b"             # upstream model id
+provider = "llama-local"            # MUST match a [[providers]].name
+model = "nemotron-3-nano-4b"        # upstream model id
 persona = "~/.smos/persons/bob.md"  # optional; `~` expands to user home
 
 # Example second person.
@@ -70,12 +70,13 @@ persona = "~/.smos/persons/bob.md"  # optional; `~` expands to user home
 # persona = "~/.smos/persons/alice.md"
 
 # ---------------------------------------------------------------------------
-# LLM for fact extraction (Qwen3.5:2b or any Ollama-/OpenAI-compatible model).
+# LLM for fact extraction (Nemotron-3-Nano-4B or any OpenAI-compatible model
+# served by `llama-server`).
 # ---------------------------------------------------------------------------
 [llm_extraction]
-url = "http://localhost:11434"           # API base (the adapter appends /api/chat)
-model = "qwen3.5:2b"
-api_key = ""                              # optional, for cloud providers
+url = "http://localhost:28082"           # API base (the adapter appends /v1/chat/completions)
+model = "nemotron-3-nano-4b"
+api_key = ""                            # optional, for cloud providers
 timeout_seconds = 30
 # Deterministic extraction: temperature=0 disables random sampling, seed pins
 # the RNG so two runs against the same input re-yield the same bullet list.
@@ -86,7 +87,7 @@ seed = 42
 # Embedding model for vector search (may be a different provider than the
 # extraction LLM).
 [embedding]
-url = "http://localhost:11434"           # the adapter appends /api/embeddings
+url = "http://localhost:28081"           # the adapter appends /v1/embeddings
 model = "hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest"
 dimensions = 1024                          # MUST match the HNSW index DDL
 api_key = ""
@@ -97,10 +98,10 @@ timeout_seconds = 30
 # before injecting them into the request. Without a reachable reranker,
 # enrichment returns HTTP 503 (no fallback to vector-order-only ranking).
 # Start the llama.cpp reranker with a Qwen3-Reranker GGUF model:
-#   ./llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
+#   ./llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 28181
 # The adapter expects an OpenAI-compatible /v1/rerank endpoint.
 [reranker]
-url = "http://localhost:8181"
+url = "http://localhost:28181"
 model = "qwen3-reranker"
 timeout_seconds = 60
 
@@ -169,8 +170,8 @@ cloud_model = "z-ai/glm-4.6"
 # dreaming module expands the placeholder via std::env::var at runtime.
 cloud_api_key = ""
 cloud_base_url = "https://openrouter.ai/api/v1"
-local_model = "granite4.1:3b"
-local_url = "http://localhost:11434"
+local_model = "nemotron-3-nano-4b"
+local_url = "http://localhost:28082"
 max_deletions_per_run = 50
 max_merges_per_run = 100
 # rig 0.14's PromptRequest defaults to single-turn (max_depth = 0); without a
@@ -192,21 +193,21 @@ max_tool_rounds = 10
 # remote / cloud provider.
 [llama_cpp]
 binary = "llama-server"
-auto_launch = false
+auto_launch = true
 
 [llama_cpp.embedding]
 model_path = "~/.smos/models/jina-embeddings-v5.gguf"
-port = 8081
+port = 28081
 extra_args = ["--ctx-size", "2048"]
 
 [llama_cpp.reranker]
 model_path = "~/.smos/models/qwen3-reranker.gguf"
-port = 8181
+port = 28181
 extra_args = ["--ctx-size", "8192"]
 
 [llama_cpp.extraction]
-model_path = "~/.smos/models/qwen3.5-2b.gguf"
-port = 8082
+model_path = "~/.smos/models/nemotron-3-nano-4b.gguf"
+port = 28082
 extra_args = ["--ctx-size", "4096"]
 
 # ---------------------------------------------------------------------------

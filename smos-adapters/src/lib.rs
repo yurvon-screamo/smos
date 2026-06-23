@@ -3,8 +3,8 @@
 //! This crate is the *only* place IO happens in the SMOS Rust port. Each
 //! adapter implements a `smos_application::ports` trait against a specific
 //! external system (SurrealDB for persistence, system clock for time, HTTP
-//! for LLM upstream, Ollama for embeddings/rerank, ort + ONNX Runtime for
-//! NLI).
+//! for LLM upstream, OpenAI-compatible `llama-server` endpoints for
+//! embeddings/extraction/rerank, ort + ONNX Runtime for NLI).
 //!
 //! See `smos-poc/ТРЕБОВАНИЯ.md` for the canonical specification and
 //! `smos-application` for the port shapes.

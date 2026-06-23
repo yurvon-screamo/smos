@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn health_url_uses_localhost() {
-        assert_eq!(service_health_url(8181), "http://localhost:8181/health");
+        assert_eq!(service_health_url(28181), "http://localhost:28181/health");
     }
 
     #[tokio::test]

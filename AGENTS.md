@@ -16,19 +16,19 @@ SMOS uses a single test surface (defined in
 | `cargo tf`  | After editing `smos-domain` or `smos-application` only.   |
 | `cargo t`   | Default pre-commit check. Runs every non-`#[ignore]` test. |
 | `cargo ti`  | Alias kept for compat — same scope as `cargo t`.            |
-| `cargo tall`| Pre-release. Includes every `#[ignore]` test (643 MB model download + live Ollama). |
+| `cargo tall`| Pre-release. Includes every `#[ignore]` test (643 MB model download + live `llama-server`). |
 
 See [README.md](README.md) → Testing for the full breakdown.
 
 ### `#[ignore]` policy
 
 Tests must pass ALWAYS. If a test cannot pass without an external dependency
-(live Ollama, model download), mark it `#[ignore = "<reason>"]`:
+(live `llama-server`, model download), mark it `#[ignore = "<reason>"]`:
 
 - **Native NLI model download** —
   `#[ignore = "requires 643MB DeBERTa ONNX model download"]`
-- **Live Ollama** —
-  `#[ignore = "requires live Ollama on localhost:11434"]`
+- **Live `llama-server`** —
+  `#[ignore = "requires live llama-server on localhost:{28081,28082,28181}"]`
 
 `#[ignore]` is reserved for **external dependencies**. A bug in our own
 code (including a SurrealQL syntax mistake) is NOT a reason to `#[ignore]`
@@ -43,8 +43,8 @@ When adding a new `tests/*.rs` binary, decide its category up front:
 1. **Pure unit helpers** (no IO, no async runtime) → no special handling.
 2. **Embedded-SurrealDB / wiremock / TCP listener** → universal, runs by
    default. No gating.
-3. **Needs a live Ollama / model download** → `#[ignore]` per test with the
-   reason above.
+3. **Needs a live `llama-server` / model download** → `#[ignore]` per test
+   with the reason above.
 
 ### Feature gates (smos)
 
@@ -60,8 +60,8 @@ features are GPU execution providers (mutually exclusive — pick at most one):
   one GPU feature.
 
 There are no test-gating features. Tests that need a live external dependency
-(live Ollama, 643 MB DeBERTa ONNX download) carry `#[ignore = "<reason>"]`
-and run via `cargo tall`.
+(live `llama-server`, 643 MB DeBERTa ONNX download) carry
+`#[ignore = "<reason>"]` and run via `cargo tall`.
 
 ## Quality gates (run before declaring a task done)
 
@@ -72,7 +72,7 @@ cargo fmt --all --check
 ```
 
 Run `cargo tall` only when the change touches the native NLI path or any
-live-Ollama integration surface.
+live-`llama-server` integration surface.
 
 ## Architecture reminders
 

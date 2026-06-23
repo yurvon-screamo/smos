@@ -8,22 +8,24 @@
 //!    `persons/bob.md` when they are not already present. Re-running is
 //!    idempotent: an existing config / persona is NEVER overwritten so the
 //!    operator's edits survive a re-init.
-//! 2. **Ollama** — probes `http://localhost:11434/api/tags` and pulls every
-//!    default-config model that is missing via `ollama pull`.
-//! 3. **llama-server** — checks the binary is reachable on `PATH` (the
-//!    reranker hard-depends on it).
-//! 4. **Reranker** — probes the configured `/health` endpoint.
+//! 2. **llama-server** — checks the binary is reachable on `PATH` (every
+//!    local role — embedding, extraction, reranker — depends on it).
+//! 3. **llama-server services** — probes `/health` on each configured port
+//!    (28081 embedding, 28082 extraction, 28181 reranker). An already-running
+//!    service is reported as ✓ so the operator sees what `auto_launch` will
+//!    reuse vs. spawn.
+//! 4. **Reranker** — probes the configured `/health` endpoint (kept separate
+//!    from the port sweep so a non-default `[reranker]` URL still validates).
 //! 5. **Database** — connects to SurrealDB and applies migrations.
 //!
 //! This module owns the orchestration + filesystem bootstrap only; the
 //! network probes live in [`crate::cli::init_checks`] and the `PATH` lookup
 //! in [`crate::cli::init_path`]. The checks here are deliberately lightweight
 //! and inline: they answer "is the box ready to `smos serve`?". `smos doctor`
-//! is the separate, detailed diagnostic command (per-model validation, NLI
-//! cache, config linting, full stats, Markdown report). `init` does NOT
-//! delegate to the doctor module — that would couple the setup wizard to the
-//! diagnostic surface and pull in report generation that first-time users do
-//! not need.
+//! is the separate, detailed diagnostic command (NLI cache, config linting,
+//! full stats, Markdown report). `init` does NOT delegate to the doctor
+//! module — that would couple the setup wizard to the diagnostic surface and
+//! pull in report generation that first-time users do not need.
 
 use std::path::{Path, PathBuf};
 
@@ -33,13 +35,6 @@ use crate::cli::init_checks;
 use crate::cli::init_defaults::{DEFAULT_CONFIG_TOML, DEFAULT_PERSONA_BOB_MD};
 use crate::config::SmosConfig;
 use crate::paths::{SMOS_HOME_SUBDIRS, SmosPaths, ensure_smos_home};
-
-/// Default Ollama base URL. The default config points every local role
-/// (chat, extraction, embedding) at this single instance, so probing it once
-/// covers the whole "are the local models reachable?" question. Hardcoded by
-/// design — init is a simple localhost probe; `smos doctor` validates
-/// operator-customised provider URLs in depth.
-const OLLAMA_URL: &str = "http://localhost:11434";
 
 /// What [`bootstrap_filesystem`] actually did on disk. Carries the flags so
 /// [`run_init`] can print "created" vs "already exists" without re-stat'ing
@@ -53,10 +48,11 @@ struct FsOutcome {
 /// Entry point invoked by the unified `smos` binary's `Init` subcommand.
 ///
 /// Runs every setup step in order and prints a consolidated ✓ / ✗ report.
-/// No step aborts the run on failure: a missing reranker or an unreachable
-/// Ollama is reported with a remediation hint so the operator fixes it and
-/// re-runs `smos init` to verify. Only the filesystem bootstrap (step 1)
-/// surfaces a hard error, because without `~/.smos` nothing else makes sense.
+/// No step aborts the run on failure: a missing `llama-server` binary or an
+/// unreachable service is reported with a remediation hint so the operator
+/// fixes it and re-runs `smos init` to verify. Only the filesystem bootstrap
+/// (step 1) surfaces a hard error, because without `~/.smos` nothing else
+/// makes sense.
 ///
 /// `init` always exits 0 (advisory): it is a setup wizard that reports state,
 /// not a strict gate. The strict exit-code gate is `smos doctor` (exits
@@ -71,11 +67,11 @@ pub async fn run_init() -> Result<()> {
 
     let config = load_config(&fs.paths.config);
 
-    println!("\n[2/5] Checking Ollama ({OLLAMA_URL})...");
-    init_checks::check_ollama_and_pull_models(OLLAMA_URL).await;
-
-    println!("\n[3/5] Checking llama-server on PATH...");
+    println!("\n[2/5] Checking llama-server on PATH...");
     init_checks::check_llama_server();
+
+    println!("\n[3/5] Checking llama-server services (ports 28081 / 28082 / 28181)...");
+    init_checks::check_llama_servers().await;
 
     println!("\n[4/5] Checking reranker ({})...", config.reranker.url);
     init_checks::check_reranker(&config.reranker).await;

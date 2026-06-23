@@ -46,21 +46,22 @@ After [Install](#install) gives you the `smos` binary, follow these steps in ord
 
 ### 1. Install dependencies
 
-SMOS needs two local services. **Install** them now — `smos init` (next step) pulls the models and checks connectivity, but it cannot install the binaries for you.
+SMOS talks to one local binary: **`llama-server`** from [llama.cpp](https://github.com/ggerganov/llama.cpp). Build it, put it on `PATH`, and download the GGUF weights for the three roles SMOS uses (chat + extraction, embedding, reranker). `smos init` checks every port — it cannot install the binary or fetch the weights for you.
 
-**Ollama** — runs the LLMs for chat, fact extraction, and embeddings. Install it from <https://ollama.com> and start the daemon:
-
-```bash
-ollama serve
-```
-
-**llama.cpp** — runs the cross-encoder reranker that enrichment depends on. Build `llama-server` from <https://github.com/ggerganov/llama.cpp> and put it on `PATH`, then grab a Qwen3-Reranker GGUF from HuggingFace. `smos init` tells you if it is missing; you can start it later.
+**llama.cpp** — runs the chat / extraction LLM, the embedding model, and the cross-encoder reranker that enrichment depends on. Build `llama-server` from <https://github.com/ggerganov/llama.cpp> and grab the GGUF weights from HuggingFace (e.g. Nemotron-3-Nano-4B for chat/extraction, Jina-Embeddings-v5 for embedding, Qwen3-Reranker for the reranker).
 
 ```bash
-llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
+# Embedding server (port 28081)
+llama-server --model jina-embeddings-v5.gguf --port 28081
+
+# Chat + extraction server (port 28082)
+llama-server --model nemotron-3-nano-4b.gguf --port 28082
+
+# Reranker (port 28181)
+llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 28181
 ```
 
-Don't want to babysit these processes? Flip `auto_launch = true` under `[llama_cpp]` in the config and `smos serve` will spawn `llama-server` for you (an already-running server on the same port is reused).
+Don't want to babysit these processes? `auto_launch = true` is the default under `[llama_cpp]` in the config — `smos serve` will spawn `llama-server` for you (an already-running server on the same port is reused).
 
 ### 2. Setup
 
@@ -71,13 +72,12 @@ smos init
 This single command:
 
 - Creates `~/.smos/` with a default `config.toml`, the working directories (`db/`, `models/`, `persons/`, `logs/`, `reports/`), and a stub persona at `persons/bob.md`.
-- Checks Ollama and pulls the required models (`granite4.1:3b`, `qwen3.5:2b`, `jina-embeddings-v5`).
 - Checks for `llama-server` on `PATH`.
-- Checks the reranker endpoint.
+- Probes `/health` on the three configured llama-server ports (28081 embedding, 28082 extraction, 28181 reranker).
 - Initializes the database (SurrealDB migrations).
 - Reports what is ready and what still needs attention.
 
-Fix any `✗` items shown, then run `smos init` again to verify. For a deeper audit (per-model validation, NLI cache, stats, a Markdown report), run `smos doctor`.
+Fix any `✗` items shown, then run `smos init` again to verify. For a deeper audit (NLI cache, stats, a Markdown report), run `smos doctor`.
 
 Now edit `~/.smos/config.toml` so it matches your setup: provider URLs, model ids, and which `[persons.*]` identity routes where. See [Configuration](#configuration).
 
@@ -119,24 +119,24 @@ Base config lives at `~/.smos/config.toml` (or `smos.toml` next to the binary �
 
 ### Providers and Persons
 
-A **provider** is one upstream OpenAI-compatible endpoint (Ollama, OpenRouter, OpenAI, vLLM…). A **person** is a named identity that bundles a memory namespace, a routing target, and an optional persona.
+A **provider** is one upstream OpenAI-compatible endpoint (`llama-server`, OpenRouter, OpenAI, vLLM…). A **person** is a named identity that bundles a memory namespace, a routing target, and an optional persona.
 
 ```toml
 [[providers]]
-name = "ollama"
-url = "http://localhost:11434/v1/chat/completions"
+name = "llama-local"
+url = "http://localhost:28082/v1/chat/completions"
 api_key_env = ""                       # env var name; empty = no auth header
 
 [persons.bob]
-provider = "ollama"                    # must match a [[providers]].name
-model = "granite4.1:3b"               # upstream model id
+provider = "llama-local"               # must match a [[providers]].name
+model = "nemotron-3-nano-4b"           # upstream model id
 persona = "~/.smos/persons/bob.md"     # optional; ~ expands to user home
 ```
 
 When a client sends `{"model": "bob", ...}`, SMOS:
 
 1. Uses `"bob"` as the **memory isolation key** — extracted facts land under this namespace.
-2. Rewrites `model` to the upstream `granite4.1:3b` and routes to provider `"ollama"`.
+2. Rewrites `model` to the upstream `nemotron-3-nano-4b` and routes to provider `"llama-local"`.
 3. Prepends the persona file contents as a `system` message.
 
 A model name that is not a configured person returns HTTP 400 — every request must name a real `[persons.*]` entry.
@@ -156,7 +156,7 @@ SMOS injects the persona once per conversation as a system message; the client's
 
 ### llama.cpp auto-launch
 
-Flip `auto_launch = true` and `smos serve` will spawn the embedding, reranker, and extraction `llama-server` processes itself. Each port is probed first — an already-running server is reused.
+`auto_launch = true` is the default — `smos serve` spawns the embedding, reranker, and extraction `llama-server` processes itself. Each port is probed first — an already-running server is reused. Disable it only when you launch `llama-server` yourself or route through a remote provider.
 
 ```toml
 [llama_cpp]
@@ -165,17 +165,17 @@ auto_launch = true
 
 [llama_cpp.embedding]
 model_path = "~/.smos/models/jina-embeddings-v5.gguf"
-port = 8081
+port = 28081
 extra_args = ["--ctx-size", "2048"]
 
 [llama_cpp.reranker]
 model_path = "~/.smos/models/qwen3-reranker.gguf"
-port = 8181
+port = 28181
 extra_args = ["--ctx-size", "8192"]
 
 [llama_cpp.extraction]
-model_path = "~/.smos/models/qwen3.5-2b.gguf"
-port = 8082
+model_path = "~/.smos/models/nemotron-3-nano-4b.gguf"
+port = 28082
 extra_args = ["--ctx-size", "4096"]
 ```
 
@@ -281,7 +281,7 @@ curl http://localhost:8888/v1/chat/completions \
 
 | Command | Description |
 |---|---|
-| `smos init` | One-command setup: `~/.smos` bootstrap + Ollama/llama-server/reranker checks + DB migrations. Idempotent. |
+| `smos init` | One-command setup: `~/.smos` bootstrap + `llama-server` / reranker health probes + DB migrations. Idempotent. |
 | `smos serve` | Start the HTTP proxy. |
 | `smos doctor` | Validate environment + show SurrealDB stats. |
 | `smos doctor --stats` | Quick memory stats (no model round-trips). |

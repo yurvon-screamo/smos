@@ -1,9 +1,10 @@
 //! E2E: response extraction pipeline.
 //!
-//! Each test spins up wiremock upstreams (OpenAI-compatible upstream, Ollama
-//! `/api/chat` extractor, Ollama `/api/embeddings` embedder) and an isolated
-//! in-process SurrealDB. The full `HandleChatCompletion` pipeline runs through
-//! the spawned SMOS HTTP server; extraction is a non-blocking background task,
+//! Each test spins up wiremock upstreams (OpenAI-compatible upstream chat
+//! server, OpenAI-compatible `/v1/chat/completions` extractor, OpenAI-
+//! compatible `/v1/embeddings` embedder) and an isolated in-process
+//! SurrealDB. The full `HandleChatCompletion` pipeline runs through the
+//! spawned SMOS HTTP server; extraction is a non-blocking background task,
 //! so tests poll the store until the expected facts land (or time out).
 //!
 //! Extraction is enabled by default in this suite (each test builds its own
@@ -30,10 +31,10 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 /// extraction enabled. Reuses `config_with_mocks` then flips the kill-switch.
 fn config_with_extraction(
     upstream: &MockServer,
-    ollama: &MockServer,
+    llama: &MockServer,
     reranker: &MockServer,
 ) -> smos::config::SmosConfig {
-    let mut config = common::config_with_mocks(upstream, ollama, reranker);
+    let mut config = common::config_with_mocks(upstream, llama, reranker);
     config.server.enable_response_extraction = true;
     config
 }
@@ -112,74 +113,92 @@ fn split_at_char_boundary(s: &str, mut mid: usize) -> (&str, &str) {
     s.split_at(mid)
 }
 
-/// Mount Ollama `/api/chat` returning the supplied bullet-list facts. The mock
-/// echoes whatever facts the operator wants the (mock) extractor to "produce".
-async fn mount_ollama_chat_facts(ollama: &MockServer, facts: Vec<String>) {
+/// Mount `/v1/chat/completions` (extractor role) returning the supplied
+/// bullet-list facts. The mock echoes whatever facts the operator wants the
+/// (mock) extractor to "produce".
+async fn mount_extractor_chat_facts(extractor: &MockServer, facts: Vec<String>) {
     let body = facts
         .into_iter()
         .map(|f| format!("- {f}"))
         .collect::<Vec<_>>()
         .join("\n");
     Mock::given(method("POST"))
-        .and(path("/api/chat"))
+        .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "message": {"content": body}
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": body},
+                "finish_reason": "stop",
+            }],
         })))
-        .mount(ollama)
+        .mount(extractor)
         .await;
 }
 
-/// Mount Ollama `/api/chat` with a fixed delay (used to prove extraction does
-/// not block the client response).
-async fn mount_ollama_chat_facts_delayed(ollama: &MockServer, facts: Vec<String>, delay: Duration) {
+/// Mount `/v1/chat/completions` (extractor role) with a fixed delay (used to
+/// prove extraction does not block the client response).
+async fn mount_extractor_chat_facts_delayed(
+    extractor: &MockServer,
+    facts: Vec<String>,
+    delay: Duration,
+) {
     let body = facts
         .into_iter()
         .map(|f| format!("- {f}"))
         .collect::<Vec<_>>()
         .join("\n");
     Mock::given(method("POST"))
-        .and(path("/api/chat"))
+        .and(path("/v1/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_delay(delay)
-                .set_body_json(json!({"message": {"content": body}})),
+                .set_body_json(json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": body},
+                        "finish_reason": "stop",
+                    }],
+                })),
         )
-        .mount(ollama)
+        .mount(extractor)
         .await;
 }
 
-/// Mount Ollama `/api/embeddings` returning a deterministic 1024-dim unit
-/// embedding derived from the request prompt. Two calls with the same prompt
-/// yield the same vector; two calls with different prompts yield vectors at
-/// different axes → cosine similarity 0. This mirrors real embedder behaviour
-/// so the semantic-dedup Layer 2 does not collapse unrelated facts (which
-/// would otherwise happen if every prompt returned the same constant vector).
-async fn mount_ollama_embeddings(ollama: &MockServer) {
+/// Mount `/v1/embeddings` returning a deterministic 1024-dim unit embedding
+/// derived from the request `input`. Two calls with the same input yield the
+/// same vector; two calls with different inputs yield vectors at different
+/// axes → cosine similarity 0. This mirrors real embedder behaviour so the
+/// semantic-dedup Layer 2 does not collapse unrelated facts (which would
+/// otherwise happen if every input returned the same constant vector).
+async fn mount_extractor_embeddings(extractor: &MockServer) {
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
+        .and(path("/v1/embeddings"))
         .respond_with(UniqueEmbeddings)
-        .mount(ollama)
+        .mount(extractor)
         .await;
 }
 
-/// Embeddings responder that maps each request prompt to a deterministic
+/// Embeddings responder that maps each request `input` to a deterministic
 /// 1024-dim unit vector. The axis is derived from a non-commutative FNV-1a
-/// hash of the prompt so identical prompts always share an embedding
-/// (allowing Layer 1 exact match + Layer 2 semantic match to work as in
-/// production) while different prompts land on orthogonal axes (cosine 0
-/// → no false dedup). FNV-1a is used instead of byte-sum so anagrammatic
-/// prompts ("ab" vs "ba") do not collide on the same axis.
+/// hash of the input so identical inputs always share an embedding (allowing
+/// Layer 1 exact match + Layer 2 semantic match to work as in production)
+/// while different inputs land on orthogonal axes (cosine 0 → no false
+/// dedup). FNV-1a is used instead of byte-sum so anagrammatic inputs ("ab"
+/// vs "ba") do not collide on the same axis.
 struct UniqueEmbeddings;
 
 impl Respond for UniqueEmbeddings {
     fn respond(&self, request: &Request) -> ResponseTemplate {
-        let prompt = serde_json::from_slice::<serde_json::Value>(&request.body)
+        let input = serde_json::from_slice::<serde_json::Value>(&request.body)
             .ok()
-            .and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(str::to_string))
+            .and_then(|v| v.get("input").and_then(|p| p.as_str()).map(str::to_string))
             .unwrap_or_default();
-        let axis = (fnv1a_32(prompt.as_bytes()) as usize) % common::EMBEDDING_DIM;
+        let axis = (fnv1a_32(input.as_bytes()) as usize) % common::EMBEDDING_DIM;
         ResponseTemplate::new(200).set_body_json(json!({
-            "embedding": unit_embedding_1024(axis).as_slice().to_vec()
+            "data": [{
+                "index": 0,
+                "embedding": unit_embedding_1024(axis).as_slice().to_vec(),
+            }],
         }))
     }
 }
@@ -195,12 +214,13 @@ fn fnv1a_32(bytes: &[u8]) -> u32 {
     hash
 }
 
-/// Mount Ollama `/api/chat` as a 500 — drives the retry / give-up paths.
-async fn mount_ollama_chat_always_500(ollama: &MockServer) {
+/// Mount `/v1/chat/completions` (extractor role) as a 500 — drives the
+/// retry / give-up paths.
+async fn mount_extractor_chat_always_500(extractor: &MockServer) {
     Mock::given(method("POST"))
-        .and(path("/api/chat"))
+        .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(500))
-        .mount(ollama)
+        .mount(extractor)
         .await;
 }
 
@@ -219,21 +239,29 @@ impl Respond for FailNTimesThenSucceed {
             ResponseTemplate::new(500)
         } else {
             ResponseTemplate::new(200).set_body_json(json!({
-                "message": {"content": self.body.clone()}
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": self.body.clone()},
+                    "finish_reason": "stop",
+                }],
             }))
         }
     }
 }
 
-async fn mount_ollama_chat_fail_then_succeed(ollama: &MockServer, fail_times: usize, fact: &str) {
+async fn mount_extractor_chat_fail_then_succeed(
+    extractor: &MockServer,
+    fail_times: usize,
+    fact: &str,
+) {
     Mock::given(method("POST"))
-        .and(path("/api/chat"))
+        .and(path("/v1/chat/completions"))
         .respond_with(FailNTimesThenSucceed {
             fail_times,
             body: format!("- {fact}"),
             count: AtomicUsize::new(0),
         })
-        .mount(ollama)
+        .mount(extractor)
         .await;
 }
 
@@ -306,18 +334,18 @@ fn fixed_session(tag: u8) -> SessionId {
 #[tokio::test]
 async fn extraction_saves_pending_facts() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_content(&upstream, "TTL=10 prevents the token refresh loop").await;
-    mount_ollama_chat_facts(
-        &ollama,
+    mount_extractor_chat_facts(
+        &llama,
         vec!["TTL=10 prevents the token refresh loop".into()],
     )
     .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
@@ -344,24 +372,27 @@ async fn extraction_saves_pending_facts() {
 #[tokio::test]
 async fn extraction_filters_short_input() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     // Upstream content "ok" → cleaned "ok" (2 chars < MIN_INPUT_CHARS=15).
     mount_upstream_content(&upstream, "ok").await;
     // The extractor MUST NOT be called.
     Mock::given(method("POST"))
-        .and(path("/api/chat"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"message":{"content":"- should not happen"}})),
-        )
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "- should not happen"},
+                "finish_reason": "stop",
+            }],
+        })))
         .expect(0)
-        .mount(&ollama)
+        .mount(&llama)
         .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
@@ -381,15 +412,16 @@ async fn extraction_filters_short_input() {
 #[tokio::test]
 async fn extraction_retries_on_failure_then_succeeds() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_content(&upstream, "auth.rs uses JWT for token validation").await;
     // Fail twice, then succeed on the 3rd attempt.
-    mount_ollama_chat_fail_then_succeed(&ollama, 2, "auth.rs uses JWT for token validation").await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_chat_fail_then_succeed(&llama, 2, "auth.rs uses JWT for token validation")
+        .await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
@@ -416,14 +448,14 @@ async fn extraction_retries_on_failure_then_succeeds() {
 #[tokio::test]
 async fn extraction_gives_up_after_all_attempts_fail() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_content(&upstream, "a long enough response content here").await;
-    mount_ollama_chat_always_500(&ollama).await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_chat_always_500(&llama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
@@ -446,10 +478,10 @@ async fn extraction_gives_up_after_all_attempts_fail() {
 #[tokio::test]
 async fn extraction_cross_session_confirmation_unions_provenance() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
 
     // Seed a pending fact observed from session 1.
@@ -468,12 +500,12 @@ async fn extraction_cross_session_confirmation_unions_provenance() {
         .expect("seed");
 
     mount_upstream_content(&upstream, "TTL=10 prevents the token refresh loop").await;
-    mount_ollama_chat_facts(
-        &ollama,
+    mount_extractor_chat_facts(
+        &llama,
         vec!["TTL=10 prevents the token refresh loop".into()],
     )
     .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     let session_b = fixed_session(2);
@@ -530,22 +562,22 @@ async fn extraction_cross_session_confirmation_unions_provenance() {
 #[tokio::test]
 async fn extraction_noise_filter_strips_markers() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     // Response content carries SMOS control noise around the real signal.
     let noisy = "auth.rs uses JWT\n<!-- smos:sess_abcdef012345 -->\n<smos-memory session=\"s\">junk</smos-memory>";
     mount_upstream_content(&upstream, noisy).await;
-    mount_ollama_chat_facts(&ollama, vec!["auth.rs uses JWT".into()]).await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_chat_facts(&llama, vec!["auth.rs uses JWT".into()]).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
 
     // Wait for the fact to land — this proves the background extraction task
-    // completed (it must have called /api/chat before saving).
+    // completed (it must have called /v1/chat/completions before saving).
     let pending = wait_for_pending(
         &state.store,
         &enrichment_memory_key(),
@@ -555,15 +587,15 @@ async fn extraction_noise_filter_strips_markers() {
     .await;
     assert_eq!(pending[0].content(), "auth.rs uses JWT");
 
-    // The extraction input sent to Ollama must NOT contain the markers.
-    let chat_body = ollama
+    // The extraction input sent to the extractor must NOT contain the markers.
+    let chat_body = llama
         .received_requests()
         .await
         .unwrap_or_default()
         .into_iter()
-        .find(|r| r.url.path().ends_with("/api/chat"))
+        .find(|r| r.url.path().ends_with("/v1/chat/completions"))
         .map(|r| serde_json::from_slice::<Value>(&r.body).expect("chat body json"))
-        .expect("extraction /api/chat request recorded");
+        .expect("extraction /v1/chat/completions request recorded");
     let user_content = chat_body["messages"][1]["content"].as_str().unwrap_or("");
     assert!(
         !user_content.contains("smos:"),
@@ -582,20 +614,20 @@ async fn extraction_noise_filter_strips_markers() {
 #[tokio::test]
 async fn extraction_does_not_block_response() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_content(&upstream, "Docker image split into three services").await;
     // Extractor takes 2 s — the client response must return well before that.
-    mount_ollama_chat_facts_delayed(
-        &ollama,
+    mount_extractor_chat_facts_delayed(
+        &llama,
         vec!["Docker image split into three services".into()],
         Duration::from_secs(2),
     )
     .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state).await;
     let start = Instant::now();
@@ -620,22 +652,26 @@ async fn extraction_does_not_block_response() {
 #[tokio::test]
 async fn extraction_disabled_via_config_skips_pipeline() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let mut config = config_with_extraction(&upstream, &ollama, &reranker);
+    let mut config = config_with_extraction(&upstream, &llama, &reranker);
     config.server.enable_response_extraction = false;
     let state = build_state(config).await;
     mount_upstream_content(&upstream, "a sufficiently long response content").await;
     Mock::given(method("POST"))
-        .and(path("/api/chat"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"message":{"content":"- x"}})),
-        )
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "- x"},
+                "finish_reason": "stop",
+            }],
+        })))
         .expect(0)
-        .mount(&ollama)
+        .mount(&llama)
         .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
@@ -654,18 +690,18 @@ async fn extraction_disabled_via_config_skips_pipeline() {
 #[tokio::test]
 async fn extraction_includes_tool_calls_in_input() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_with_tool_call(&upstream, "ran the tool").await;
-    mount_ollama_chat_facts(&ollama, vec!["read_file returned auth.rs".into()]).await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_chat_facts(&llama, vec!["read_file returned auth.rs".into()]).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
-    // Wait for the fact to land — proves extraction ran (and called /api/chat).
+    // Wait for the fact to land — proves extraction ran (and called /v1/chat/completions).
     let _pending = wait_for_pending(
         &state.store,
         &enrichment_memory_key(),
@@ -674,14 +710,14 @@ async fn extraction_includes_tool_calls_in_input() {
     )
     .await;
 
-    let chat_body = ollama
+    let chat_body = llama
         .received_requests()
         .await
         .unwrap_or_default()
         .into_iter()
-        .find(|r| r.url.path().ends_with("/api/chat"))
+        .find(|r| r.url.path().ends_with("/v1/chat/completions"))
         .map(|r| serde_json::from_slice::<Value>(&r.body).expect("chat body json"))
-        .expect("extraction /api/chat request recorded");
+        .expect("extraction /v1/chat/completions request recorded");
     let user_content = chat_body["messages"][1]["content"].as_str().unwrap_or("");
     assert!(
         user_content.contains("read_file"),
@@ -700,10 +736,10 @@ async fn extraction_includes_tool_calls_in_input() {
 #[tokio::test]
 async fn extraction_persists_multiple_facts_and_registers_pending() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_content(
         &upstream,
@@ -717,8 +753,8 @@ async fn extraction_persists_multiple_facts_and_registers_pending() {
         "Nginx terminates TLS".to_string(),
         "The worker pool has four processes".to_string(),
     ];
-    mount_ollama_chat_facts(&ollama, facts.clone()).await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_chat_facts(&llama, facts.clone()).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
@@ -743,22 +779,26 @@ async fn extraction_persists_multiple_facts_and_registers_pending() {
 #[tokio::test]
 async fn extraction_filters_prompt_echoes() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_content(&upstream, "Some real technical content here").await;
     // The mock "extractor" echoes prompt noise AND one real fact.
     let echoed = "Thinking Process: analyze input\n- Do not extract trivial actions\n- real knowledge fact about the system";
     Mock::given(method("POST"))
-        .and(path("/api/chat"))
+        .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "message": {"content": echoed}
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": echoed},
+                "finish_reason": "stop",
+            }],
         })))
-        .mount(&ollama)
+        .mount(&llama)
         .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
@@ -785,18 +825,18 @@ async fn extraction_filters_prompt_echoes() {
 #[tokio::test]
 async fn extraction_streaming_saves_pending_fact() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_streaming(&upstream, "TTL=10 prevents the token refresh loop").await;
-    mount_ollama_chat_facts(
-        &ollama,
+    mount_extractor_chat_facts(
+        &llama,
         vec!["TTL=10 prevents the token refresh loop".into()],
     )
     .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     let body = json!({
@@ -827,19 +867,15 @@ async fn extraction_streaming_saves_pending_fact() {
 #[tokio::test]
 async fn extraction_streaming_concatenates_content_deltas() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     // The full content split across chunks; extraction input must be whole.
     mount_upstream_streaming(&upstream, "auth.rs uses JWT for token validation").await;
-    mount_ollama_chat_facts(
-        &ollama,
-        vec!["auth.rs uses JWT for token validation".into()],
-    )
-    .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_chat_facts(&llama, vec!["auth.rs uses JWT for token validation".into()]).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     let body = json!({
@@ -858,14 +894,14 @@ async fn extraction_streaming_concatenates_content_deltas() {
     )
     .await;
 
-    let chat_body = ollama
+    let chat_body = llama
         .received_requests()
         .await
         .unwrap_or_default()
         .into_iter()
-        .find(|r| r.url.path().ends_with("/api/chat"))
+        .find(|r| r.url.path().ends_with("/v1/chat/completions"))
         .map(|r| serde_json::from_slice::<Value>(&r.body).expect("chat body json"))
-        .expect("extraction /api/chat request recorded");
+        .expect("extraction /v1/chat/completions request recorded");
     let user_content = chat_body["messages"][1]["content"].as_str().unwrap_or("");
     assert!(
         user_content.contains("auth.rs uses JWT for token validation"),
@@ -880,18 +916,18 @@ async fn extraction_streaming_concatenates_content_deltas() {
 #[tokio::test]
 async fn full_pipeline_smoke_extraction_runs_after_passthrough() {
     let upstream = MockServer::start().await;
-    let ollama = MockServer::start().await;
+    let llama = MockServer::start().await;
     let reranker = MockServer::start().await;
 
-    let config = config_with_extraction(&upstream, &ollama, &reranker);
+    let config = config_with_extraction(&upstream, &llama, &reranker);
     let state = build_state(config).await;
     mount_upstream_content(&upstream, "Prometheus scrapes metrics on port 9090").await;
-    mount_ollama_chat_facts(
-        &ollama,
+    mount_extractor_chat_facts(
+        &llama,
         vec!["Prometheus scrapes metrics on port 9090".into()],
     )
     .await;
-    mount_ollama_embeddings(&ollama).await;
+    mount_extractor_embeddings(&llama).await;
 
     let smos = serve_state(state.clone()).await;
     let resp = reqwest::Client::new()

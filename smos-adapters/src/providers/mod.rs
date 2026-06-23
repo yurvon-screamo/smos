@@ -1,7 +1,9 @@
 //! Concrete `EmbeddingProvider` and `RerankProvider` adapters.
 //!
-//! - [`ollama`] implements `EmbeddingProvider` against the Ollama
-//!   `/api/embeddings` (single-prompt) endpoint.
+//! - [`ollama`] implements `EmbeddingProvider` + `LlmExtractor` against
+//!   OpenAI-compatible `/v1/embeddings` and `/v1/chat/completions` endpoints
+//!   (served by `llama-server`). The module name is historical — the wire
+//!   protocol is OpenAI-compatible, not Ollama-native.
 //! - [`llama_cpp`] implements `RerankProvider` against the llama.cpp
 //!   `/v1/rerank` endpoint.
 //!
@@ -9,7 +11,7 @@
 //!
 //! The two adapters diverge deliberately:
 //!
-//! - **Embeddings are fail-open.** The Ollama adapter translates HTTP-level
+//! - **Embeddings are fail-open.** The embedding adapter translates HTTP-level
 //!   failures into `Ok(None)`. The `EnrichRequest` use case treats that as
 //!   "skip enrichment, forward the original messages" so a flaky embedder
 //!   never blocks a chat request.

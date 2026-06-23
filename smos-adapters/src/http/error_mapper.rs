@@ -74,8 +74,8 @@ pub fn render(error: UpstreamError) -> Response {
 ///       from `[[providers]]`; surfaced here defensively, since the
 ///       startup validator catches it first).
 /// - `Repo` / `Provider` variants map to 503 Service Unavailable: those are
-///   recoverable downstream outages (DB down, Ollama down). The client can
-///   retry; the proxy stays up.
+///   recoverable downstream outages (DB down, llama-server down). The client
+///   can retry; the proxy stays up.
 pub fn render_use_case_error(error: UseCaseError) -> Response {
     match error {
         UseCaseError::Upstream(upstream) => render(upstream),

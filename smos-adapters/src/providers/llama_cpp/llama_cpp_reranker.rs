@@ -174,14 +174,14 @@ mod tests {
 
     #[test]
     fn rerank_url_strips_trailing_slash_and_appends_path() {
-        let r = LlamaCppReranker::new(cfg("http://rr:8181/")).expect("build");
-        assert_eq!(r.rerank_url(), "http://rr:8181/v1/rerank");
+        let r = LlamaCppReranker::new(cfg("http://rr:28181/")).expect("build");
+        assert_eq!(r.rerank_url(), "http://rr:28181/v1/rerank");
     }
 
     #[test]
     fn rerank_url_for_plain_base() {
-        let r = LlamaCppReranker::new(cfg("http://rr:8181")).expect("build");
-        assert_eq!(r.rerank_url(), "http://rr:8181/v1/rerank");
+        let r = LlamaCppReranker::new(cfg("http://rr:28181")).expect("build");
+        assert_eq!(r.rerank_url(), "http://rr:28181/v1/rerank");
     }
 
     #[test]

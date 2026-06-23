@@ -1,162 +1,94 @@
-//! LLM/embedding connectivity + required-models check + reranker probe.
+//! LLM/embedding connectivity + reranker probes for the doctor.
 //!
-//! Two public entry points:
-//! - [`check_llm_extractions`] / [`check_embeddings`] — `GET {url}/api/tags`,
-//!   list models, match against the configured extraction + embedding
-//!   expectations respectively.
-//! - [`check_reranker`] — probe the llama.cpp reranker URL. The reranker is
-//!   a hard dependency: an unreachable endpoint makes every chat-completion
-//!   request fail with HTTP 503. The probe therefore emits FAIL — not WARN —
-//!   so an operator who runs `smos doctor` sees the dependency before the
-//!   first request fails in production.
+//! Three public entry points, each emitting one [`CheckResult`] row:
+//! - [`check_llm_extractions`] — `GET {extraction_url}/health`.
+//! - [`check_embeddings`] — `GET {embedding_url}/health`.
+//! - [`check_reranker`] — `GET {reranker_url}/health`.
 //!
-//! The match logic lives in [`super::super::models`]; this module owns the
-//! HTTP IO and the row construction.
+//! The probes answer "is something listening on the configured port and
+//! answering HTTP?" — they do NOT inspect the model loaded on the server
+//! (llama.cpp exposes no standard `/v1/models` shape we can match against
+//! the configured `model` id, and an unloaded-model failure surfaces fast
+//! enough on the first real request). The reranker is a hard dependency:
+//! an unreachable endpoint makes every chat-completion request fail with
+//! HTTP 503, so its probe emits FAIL — not WARN — so an operator who runs
+//! `smos doctor` sees the dependency before the first request fails in
+//! production.
 
 use std::time::Duration;
 
 use reqwest::Client;
 
-use super::super::models::{ExpectedModel, match_expected_models};
 use super::super::types::CheckResult;
 use crate::config::{EmbeddingConfig, LlmExtractionConfig, RerankerConfig};
 
-/// Ollama `/api/tags` response shape — only the fields the doctor reads.
-/// Extra fields returned by the server are silently ignored by serde.
-#[derive(Debug, serde::Deserialize)]
-struct TagsResponse {
-    models: Vec<TagsModel>,
+/// Build the `/health` URL for `base_url` (trailing-slash safe).
+fn health_url(base_url: &str) -> String {
+    format!("{}/health", base_url.trim_end_matches('/'))
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct TagsModel {
-    name: String,
-}
-
-/// Build the expected-model list from the SMOS extraction + embedding
-/// configs. One row per role. Exposed for tests that exercise the doctor
-/// helper without spinning up Ollama.
-#[cfg(test)]
-fn expected_models_from_config(
-    extraction: &LlmExtractionConfig,
-    embedding: &EmbeddingConfig,
-) -> Vec<ExpectedModel> {
-    vec![
-        ExpectedModel::new("extraction model", &extraction.model),
-        ExpectedModel::new("embedding model", &embedding.model),
-    ]
-}
-
-/// Probe the LLM extraction endpoint and emit one row per expected model +
-/// one connectivity row.
+/// Probe the LLM extraction server (`/health`). Emits one PASS / FAIL row
+/// carrying the configured URL so the operator can confirm which `[llm_extraction]`
+/// entry was actually validated.
 ///
-/// `timeout` bounds each HTTP request so a wedged backend that accepts the
-/// TCP handshake but never responds surfaces as FAIL instead of hanging
-/// the doctor.
+/// `timeout` bounds the request so a wedged backend that accepts the TCP
+/// handshake but never responds surfaces as FAIL instead of hanging the
+/// doctor.
 pub async fn check_llm_extractions(
     client: &Client,
     extraction: &LlmExtractionConfig,
     timeout: Duration,
 ) -> Vec<CheckResult> {
-    check_one_endpoint(
-        client,
-        &extraction.url,
-        &extraction.model,
-        "extraction",
-        timeout,
-    )
-    .await
+    vec![probe_role(client, &extraction.url, "extraction", timeout).await]
 }
 
-/// Probe the embedding endpoint and emit one row per expected model + one
-/// connectivity row. Kept separate from [`check_llm_extractions`] because the
-/// two sections may point at different hosts.
+/// Probe the embedding server (`/health`). Kept separate from
+/// [`check_llm_extractions`] because the two sections may point at different
+/// hosts.
 pub async fn check_embeddings(
     client: &Client,
     embedding: &EmbeddingConfig,
     timeout: Duration,
 ) -> Vec<CheckResult> {
-    check_one_endpoint(
-        client,
-        &embedding.url,
-        &embedding.model,
-        "embedding",
-        timeout,
-    )
-    .await
+    vec![probe_role(client, &embedding.url, "embedding", timeout).await]
 }
 
-async fn check_one_endpoint(
+/// One role probe. Returns a single row whose name embeds the role label so
+/// the doctor output stays readable when multiple roles are checked.
+async fn probe_role(
     client: &Client,
     base_url: &str,
-    model: &str,
     role: &'static str,
     timeout: Duration,
-) -> Vec<CheckResult> {
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let mut results = Vec::new();
-
-    let response = client.get(&url).timeout(timeout).send().await;
-    let body = match response {
-        Ok(r) if r.status().is_success() => r.bytes().await.ok(),
-        _ => None,
-    };
-
-    let Some(bytes) = body else {
-        results.push(
-            CheckResult::fail(
-                format!("Ollama connectivity ({role})"),
-                format!("url: {base_url}"),
-            )
-            .with_recommendation("start `ollama serve`"),
-        );
-        results.push(
-            CheckResult::fail(
-                format!("Required model ({role}): {model}"),
-                "Ollama unreachable",
-            )
-            .with_recommendation(format!("ollama pull {model}")),
-        );
-        return results;
-    };
-
-    let parsed: Result<TagsResponse, _> = serde_json::from_slice(&bytes);
-    let Ok(parsed) = parsed else {
-        results.push(
-            CheckResult::fail(
-                format!("Ollama connectivity ({role})"),
-                "response was not valid JSON",
-            )
-            .with_recommendation("check Ollama version (>=0.1.x)"),
-        );
-        return results;
-    };
-
-    let names: Vec<String> = parsed.models.into_iter().map(|m| m.name).collect();
-    let count = names.len();
-    results.push(CheckResult::pass(
-        format!("Ollama connectivity ({role})"),
-        format!("url: {base_url}\navailable models: {count}"),
-    ));
-
-    let role_label: &'static str = match role {
-        "extraction" => "extraction model",
-        "embedding" => "embedding model",
-        other => other,
-    };
-    let expected = vec![ExpectedModel::new(role_label, model)];
-    for (m, hit) in match_expected_models(&expected, &names) {
-        let name = format!("Required model: {}", m.configured);
-        if hit {
-            results.push(CheckResult::pass(name, format!("role: {}", m.role)));
-        } else {
-            results.push(
-                CheckResult::fail(name, "not pulled")
-                    .with_recommendation(format!("ollama pull {}", m.configured)),
-            );
+) -> CheckResult {
+    let url = health_url(base_url);
+    match client.get(&url).timeout(timeout).send().await {
+        Ok(response) => {
+            let status = response.status();
+            if status.is_success() {
+                CheckResult::pass(
+                    format!("llama-server connectivity ({role})"),
+                    format!("url: {base_url}"),
+                )
+            } else {
+                CheckResult::fail(
+                    format!("llama-server connectivity ({role})"),
+                    format!("url: {base_url}\nHTTP {}", status),
+                )
+                .with_recommendation(format!(
+                    "start `llama-server` for the {role} role on {base_url}"
+                ))
+            }
         }
+        Err(_) => CheckResult::fail(
+            format!("llama-server connectivity ({role})"),
+            format!("url: {base_url}\nunreachable"),
+        )
+        .with_recommendation(format!(
+            "start `llama-server` for the {role} role on {base_url}, or enable \
+             [llama_cpp] auto_launch = true in config.toml"
+        )),
     }
-    results
 }
 
 /// Doctor check name for the reranker probe. Shared between the live probe
@@ -186,7 +118,7 @@ pub async fn check_reranker(
     config: &RerankerConfig,
     timeout: Duration,
 ) -> CheckResult {
-    let url = format!("{}/health", config.url.trim_end_matches('/'));
+    let url = health_url(&config.url);
     match client.get(&url).timeout(timeout).send().await {
         Ok(r) if r.status().is_success() => CheckResult::pass(
             RERANKER_CHECK_NAME,
@@ -202,59 +134,5 @@ pub async fn check_reranker(
             format!("url: {}\nunreachable", config.url),
         )
         .with_recommendation(RERANKER_UNREACHABLE_HINT),
-    }
-}
-
-/// Test helper: classify the first model row from an `/api/tags` JSON body.
-/// Exposed so the unit tests can verify the parser shape without spinning
-/// up Ollama.
-#[cfg(test)]
-pub(crate) fn parse_tags_for_test(body: &[u8]) -> Option<Vec<String>> {
-    let parsed: TagsResponse = serde_json::from_slice(body).ok()?;
-    Some(parsed.models.into_iter().map(|m| m.name).collect())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn extraction() -> LlmExtractionConfig {
-        LlmExtractionConfig {
-            url: "http://localhost:11434".into(),
-            model: "qwen3.5:2b".into(),
-            ..LlmExtractionConfig::default()
-        }
-    }
-
-    fn embedding() -> EmbeddingConfig {
-        EmbeddingConfig {
-            url: "http://localhost:11434".into(),
-            model: "hf.co/jinaai/jinaai-embeddings-v5:latest".into(),
-            ..EmbeddingConfig::default()
-        }
-    }
-
-    #[test]
-    fn expected_models_from_config_lists_both_roles() {
-        let expected = expected_models_from_config(&extraction(), &embedding());
-        assert_eq!(expected.len(), 2);
-        assert_eq!(expected[0].role, "extraction model");
-        assert_eq!(expected[1].role, "embedding model");
-    }
-
-    #[test]
-    fn parse_tags_for_test_handles_minimal_body() {
-        let body = br#"{"models":[{"name":"granite4.1:3b"},{"name":"qwen3.5:2b"}]}"#;
-        let names = parse_tags_for_test(body).expect("parsed");
-        assert_eq!(
-            names,
-            vec!["granite4.1:3b".to_string(), "qwen3.5:2b".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_tags_for_test_returns_none_on_invalid_body() {
-        assert!(parse_tags_for_test(b"not json").is_none());
-        assert!(parse_tags_for_test(br#"{"no_models_key":[]}"#).is_none());
     }
 }

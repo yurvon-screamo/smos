@@ -37,7 +37,8 @@ pub struct AppState {
     pub store: SurrealStore,
     pub embedder: OllamaEmbedding,
     pub reranker: LlamaCppReranker,
-    /// Slice-5 response extractor (Ollama Qwen3.5-2B via `/api/chat`).
+    /// Slice-5 response extractor (OpenAI-compatible `/v1/chat/completions`,
+    /// backed by `llama-server` with the configured extraction GGUF).
     pub extractor: OllamaExtractor,
     pub upstream: ReqwestUpstreamRouter,
     pub clock: Arc<dyn Clock + Send + Sync>,

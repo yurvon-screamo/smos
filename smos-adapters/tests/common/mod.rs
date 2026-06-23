@@ -1,15 +1,15 @@
 //! Shared helpers for the SMOS E2E suites.
 //!
-//! Each test spins up wiremock upstreams (mock OpenAI server, optionally mock
-//! Ollama embeddings + mock reranker), builds an SMOS router pointing at them,
-//! and serves SMOS on an ephemeral port inside a spawned task. Tests then hit
-//! SMOS with a plain `reqwest` client exactly the way a real OpenAI client
-//! would.
+//! Each test spins up wiremock upstreams (mock OpenAI chat server, optionally
+//! a mock OpenAI-compatible embedding+extraction server and a mock
+//! reranker), builds an SMOS router pointing at them, and serves SMOS on an
+//! ephemeral port inside a spawned task. Tests then hit SMOS with a plain
+//! `reqwest` client exactly the way a real OpenAI client would.
 //!
 //! Passthrough tests don't exercise enrichment, so they reuse [`spawn_smos`]
 //! which wires stub providers that short-circuit enrichment (unreachable
-//! Ollama/reranker URLs fail-open). Enrichment tests use [`build_state`] /
-//! [`serve_state`] to wire real providers against the supplied wiremock URLs
+//! llama-server/reranker URLs fail-open). Enrichment tests use [`build_state`]
+//! / [`serve_state`] to wire real providers against the supplied wiremock URLs
 //! and seed facts through the returned `SurrealStore`.
 
 #![allow(dead_code)]
@@ -86,12 +86,12 @@ pub fn config_pointing_at(upstream_base: &str) -> SmosConfig {
 /// construction; tests that exercise vector search use the same dimension.
 ///
 /// Extraction is DISABLED by default: enrichment-focused tests do not mount
-/// `/api/chat`, and an extraction attempt against the embeddings-only mock
-/// would otherwise retry (1 s + 2 s) on every request. Extraction tests build
-/// their own config with extraction enabled.
+/// `/v1/chat/completions`, and an extraction attempt against the
+/// embeddings-only mock would otherwise retry (1 s + 2 s) on every request.
+/// Extraction tests build their own config with extraction enabled.
 pub fn config_with_mocks(
     upstream_server: &MockServer,
-    ollama_server: &MockServer,
+    llama_server: &MockServer,
     reranker_server: &MockServer,
 ) -> SmosConfig {
     let mut config = SmosConfig::default();
@@ -110,9 +110,9 @@ pub fn config_with_mocks(
             persona: String::new(),
         },
     );
-    config.llm_extraction.url = ollama_server.uri();
+    config.llm_extraction.url = llama_server.uri();
     config.llm_extraction.timeout_seconds = 5;
-    config.embedding.url = ollama_server.uri();
+    config.embedding.url = llama_server.uri();
     config.embedding.timeout_seconds = 5;
     config.reranker.url = reranker_server.uri();
     config.reranker.timeout_seconds = 5;
@@ -122,8 +122,9 @@ pub fn config_with_mocks(
 }
 
 /// Spawn SMOS on an ephemeral port against a wiremock `upstream_base` with
-/// stub providers (empty SurrealStore, unreachable Ollama/reranker URLs that
-/// short-circuit enrichment via fail-open). Used by passthrough tests.
+/// stub providers (empty SurrealStore, unreachable llama-server / reranker
+/// URLs that short-circuit enrichment via fail-open). Used by passthrough
+/// tests.
 pub async fn spawn_smos(upstream_base: &str) -> String {
     let mut config = config_pointing_at(upstream_base);
     config.llm_extraction.url = "http://127.0.0.1:1".into();

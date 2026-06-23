@@ -96,19 +96,19 @@ mod tests {
         let mut r = DoctorReport::new("2026-06-18T13:45:01Z", "smos.toml");
         r.push(CheckResult::pass("smos binary", "version: 0.1.0"));
         r.push(CheckResult::pass(
-            "Ollama connectivity",
-            "url: http://localhost:11434\nmodels: 12",
+            "llama-server connectivity",
+            "url: http://localhost:28082\nmodels: 12",
         ));
         r.push(
-            CheckResult::fail("Reranker", "url: http://localhost:8181 unreachable")
+            CheckResult::fail("Reranker", "url: http://localhost:28181 unreachable")
                 .with_recommendation(
                     "start the llama.cpp reranker server; every chat-completion \
                      request fails with HTTP 503 while it is down",
                 ),
         );
         r.push(
-            CheckResult::fail("granite4.1:3b", "model missing")
-                .with_recommendation("ollama pull granite4.1:3b"),
+            CheckResult::fail("llama-server (extraction)", "model missing")
+                .with_recommendation("start llama-server on port 28082"),
         );
         r.stats = Some(StatsSnapshot {
             total_facts: 5,
@@ -136,7 +136,7 @@ mod tests {
         assert!(md.contains("| smos binary | PASS |"));
         // Reranker is a hard dependency → FAIL when unreachable.
         assert!(md.contains("| Reranker | FAIL |"));
-        assert!(md.contains("| granite4.1:3b | FAIL |"));
+        assert!(md.contains("| llama-server (extraction) | FAIL |"));
     }
 
     #[test]
@@ -161,7 +161,7 @@ mod tests {
         let md = render_markdown(&sample_report());
         assert!(md.contains("## Recommendations"));
         assert!(md.contains("Reranker: start the llama.cpp reranker server"));
-        assert!(md.contains("granite4.1:3b: ollama pull granite4.1:3b"));
+        assert!(md.contains("llama-server (extraction): start llama-server on port 28082"));
         // Passing checks should not be echoed as recommendations.
         assert!(!md.contains("Recommendations\n- smos binary"));
     }
@@ -169,8 +169,8 @@ mod tests {
     #[test]
     fn markdown_details_split_each_detail_line_as_bullet() {
         let md = render_markdown(&sample_report());
-        // "Ollama connectivity" details contained a newline → two bullets.
-        assert!(md.contains("- url: http://localhost:11434"));
+        // "llama-server connectivity" details contained a newline → two bullets.
+        assert!(md.contains("- url: http://localhost:28082"));
         assert!(md.contains("- models: 12"));
     }
 

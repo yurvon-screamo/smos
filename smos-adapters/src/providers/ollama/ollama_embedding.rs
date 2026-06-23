@@ -1,11 +1,11 @@
-//! `OllamaEmbedding` — `EmbeddingProvider` against the Ollama single-prompt
-//! `/api/embeddings` endpoint (POC parity with `smos/embeddings.py`).
+//! `OllamaEmbedding` — `EmbeddingProvider` against an OpenAI-compatible
+//! `/v1/embeddings` endpoint backed by `llama-server` (Jina v5 by default).
 //!
-//! The endpoint accepts `{"model": ..., "prompt": "..."}` and returns
-//! `{"embedding": [f32; dim]}`. HTTP-level failures are translated to
-//! `Ok(None)` so the upstream `EnrichRequest` use case can apply its fail-open
-//! policy; only request-body serialisation failures surface as `Err`
-//! (those indicate a code bug, not a transient outage).
+//! The endpoint accepts `{"model": ..., "input": "..."}` and returns
+//! `{"data": [{"embedding": [f32; dim]}]}`. HTTP-level failures are
+//! translated to `Ok(None)` so the upstream `EnrichRequest` use case can apply
+//! its fail-open policy; only request-body serialisation failures surface as
+//! `Err` (those indicate a code bug, not a transient outage).
 
 use std::sync::Arc;
 
@@ -17,7 +17,8 @@ use smos_application::ports::EmbeddingProvider;
 use crate::config::EmbeddingConfig;
 use crate::providers::ollama::ollama_client::build_client;
 
-/// Ollama-backed embedding adapter (Jina v5 by default).
+/// OpenAI-compatible embedding adapter backed by `llama-server`
+/// (Jina v5 by default).
 #[derive(Clone)]
 pub struct OllamaEmbedding {
     client: Client,
@@ -34,7 +35,7 @@ impl OllamaEmbedding {
     }
 
     fn embeddings_url(&self) -> String {
-        format!("{}/api/embeddings", self.config.url.trim_end_matches('/'))
+        format!("{}/v1/embeddings", self.config.url.trim_end_matches('/'))
     }
 
     /// Read-only access to the configured dimensions. Exposed for tests that
@@ -47,11 +48,16 @@ impl OllamaEmbedding {
 #[derive(Serialize)]
 struct EmbeddingsRequest<'a> {
     model: &'a str,
-    prompt: &'a str,
+    input: &'a str,
 }
 
 #[derive(Deserialize)]
 struct EmbeddingsResponse {
+    data: Vec<EmbeddingsData>,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingsData {
     embedding: Vec<f32>,
 }
 
@@ -64,7 +70,7 @@ impl EmbeddingProvider for OllamaEmbedding {
         }
         let body = EmbeddingsRequest {
             model: &self.config.model,
-            prompt: text,
+            input: text,
         };
         let response = match self
             .client
@@ -76,9 +82,9 @@ impl EmbeddingProvider for OllamaEmbedding {
             Ok(r) => r,
             Err(e) => {
                 if e.is_timeout() {
-                    tracing::warn!(error = %e, "ollama embeddings timeout (fail-open)");
+                    tracing::warn!(error = %e, "embeddings timeout (fail-open)");
                 } else {
-                    tracing::warn!(error = %e, "ollama embeddings send failed (fail-open)");
+                    tracing::warn!(error = %e, "embeddings send failed (fail-open)");
                 }
                 return Ok(None);
             }
@@ -86,22 +92,26 @@ impl EmbeddingProvider for OllamaEmbedding {
         if !response.status().is_success() {
             tracing::warn!(
                 status = response.status().as_u16(),
-                "ollama embeddings non-2xx (fail-open)"
+                "embeddings non-2xx (fail-open)"
             );
             return Ok(None);
         }
         let parsed: EmbeddingsResponse = match response.json().await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "ollama embeddings body decode failed (fail-open)");
+                tracing::warn!(error = %e, "embeddings body decode failed (fail-open)");
                 return Ok(None);
             }
         };
-        if parsed.embedding.is_empty() {
-            tracing::warn!("ollama returned empty embedding (fail-open)");
+        let Some(first) = parsed.data.into_iter().next() else {
+            tracing::warn!("embeddings response had no data items (fail-open)");
+            return Ok(None);
+        };
+        if first.embedding.is_empty() {
+            tracing::warn!("llama-server returned empty embedding (fail-open)");
             return Ok(None);
         }
-        Ok(Some(parsed.embedding))
+        Ok(Some(first.embedding))
     }
 }
 
@@ -119,19 +129,19 @@ mod tests {
 
     #[test]
     fn embeddings_url_strips_trailing_slash_and_appends_path() {
-        let embed = OllamaEmbedding::new(cfg("http://ollama:11434/")).expect("build");
-        assert_eq!(embed.embeddings_url(), "http://ollama:11434/api/embeddings");
+        let embed = OllamaEmbedding::new(cfg("http://llama:28081/")).expect("build");
+        assert_eq!(embed.embeddings_url(), "http://llama:28081/v1/embeddings");
     }
 
     #[test]
     fn embeddings_url_for_plain_base() {
-        let embed = OllamaEmbedding::new(cfg("http://ollama:11434")).expect("build");
-        assert_eq!(embed.embeddings_url(), "http://ollama:11434/api/embeddings");
+        let embed = OllamaEmbedding::new(cfg("http://llama:28081")).expect("build");
+        assert_eq!(embed.embeddings_url(), "http://llama:28081/v1/embeddings");
     }
 
     #[test]
     fn dimensions_exposes_configured_value() {
-        let embed = OllamaEmbedding::new(cfg("http://ollama:11434")).expect("build");
+        let embed = OllamaEmbedding::new(cfg("http://llama:28081")).expect("build");
         assert_eq!(embed.dimensions(), EmbeddingConfig::default().dimensions);
     }
 }
