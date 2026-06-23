@@ -1,4 +1,4 @@
-//! Integration tests for the `smos_adapters::doctor` public API.
+//! Integration tests for the `smos::doctor` public API.
 //!
 //! These tests cover ONLY pure helpers — model matching, formatting,
 //! aggregation, and end-to-end renderers. The IO entry points
@@ -6,8 +6,8 @@
 //! automating them here would couple the suite to live external systems
 //! and violate the "tests stay fast" contract of the workspace.
 
-use smos_adapters::doctor::terminal::ColorMode;
-use smos_adapters::doctor::{
+use smos::doctor::terminal::ColorMode;
+use smos::doctor::{
     CheckResult, CheckStatus, DoctorFlags, DoctorReport, ExpectedModel, StatsSnapshot, aggregate,
     collect_recommendations, match_expected_models, render_markdown, render_terminal, summary_line,
 };
@@ -72,7 +72,7 @@ fn aggregate_classifies_each_status_correctly() {
 
 #[test]
 fn summary_line_format_matches_smoke_test_spec() {
-    let s = smos_adapters::doctor::ReportSummary {
+    let s = smos::doctor::ReportSummary {
         pass: 7,
         warn: 1,
         fail: 0,

@@ -89,7 +89,7 @@ jobs:
         run: cargo publish -p smos-application
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - name: Publish smos-adapters
-        run: cargo publish -p smos-adapters
+      - name: Publish smos
+        run: cargo publish -p smos
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

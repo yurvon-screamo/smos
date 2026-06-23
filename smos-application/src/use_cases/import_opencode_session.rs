@@ -1,7 +1,7 @@
 //! `ImportOpencodeSession` — bulk import of an opencode transcript (Slice-8).
 //!
 //! Parses already-flattened assistant turns (the adapter layer's
-//! [`AssistantTurn`] is produced by `smos_adapters::opencode::transcript`) and
+//! [`AssistantTurn`] is produced by `smos::opencode::transcript`) and
 //! re-runs the SAME extraction pipeline the live proxy runs after each chat
 //! completion. Concretely: every turn is fed to
 //! [`ExtractFactsFromResponse`], so dedup, embedding, cross-session
@@ -51,7 +51,7 @@ use crate::use_cases::extract_facts_from_response::ExtractFactsFromResponse;
 /// One assistant turn parsed from an opencode transcript.
 ///
 /// Pure data — no IO concerns. Produced by
-/// `smos_adapters::opencode::transcript::parse_transcript` and consumed by
+/// `smos::opencode::transcript::parse_transcript` and consumed by
 /// [`ImportOpencodeSession::execute`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssistantTurn {

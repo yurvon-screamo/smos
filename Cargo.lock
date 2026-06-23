@@ -4407,7 +4407,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smos-adapters"
+name = "smos"
 version = "0.1.0"
 dependencies = [
  "anyhow",

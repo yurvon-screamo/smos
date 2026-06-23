@@ -3,7 +3,7 @@
 //! This layer is intentionally IO-free in the same way `smos-domain` is: it
 //! only defines *what* the system does (port traits + DTOs) and *how it can
 //! fail* (errors). Concrete adapters (surreal store, HTTP upstream, Ollama
-//! provider, …) live in `smos-adapters`.
+//! provider, …) live in `smos`.
 //!
 //! The `helpers` module hosts protocol-shaped pure functions (HTTP/JSON/regex
 //! parsing) that build on top of the domain value objects. They are NOT domain

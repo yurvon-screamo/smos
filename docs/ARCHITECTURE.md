@@ -1,6 +1,6 @@
 # SMOS Architecture
 
-This document covers the layer-by-layer structure of the SMOS workspace, the request pipeline, the memory lifecycle, and the NLI pipeline internals. It is the reference a contributor should read before changing anything in `smos-application` or `smos-adapters`.
+This document covers the layer-by-layer structure of the SMOS workspace, the request pipeline, the memory lifecycle, and the NLI pipeline internals. It is the reference a contributor should read before changing anything in `smos-application` or `smos`.
 
 For setup, testing, and code style see [`CONTRIBUTING.md`](../CONTRIBUTING.md). For user-facing usage see [`README.md`](../README.md).
 
@@ -10,7 +10,7 @@ For setup, testing, and code style see [`CONTRIBUTING.md`](../CONTRIBUTING.md). 
 - [Layered architecture](#layered-architecture)
 - [Domain layer](#domain-layer-smos-domain)
 - [Application layer](#application-layer-smos-application)
-- [Adapters layer](#adapters-layer-smos-adapters)
+- [Adapters layer](#adapters-layer-smos)
 - [Request pipeline (data flow)](#request-pipeline-data-flow)
 - [Memory lifecycle](#memory-lifecycle)
 - [NLI pipeline](#nli-pipeline)
@@ -26,7 +26,7 @@ SMOS is a 3-crate Cargo workspace in the Hexagonal / DDD style. The dependency d
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    smos-adapters                              │
+│                    smos                              │
 │  SurrealStore · native NLI (ort+ONNX) · axum · reqwest ·     │
 │  Ollama · llama.cpp · CLI · dreaming agent · service install │
 └──────────────────────────────────────────────────────────────┘
@@ -49,7 +49,7 @@ SMOS is a 3-crate Cargo workspace in the Hexagonal / DDD style. The dependency d
 |---|---|---|---|
 | `smos-domain` | (std + serde + thiserror + time + sha1) | none | none |
 | `smos-application` | `smos-domain` | none (only port traits) | async fns, no tokio dep |
-| `smos-adapters` | `smos-domain`, `smos-application` + tokio, surrealdb, ort, axum, reqwest, clap, rig-core | all | tokio multi-thread |
+| `smos` | `smos-domain`, `smos-application` + tokio, surrealdb, ort, axum, reqwest, clap, rig-core | all | tokio multi-thread |
 
 ## Layered architecture
 
@@ -83,7 +83,7 @@ Port traits and use cases. Runtime-agnostic: ports are `async fn` **without** a 
 
 A use case is the smallest unit that has business meaning. Each one takes borrowed references to its dependencies and returns a typed result — no globals, no hidden state.
 
-### Adapters layer (`smos-adapters`)
+### Adapters layer (`smos`)
 
 Every concrete IO implementation in the system. This is the only crate that may import `tokio`, `serde_json`, `surrealdb`, `axum`, `reqwest`, `ort`, `clap`, `rig-core`.
 
@@ -373,8 +373,8 @@ These are enforced at the `Cargo.toml` level — a violation fails to compile.
 
 - `smos-domain` may depend only on `serde`, `thiserror`, `time`, `sha1`. No `tokio`, no `serde_json`, no `surrealdb`, no `axum`, no `reqwest`, no `ort`.
 - `smos-application` may depend on `smos-domain` plus `serde`, `serde_json`, `thiserror`, `time`, `futures`, `bytes`, `tracing`, `regex`. No `tokio`, no `surrealdb`, no HTTP.
-- `smos-adapters` is the only crate that performs IO. It depends on both inner crates plus the full IO stack.
+- `smos` is the only crate that performs IO. It depends on both inner crates plus the full IO stack.
 
 Port traits in `smos-application` are `async fn` **without** a `Send` bound. The bound is added at the adapter call site (via `Box<dyn Trait + Send>` or generic bounds on the runtime entry point), which keeps the application layer usable from a single-thread executor in principle and avoids leaking runtime concerns into the domain.
 
-If you find yourself wanting to add `tokio` or `serde_json` to `smos-domain` or `smos-application`, stop — the answer is a port trait in `smos-application` and an implementation in `smos-adapters`.
+If you find yourself wanting to add `tokio` or `serde_json` to `smos-domain` or `smos-application`, stop — the answer is a port trait in `smos-application` and an implementation in `smos`.

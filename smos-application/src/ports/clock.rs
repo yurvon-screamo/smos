@@ -1,6 +1,6 @@
 //! `Clock` port — injectable wall-clock for deterministic time in tests.
 //!
-//! Production code uses `SystemClock` from `smos-adapters`; tests inject a
+//! Production code uses `SystemClock` from `smos`; tests inject a
 //! fake to advance time deterministically. `now` is intentionally synchronous
 //! — fetching UTC time is a pure read with no async IO.
 

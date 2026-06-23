@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use smos_adapters::NativeNliClassifier;
+use smos::NativeNliClassifier;
 use smos_application::ports::NliClassifier;
 use smos_domain::enums::NliLabel;
 

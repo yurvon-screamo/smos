@@ -251,7 +251,7 @@ fn build_app_state(
     })
 }
 
-/// Project `smos_adapters::config::PersonConfig` into the IO-free
+/// Project `smos::config::PersonConfig` into the IO-free
 /// [`PersonEntry`] view consumed by the routing layer.
 fn build_person_view(
     persons: &std::collections::HashMap<String, crate::config::PersonConfig>,
@@ -271,7 +271,7 @@ fn build_person_view(
         .collect()
 }
 
-/// Project `smos_adapters::config::ProviderConfig` into the IO-free
+/// Project `smos::config::ProviderConfig` into the IO-free
 /// [`ProviderEntry`] view.
 fn build_provider_view(providers: &[crate::config::ProviderConfig]) -> Vec<ProviderEntry> {
     providers

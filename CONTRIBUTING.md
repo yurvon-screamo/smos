@@ -24,7 +24,7 @@ If `cargo t` is green, you have a working tree. `cargo tall` (the full surface, 
 SMOS is a 3-crate Cargo workspace in the Hexagonal / DDD style. The dependency direction is enforced one way:
 
 ```
-smos-domain  ←  smos-application  ←  smos-adapters
+smos-domain  ←  smos-application  ←  smos
    (pure)         (ports + use         (every concrete
                     cases)              IO implementation)
 ```
@@ -56,7 +56,7 @@ Rules: no IO, no async runtime, no `serde_json` in production code (it is a dev-
 
 Rules: ports are `async fn` **without** a `Send` bound. The bound is added at the adapter call site, which keeps the application layer runtime-agnostic.
 
-### `smos-adapters` — every concrete IO implementation
+### `smos` — every concrete IO implementation
 
 | Module | Contents |
 |---|---|

@@ -1,6 +1,6 @@
 //! `smos` binary presence + version check.
 //!
-//! The doctor itself is part of the `smos-adapters` crate, so when the
+//! The doctor itself is part of the `smos` crate, so when the
 //! operator runs it from the workspace root, `target/{debug,release}/`
 //! contains every binary that the workspace produces. We probe both
 //! profiles (release first — operators should smoke against the release

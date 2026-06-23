@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use smos_adapters::SessionWatcher;
-use smos_adapters::SurrealStore;
-use smos_adapters::SystemClock;
-use smos_adapters::config::{ServerConfig, SessionConfig};
+use smos::SessionWatcher;
+use smos::SurrealStore;
+use smos::SystemClock;
+use smos::config::{ServerConfig, SessionConfig};
 use smos_application::errors::ProviderError;
 use smos_application::ports::{Clock, FactRepository, NliClassifier, SessionRepository};
 use smos_application::types::NliResult;

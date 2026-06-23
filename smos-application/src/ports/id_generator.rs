@@ -1,6 +1,6 @@
 //! `IdGenerator` port — injectable source of fresh session ids.
 //!
-//! Production code uses `SystemIdGenerator` from `smos-adapters`; tests
+//! Production code uses `SystemIdGenerator` from `smos`; tests
 //! inject a fake so the ids are predictable. The port exists so the
 //! domain stays free of the `SessionId::new()` constructor (reading
 //! system entropy is an IO concern — same layering rule that motivates

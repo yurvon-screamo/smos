@@ -18,7 +18,7 @@
 //! Concrete consequence: consumers (`SessionWatcher`,
 //! `FinalizeSession`) take a generic `NC: NliClassifier` parameter rather
 //! than `Arc<dyn NliClassifier>`. The adapter layer exposes the concrete
-//! backend (`NativeNliClassifier` in `smos-adapters::nli`) directly.
+//! backend (`NativeNliClassifier` in `smos::nli`) directly.
 
 use smos_domain::NliResult;
 

@@ -26,7 +26,7 @@
 //!
 //! The router lives in the IO-free `smos-application` crate. To stay
 //! decoupled from the adapter-side config types
-//! (`smos_adapters::config::{ProviderConfig, PersonConfig}`), it consumes
+//! (`smos::config::{ProviderConfig, PersonConfig}`), it consumes
 //! lightweight [`ProviderEntry`] / [`PersonEntry`] views. The adapter
 //! constructs these views from its own config when invoking the router — a
 //! cheap field-by-field copy at the HTTP boundary that keeps the
@@ -41,7 +41,7 @@ use smos_domain::MemoryKey;
 
 /// Minimal view of a `[[providers]]` entry needed for routing.
 ///
-/// Constructed by the adapter from `smos_adapters::config::ProviderConfig`.
+/// Constructed by the adapter from `smos::config::ProviderConfig`.
 /// Only the `name` field matters for routing decisions — the URL + api-key
 /// live in the adapter and are looked up separately by the HTTP layer.
 #[derive(Debug, Clone)]
@@ -51,7 +51,7 @@ pub struct ProviderEntry {
 
 /// Minimal view of a `[persons.*]` entry needed for routing.
 ///
-/// Constructed by the adapter from `smos_adapters::config::PersonConfig`.
+/// Constructed by the adapter from `smos::config::PersonConfig`.
 #[derive(Debug, Clone)]
 pub struct PersonEntry {
     pub provider: String,
@@ -208,7 +208,7 @@ pub fn load_persona(path: &str) -> Option<String> {
 /// Reads `HOME` (unix) / `USERPROFILE` (windows) directly so the helper
 /// stays IO-free at the crate-dependency level — no `dirs` crate pull-in,
 /// no async runtime needed. The canonical home resolver in
-/// `smos_adapters::paths::expand_tilde` mirrors this implementation; the
+/// `smos::paths::expand_tilde` mirrors this implementation; the
 /// two MUST stay in sync so persona paths resolve identically on both sides
 /// of the application / adapter boundary.
 pub fn expand_tilde(path: &str) -> PathBuf {
@@ -226,7 +226,7 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 
 /// Resolve the OS user home directory without pulling in the `dirs` crate.
 ///
-/// Mirrors `smos_adapters::paths::user_home_dir` BEHAVIOUR-FOR-BEHAVIOUR so
+/// Mirrors `smos::paths::user_home_dir` BEHAVIOUR-FOR-BEHAVIOUR so
 /// persona paths resolve identically on both sides of the application /
 /// adapter boundary. Both implementations:
 /// - consult `USERPROFILE` first on Windows (covers roaming profiles +

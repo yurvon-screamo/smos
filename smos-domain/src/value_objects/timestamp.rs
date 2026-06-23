@@ -15,7 +15,7 @@ pub struct Timestamp(OffsetDateTime);
 
 impl Timestamp {
     /// Construct from a raw `OffsetDateTime`. Adapters that need
-    /// "current time" (e.g. `SystemClock` in `smos-adapters`) call this
+    /// "current time" (e.g. `SystemClock` in `smos`) call this
     /// with `OffsetDateTime::now_utc()`; the domain crate itself never
     /// reaches for wall-clock time so it stays IO-free.
     pub fn from_offset_date_time(odt: OffsetDateTime) -> Self {

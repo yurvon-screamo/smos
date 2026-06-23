@@ -1,6 +1,6 @@
 //! `smos` — unified SMOS binary.
 //!
-//! Dispatches via clap to the appropriate runner in `smos_adapters::cli`.
+//! Dispatches via clap to the appropriate runner in `smos::cli`.
 //! Every subcommand converts the parsed clap structs into the runner-specific
 //! `*Args` structs so the runners stay clap-free and individually testable.
 //!
@@ -22,7 +22,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use smos_adapters::cli::{
+use smos::cli::{
     AuditArgs, AuditProvider, DoctorArgs, ImportArgs, ImportDirArgs, ImportGitArgs, ServiceAction,
     run_audit_cli, run_dir_import, run_doctor, run_finalize, run_import, run_import_git, run_init,
     run_server, run_service,
@@ -191,7 +191,7 @@ async fn main() -> anyhow::Result<ExitCode> {
     // bootstraps `~/.smos/config.toml` itself.
     let config_path: String = match cli.config.as_deref() {
         Some(p) if !p.is_empty() => p.to_string(),
-        _ => smos_adapters::cli::resolve_effective_config_path(cli.config.as_deref())
+        _ => smos::cli::resolve_effective_config_path(cli.config.as_deref())
             .to_string_lossy()
             .into_owned(),
     };

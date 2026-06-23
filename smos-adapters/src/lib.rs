@@ -1,4 +1,4 @@
-//! `smos-adapters` — concrete implementations of the application-layer ports.
+//! `smos` — concrete implementations of the application-layer ports.
 //!
 //! This crate is the *only* place IO happens in the SMOS Rust port. Each
 //! adapter implements a `smos_application::ports` trait against a specific

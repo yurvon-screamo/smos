@@ -39,7 +39,7 @@ impl Default for ConfidenceConfig {
 /// [`NliResult::is_contradiction`] / [`NliResult::is_entailment`] and the
 /// merge decision in [`NliResult::decide_merge`]. The adapter-boundary
 /// strings (`model`, `cache_dir`) live in
-/// `smos_adapters::config::NliBackendConfig` so this crate stays free of
+/// `smos::config::NliBackendConfig` so this crate stays free of
 /// the "domain type carries data only an adapter can interpret" smell.
 ///
 /// `deny_unknown_fields` turns the most common operator mistake (putting

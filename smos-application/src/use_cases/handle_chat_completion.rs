@@ -20,7 +20,7 @@
 //! Slice-5 extraction is wired in the **adapter** layer (`http/`), not here.
 //! The application layer stays runtime-agnostic: `tokio::spawn` requires a
 //! multi-thread runtime, and the SMOS codebase keeps every runtime operation
-//! (spawn, serve, signal handling) inside `smos-adapters`. The adapter wraps
+//! (spawn, serve, signal handling) inside `smos`. The adapter wraps
 //! the response stream with a `StreamingBuffer`, and after `[DONE]` spawns the
 //! [`ExtractFactsFromResponse`] use case. This use case hands the adapter the
 //! `MemoryKey` it needs for that wiring.

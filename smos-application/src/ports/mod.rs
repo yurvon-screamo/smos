@@ -11,7 +11,7 @@
 //! `async fn` in a trait has no explicit `Send` bound. We allow it here on
 //! purpose: we want *call sites* to choose whether they need `Send` (most do,
 //! via tokio) instead of baking it into the trait surface. Concrete adapters
-//! in `smos-adapters` are written to return `Send` futures, and use cases
+//! in `smos` are written to return `Send` futures, and use cases
 //! that spawn tasks require `T: Trait + Send + Sync + 'static` at the call
 //! site, which propagates the `Send` requirement through the bound.
 

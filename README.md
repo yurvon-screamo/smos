@@ -60,7 +60,7 @@ npm install -g @yurvon-screamo/smos
 cargo install --git https://github.com/yurvon-screamo/smos
 
 # With GPU support:
-cargo install --git https://github.com/yurvon-screamo/smos --features smos-adapters/nli-directml
+cargo install --git https://github.com/yurvon-screamo/smos --features smos/nli-directml
 ```
 
 Or build from a local clone:
@@ -77,10 +77,10 @@ cd smos
 cargo build --release --bin smos
 
 # Or pick one GPU feature for NLI acceleration:
-cargo build --release --bin smos --features smos-adapters/nli-directml   # Windows + Intel Arc / AMD / NVIDIA
-cargo build --release --bin smos --features smos-adapters/nli-cuda      # Windows / Linux + NVIDIA
-cargo build --release --bin smos --features smos-adapters/nli-metal     # macOS + Apple Silicon
-cargo build --release --bin smos --features smos-adapters/nli-webgpu    # universal (Vulkan/DX12/Metal)
+cargo build --release --bin smos --features smos/nli-directml   # Windows + Intel Arc / AMD / NVIDIA
+cargo build --release --bin smos --features smos/nli-cuda      # Windows / Linux + NVIDIA
+cargo build --release --bin smos --features smos/nli-metal     # macOS + Apple Silicon
+cargo build --release --bin smos --features smos/nli-webgpu    # universal (Vulkan/DX12/Metal)
 ```
 
 ### 3. Resource requirements

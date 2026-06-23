@@ -46,7 +46,7 @@ When adding a new `tests/*.rs` binary, decide its category up front:
 3. **Needs a live Ollama / model download** → `#[ignore]` per test with the
    reason above.
 
-### Feature gates (smos-adapters)
+### Feature gates (smos)
 
 The NLI backend is always native (ort + ONNX Runtime). The remaining
 features are GPU execution providers (mutually exclusive — pick at most one):
@@ -77,7 +77,7 @@ live-Ollama integration surface.
 ## Architecture reminders
 
 - Three-crate workspace: `smos-domain` (pure, no IO) ← `smos-application`
-  (ports + use cases, runtime-agnostic) ← `smos-adapters` (the only crate
+  (ports + use cases, runtime-agnostic) ← `smos` (the only crate
   that performs IO).
 - Do not introduce tokio / serde_json / surrealdb deps in `smos-domain`.
 - Async port traits are `Send`-bounded at the adapter call site, not at the

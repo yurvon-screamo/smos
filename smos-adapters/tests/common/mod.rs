@@ -18,12 +18,12 @@ use std::sync::Arc;
 
 use axum::Router;
 use serde_json::{Value, json};
-use smos_adapters::SystemClock;
-use smos_adapters::SystemIdGenerator;
-use smos_adapters::config::{ProviderConfig, ServerConfig, SmosConfig};
-use smos_adapters::http::axum_server::{AppState, build_router};
-use smos_adapters::upstream::ReqwestUpstreamRouter;
-use smos_adapters::{LlamaCppReranker, OllamaEmbedding, OllamaExtractor, SurrealStore};
+use smos::SystemClock;
+use smos::SystemIdGenerator;
+use smos::config::{ProviderConfig, ServerConfig, SmosConfig};
+use smos::http::axum_server::{AppState, build_router};
+use smos::upstream::ReqwestUpstreamRouter;
+use smos::{LlamaCppReranker, OllamaEmbedding, OllamaExtractor, SurrealStore};
 use smos_application::ports::{Clock, FactRepository, IdGenerator};
 use smos_domain::{
     Confidence, Embedding, Fact, FactId, FactStatus, MemoryKey, SessionId, Timestamp,
@@ -70,7 +70,7 @@ pub fn config_pointing_at(upstream_base: &str) -> SmosConfig {
     // shape is gone — the routing now happens via the persons map.
     config.persons.insert(
         TEST_PERSON.into(),
-        smos_adapters::config::PersonConfig {
+        smos::config::PersonConfig {
             provider: "test-upstream".into(),
             model: TEST_UPSTREAM_MODEL.into(),
             persona: String::new(),
@@ -104,7 +104,7 @@ pub fn config_with_mocks(
     }];
     config.persons.insert(
         TEST_PERSON.into(),
-        smos_adapters::config::PersonConfig {
+        smos::config::PersonConfig {
             provider: "test-upstream".into(),
             model: TEST_UPSTREAM_MODEL.into(),
             persona: String::new(),
@@ -181,7 +181,7 @@ pub async fn build_state(mut config: SmosConfig) -> Arc<AppState> {
     let heat_cfg = Arc::new(config.heat.clone());
     let confidence_cfg = Arc::new(config.confidence.clone());
     let extraction_cfg = Arc::new(config.extraction.clone());
-    let extraction_supervisor = smos_adapters::runtime::ExtractionSupervisor::new();
+    let extraction_supervisor = smos::runtime::ExtractionSupervisor::new();
 
     // Pre-build the IO-free routing views the handler reads. Tests use the
     // same projection helper the production runner uses so the path stays
@@ -210,12 +210,12 @@ pub async fn build_state(mut config: SmosConfig) -> Arc<AppState> {
     state
 }
 
-/// Project `smos_adapters::config::PersonConfig` into the IO-free
+/// Project `smos::config::PersonConfig` into the IO-free
 /// [`PersonEntry`] view consumed by the routing layer. Mirrors the
 /// production helper in `cli::server_runner::build_person_view` so the
 /// test fixtures exercise the same code path.
 fn build_person_view(
-    persons: &std::collections::HashMap<String, smos_adapters::config::PersonConfig>,
+    persons: &std::collections::HashMap<String, smos::config::PersonConfig>,
 ) -> std::collections::HashMap<String, smos_application::helpers::person_router::PersonEntry> {
     persons
         .iter()
@@ -232,10 +232,10 @@ fn build_person_view(
         .collect()
 }
 
-/// Project `smos_adapters::config::ProviderConfig` into the IO-free
+/// Project `smos::config::ProviderConfig` into the IO-free
 /// [`ProviderEntry`] view.
 fn build_provider_view(
-    providers: &[smos_adapters::config::ProviderConfig],
+    providers: &[smos::config::ProviderConfig],
 ) -> Vec<smos_application::helpers::person_router::ProviderEntry> {
     providers
         .iter()

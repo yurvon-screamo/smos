@@ -19,10 +19,10 @@ use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-use smos_adapters::TokioDelay;
-use smos_adapters::config::SmosConfig;
-use smos_adapters::opencode::{self, SessionSource};
-use smos_adapters::{OllamaEmbedding, OllamaExtractor, SurrealStore, SystemClock};
+use smos::TokioDelay;
+use smos::config::SmosConfig;
+use smos::opencode::{self, SessionSource};
+use smos::{OllamaEmbedding, OllamaExtractor, SurrealStore, SystemClock};
 use smos_application::ports::FactRepository;
 use smos_application::use_cases::ImportOpencodeSession;
 use smos_domain::{MemoryKey, SessionId};
@@ -69,15 +69,15 @@ async fn build_import(
     SystemClock,
     TokioDelay,
 > {
-    let extraction_cfg = smos_adapters::config::LlmExtractionConfig {
+    let extraction_cfg = smos::config::LlmExtractionConfig {
         url: ollama_uri.clone(),
         timeout_seconds: 5,
-        ..smos_adapters::config::LlmExtractionConfig::default()
+        ..smos::config::LlmExtractionConfig::default()
     };
-    let embedding_cfg = smos_adapters::config::EmbeddingConfig {
+    let embedding_cfg = smos::config::EmbeddingConfig {
         url: ollama_uri,
         timeout_seconds: 5,
-        ..smos_adapters::config::EmbeddingConfig::default()
+        ..smos::config::EmbeddingConfig::default()
     };
     let embedder = OllamaEmbedding::new(Arc::new(embedding_cfg)).expect("embedder");
     let extractor = OllamaExtractor::new(Arc::new(extraction_cfg)).expect("extractor");

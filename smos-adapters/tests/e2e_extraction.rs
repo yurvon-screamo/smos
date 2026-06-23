@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use common::{build_state, enrichment_memory_key, serve_state, unit_embedding_1024};
 use serde_json::{Value, json};
-use smos_adapters::SystemClock;
+use smos::SystemClock;
 use smos_application::ports::{Clock, FactRepository};
 use smos_domain::{MemoryKey, SessionId};
 use wiremock::matchers::{method, path};
@@ -32,7 +32,7 @@ fn config_with_extraction(
     upstream: &MockServer,
     ollama: &MockServer,
     reranker: &MockServer,
-) -> smos_adapters::config::SmosConfig {
+) -> smos::config::SmosConfig {
     let mut config = common::config_with_mocks(upstream, ollama, reranker);
     config.server.enable_response_extraction = true;
     config
@@ -262,7 +262,7 @@ fn extraction_request_with_session(session: &SessionId) -> Value {
 /// timeout elapses). Extraction is async + spawned, so the test must wait for
 /// the background task to land its writes.
 async fn wait_for_pending(
-    store: &smos_adapters::SurrealStore,
+    store: &smos::SurrealStore,
     memory_key: &MemoryKey,
     expected: usize,
     timeout: Duration,

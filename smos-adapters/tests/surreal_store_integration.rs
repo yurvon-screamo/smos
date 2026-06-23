@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use smos_adapters::SurrealStore;
+use smos::SurrealStore;
 use smos_application::errors::RepoError;
 use smos_application::ports::{FactRepository, SessionRepository};
 use smos_domain::{
@@ -834,7 +834,7 @@ async fn dedup_and_mark_concurrent_calls_do_not_double_inject() {
 //
 // Skipped in `debug_assertions` because brute-force cosine over 1047 × 1024-dim
 // vectors in an unoptimised build is dominated by interpreter overhead. Run
-// `cargo test --release -p smos-adapters search_similar_p95_under_threshold_on_1047_facts`
+// `cargo test --release -p smos search_similar_p95_under_threshold_on_1047_facts`
 // to exercise this test and confirm the spec's p95 budget.
 // ---------------------------------------------------------------------------
 

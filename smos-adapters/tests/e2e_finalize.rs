@@ -12,7 +12,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use smos_adapters::SurrealStore;
+use smos::SurrealStore;
 use smos_application::errors::ProviderError;
 use smos_application::ports::{FactRepository, NliClassifier, SessionRepository};
 use smos_application::types::NliResult;
