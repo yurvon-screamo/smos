@@ -195,10 +195,11 @@ fn run_inference(
     //    owned buffer. Tensor construction failures are runtime/allocator
     //    issues, not malformed model output.
     //
-    //    DeBERTa-v3 ONNX exports expose only `input_ids` and `attention_mask`:
-    //    the model uses disentangled attention instead of segment embeddings,
-    //    so passing `token_type_ids` triggers
-    //    `Invalid input name: token_type_ids`.
+    //    DeBERTa-v3 sets `type_vocab_size = 0` in its config, so the model
+    //    has no token-type embeddings and `token_type_ids` is not traced
+    //    during ONNX export. Passing it therefore raises
+    //    `Invalid input name: token_type_ids` (see transformers#17853,
+    //    optimum#491).
     let input_ids_tensor =
         Tensor::from_array((vec![1_usize, seq_len], input_ids_i64.into_boxed_slice()))
             .map_err(|e| ProviderError::Unavailable(format!("input_ids tensor: {e}")))?;
