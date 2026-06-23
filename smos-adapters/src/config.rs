@@ -657,7 +657,7 @@ impl SmosConfig {
     }
 
     /// Load directly from a TOML string. Used by `smos init`'s self-test
-    /// so the canonical default config (shipped via `include_str!`) is
+    /// so the canonical default config (shipped as an inline literal) is
     /// validated without going through the file system. Environment
     /// overrides are NOT applied here — the caller already controls the
     /// input verbatim.

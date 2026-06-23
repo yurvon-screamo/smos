@@ -42,7 +42,7 @@ cargo install --git https://github.com/yurvon-screamo/smos
 cargo binstall smos
 
 # Option 3: npm
-npm install -g @yurvon-screamo/smos
+npm install -g smos
 ```
 
 ## Quick Start

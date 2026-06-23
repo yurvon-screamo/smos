@@ -1,5 +1,5 @@
 {
-  "name": "@yurvon-screamo/smos",
+  "name": "smos",
   "version": "0.1.0",
   "description": "Semantic Memory Operating System — AI agent memory proxy",
   "license": "MIT",
