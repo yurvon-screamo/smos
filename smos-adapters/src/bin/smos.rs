@@ -7,7 +7,8 @@
 //! ## Subcommands
 //!
 //! - `smos init` — one-command setup: materialise `~/.smos`, write the
-//!   default `config.toml`, probe `llama-server` (PATH + `/health` on the
+//!   default `config.toml`, download the required GGUF models into
+//!   `~/.smos/models/`, probe `llama-server` (PATH + `/health` on the
 //!   three configured ports), run DB migrations, and report what still
 //!   needs attention.
 //! - `smos serve` — HTTP proxy server (proxy + watcher + native NLI).

@@ -33,6 +33,7 @@ pub mod import_helpers;
 pub mod import_runner;
 pub mod init_checks;
 pub mod init_defaults;
+pub mod init_models;
 pub mod init_path;
 pub mod init_runner;
 pub mod llama_runner;

@@ -46,22 +46,9 @@ After [Install](#install) gives you the `smos` binary, follow these steps in ord
 
 ### 1. Install dependencies
 
-SMOS talks to one local binary: **`llama-server`** from [llama.cpp](https://github.com/ggerganov/llama.cpp). Build it, put it on `PATH`, and download the GGUF weights for the three roles SMOS uses (chat + extraction, embedding, reranker). `smos init` checks every port — it cannot install the binary or fetch the weights for you.
+SMOS talks to one local binary: **`llama-server`** from [llama.cpp](https://github.com/ggerganov/llama.cpp). Build it and put it on `PATH`. The GGUF weights for the three roles SMOS uses (chat + extraction, embedding, reranker) are downloaded automatically by `smos init` — you do not need to fetch them by hand.
 
-**llama.cpp** — runs the chat / extraction LLM, the embedding model, and the cross-encoder reranker that enrichment depends on. Build `llama-server` from <https://github.com/ggerganov/llama.cpp> and grab the GGUF weights from HuggingFace (e.g. Nemotron-3-Nano-4B for chat/extraction, Jina-Embeddings-v5 for embedding, Qwen3-Reranker for the reranker).
-
-```bash
-# Embedding server (port 28081)
-llama-server --model jina-embeddings-v5.gguf --port 28081
-
-# Chat + extraction server (port 28082)
-llama-server --model nemotron-3-nano-4b.gguf --port 28082
-
-# Reranker (port 28181)
-llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 28181
-```
-
-Don't want to babysit these processes? `auto_launch = true` is the default under `[llama_cpp]` in the config — `smos serve` will spawn `llama-server` for you (an already-running server on the same port is reused).
+**llama.cpp** — runs the chat / extraction LLM, the embedding model, and the cross-encoder reranker that enrichment depends on. Build `llama-server` from <https://github.com/ggerganov/llama.cpp> and put the binary on `PATH`. `smos init` (next step) downloads the Nemotron-3-Nano-4B, Jina-Embeddings-v5, and Qwen3-Reranker GGUFs into `~/.smos/models/` for you.
 
 ### 2. Setup
 
@@ -73,13 +60,32 @@ This single command:
 
 - Creates `~/.smos/` with a default `config.toml`, the working directories (`db/`, `models/`, `persons/`, `logs/`, `reports/`), and a stub persona at `persons/bob.md`.
 - Checks for `llama-server` on `PATH`.
+- Downloads the GGUF models (~4 GB total) into `~/.smos/models/`:
+  - `nemotron-3-nano-4b.gguf` — extraction LLM (from `nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF`).
+  - `jina-embeddings-v5.gguf` — embedding model (from `jinaai/jina-embeddings-v5-text-small-retrieval-GGUF`).
+  - `qwen3-reranker.gguf` — cross-encoder reranker (from `DevQuasar/Qwen.Qwen3-Reranker-0.6B-GGUF`).
 - Probes `/health` on the three configured llama-server ports (28081 embedding, 28082 extraction, 28181 reranker).
 - Initializes the database (SurrealDB migrations).
 - Reports what is ready and what still needs attention.
 
-Fix any `✗` items shown, then run `smos init` again to verify. For a deeper audit (NLI cache, stats, a Markdown report), run `smos doctor`.
+Already-downloaded models are skipped, so re-running `smos init` only retries the failed ones. Fix any `✗` items shown, then run `smos init` again to verify. For a deeper audit (NLI cache, stats, a Markdown report), run `smos doctor`.
 
 Now edit `~/.smos/config.toml` so it matches your setup: provider URLs, model ids, and which `[persons.*]` identity routes where. See [Configuration](#configuration).
+
+Want to launch the three `llama-server` processes yourself instead of letting `smos serve` auto-spawn them? Run them against the downloaded weights:
+
+```bash
+# Embedding server (port 28081)
+llama-server --model ~/.smos/models/jina-embeddings-v5.gguf --port 28081
+
+# Chat + extraction server (port 28082)
+llama-server --model ~/.smos/models/nemotron-3-nano-4b.gguf --port 28082
+
+# Reranker (port 28181)
+llama-server --model ~/.smos/models/qwen3-reranker.gguf --port 28181
+```
+
+Or rely on `auto_launch = true` (the default under `[llama_cpp]` in the config) — `smos serve` will spawn them for you (an already-running server on the same port is reused).
 
 ### 3. Start
 
@@ -281,7 +287,7 @@ curl http://localhost:8888/v1/chat/completions \
 
 | Command | Description |
 |---|---|
-| `smos init` | One-command setup: `~/.smos` bootstrap + `llama-server` / reranker health probes + DB migrations. Idempotent. |
+| `smos init` | One-command setup: `~/.smos` bootstrap + GGUF model download + `llama-server` / reranker health probes + DB migrations. Idempotent. |
 | `smos serve` | Start the HTTP proxy. |
 | `smos doctor` | Validate environment + show SurrealDB stats. |
 | `smos doctor --stats` | Quick memory stats (no model round-trips). |

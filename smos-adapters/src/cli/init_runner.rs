@@ -10,17 +10,23 @@
 //!    operator's edits survive a re-init.
 //! 2. **llama-server** — checks the binary is reachable on `PATH` (every
 //!    local role — embedding, extraction, reranker — depends on it).
-//! 3. **llama-server services** — probes `/health` on each configured port
+//! 3. **GGUF models** — downloads the three required GGUF weights
+//!    (Nemotron extraction LLM, Jina embeddings, Qwen3 reranker) from
+//!    HuggingFace into `~/.smos/models/`. Already-present files are skipped,
+//!    so re-running init only retries the failed downloads. See
+//!    [`init_models`].
+//! 4. **llama-server services** — probes `/health` on each configured port
 //!    (28081 embedding, 28082 extraction, 28181 reranker). An already-running
 //!    service is reported as ✓ so the operator sees what `auto_launch` will
 //!    reuse vs. spawn.
-//! 4. **Reranker** — probes the configured `/health` endpoint (kept separate
+//! 5. **Reranker** — probes the configured `/health` endpoint (kept separate
 //!    from the port sweep so a non-default `[reranker]` URL still validates).
-//! 5. **Database** — connects to SurrealDB and applies migrations.
+//! 6. **Database** — connects to SurrealDB and applies migrations.
 //!
 //! This module owns the orchestration + filesystem bootstrap only; the
-//! network probes live in [`crate::cli::init_checks`] and the `PATH` lookup
-//! in [`crate::cli::init_path`]. The checks here are deliberately lightweight
+//! network probes live in [`crate::cli::init_checks`], the GGUF download in
+//! [`crate::cli::init_models`], and the `PATH` lookup in
+//! [`crate::cli::init_path`]. The checks here are deliberately lightweight
 //! and inline: they answer "is the box ready to `smos serve`?". `smos doctor`
 //! is the separate, detailed diagnostic command (NLI cache, config linting,
 //! full stats, Markdown report). `init` does NOT delegate to the doctor
@@ -33,6 +39,7 @@ use anyhow::Result;
 
 use crate::cli::init_checks;
 use crate::cli::init_defaults::{DEFAULT_CONFIG_TOML, DEFAULT_PERSONA_BOB_MD};
+use crate::cli::init_models;
 use crate::config::SmosConfig;
 use crate::paths::{SMOS_HOME_SUBDIRS, SmosPaths, ensure_smos_home};
 
@@ -61,22 +68,25 @@ pub async fn run_init() -> Result<()> {
     println!("SMOS Setup");
     println!("==========");
 
-    println!("\n[1/5] Creating ~/.smos/ directory structure...");
+    println!("\n[1/6] Creating ~/.smos/ directory structure...");
     let fs = bootstrap_filesystem()?;
     print_filesystem_details(&fs);
 
     let config = load_config(&fs.paths.config);
 
-    println!("\n[2/5] Checking llama-server on PATH...");
+    println!("\n[2/6] Checking llama-server on PATH...");
     init_checks::check_llama_server();
 
-    println!("\n[3/5] Checking llama-server services (ports 28081 / 28082 / 28181)...");
+    println!("\n[3/6] Downloading GGUF models...");
+    init_models::download_gguf_models(&fs.paths);
+
+    println!("\n[4/6] Checking llama-server services (ports 28081 / 28082 / 28181)...");
     init_checks::check_llama_servers().await;
 
-    println!("\n[4/5] Checking reranker ({})...", config.reranker.url);
+    println!("\n[5/6] Checking reranker ({})...", config.reranker.url);
     init_checks::check_reranker(&config.reranker).await;
 
-    println!("\n[5/5] Initializing database...");
+    println!("\n[6/6] Initializing database...");
     init_checks::init_database(&config.surreal).await;
 
     print_footer(&fs.paths);
