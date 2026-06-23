@@ -5,7 +5,7 @@ npm wrapper for [SMOS](https://github.com/yurvon-screamo/smos).
 ## Install
 
 ```bash
-npm install -g smos
+npm install -g @yurvon_screamo/smos
 ```
 
 ## Usage

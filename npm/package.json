@@ -1,5 +1,5 @@
 {
-  "name": "smos",
+  "name": "@yurvon_screamo/smos",
   "version": "0.1.0",
   "description": "Semantic Memory Operating System — AI agent memory proxy",
   "license": "MIT",
@@ -8,7 +8,7 @@
     "url": "git+https://github.com/yurvon-screamo/smos.git"
   },
   "bin": {
-    "smos": "bin/smos.js"
+    "smos": "./bin/smos.js"
   },
   "scripts": {
     "postinstall": "node install.js"
