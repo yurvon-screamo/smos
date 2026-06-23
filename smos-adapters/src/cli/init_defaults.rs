@@ -1,0 +1,263 @@
+//! Inline default assets shipped with the `smos` binary so it stays
+//! self-contained (a single-file distribution can drop the binary on a fresh
+//! box and `smos init` produces a working `~/.smos` without any extra files).
+//!
+//! Kept in its own module so [`super::init_runner`] stays focused on the
+//! setup orchestration; the two literals here are pure data.
+
+/// The canonical default `config.toml` written by [`super::run_init`] when no
+/// config exists yet.
+///
+/// A verbatim inline copy of the workspace-root `smos.toml` so the binary
+/// stays self-contained: a single-file distribution can drop the `smos`
+/// binary on a fresh box and `smos init` produces a working config without
+/// any extra assets. Inlining (rather than `include_str!` of a file outside
+/// the crate) keeps `cargo publish` working — an out-of-crate path is not
+/// packaged into the crate tarball.
+///
+/// KEEP IN SYNC with `smos.toml` at the workspace root: that file is the
+/// active config when running `smos serve` from the repo root, while this
+/// literal is what installed binaries ship. Drift between the two silently
+/// gives developers and end users different defaults.
+pub const DEFAULT_CONFIG_TOML: &str = r#"# SMOS proxy default configuration.
+# Copy/edit next to the binary (or pass via a custom path) and run:
+#   cargo run --bin smos -- serve
+# Any section omitted here falls back to the built-in defaults in
+# smos-adapters/src/config.rs.
+#
+# This same file is installed verbatim under ~/.smos/config.toml by
+# `smos init` — re-running `smos init` is idempotent and NEVER overwrites an
+# existing config.
+
+[surreal]
+# Defaults to ~/.smos/db/smos.db (resolved by SmosPaths at startup). Override
+# only when you need to point at a different RocksDB path.
+# path = "~/.smos/db/smos.db"
+namespace = "smos"
+database = "smos"
+
+[server]
+host = "127.0.0.1"
+port = 8888
+shutdown_extraction_grace_seconds = 30
+enable_response_extraction = true
+graceful_degradation = true
+log_format = "json"
+
+# ---------------------------------------------------------------------------
+# Providers — OpenAI-compatible LLM chat-completion endpoints.
+# ---------------------------------------------------------------------------
+#
+# Each entry is one upstream (Ollama, OpenRouter, OpenAI, vLLM, …). The proxy
+# forwards every chat-completion request to exactly one provider, chosen by
+# the [persons.*] map. There is no round-robin / failover any more: routing
+# is per-person, not per-pool.
+
+[[providers]]
+name = "ollama-local"
+url = "http://localhost:11434/v1/chat/completions"
+api_key_env = ""                    # env var name; empty = no auth header sent
+# auth_header = "Authorization"     # default; set to "api-key" for Azure
+# timeout_seconds = 120             # default
+
+# Example second provider. Uncomment and set OPENROUTER_API_KEY in the
+# environment to route `[persons.alice]`-style entries through OpenRouter.
+# [[providers]]
+# name = "openrouter"
+# url = "https://openrouter.ai/api/v1/chat/completions"
+# api_key_env = "OPENROUTER_API_KEY"
+
+# ---------------------------------------------------------------------------
+# Persons — LLM personas = memory keys.
+# ---------------------------------------------------------------------------
+#
+# A person is simultaneously:
+#   - a memory key (the namespace under which extracted facts land),
+#   - a provider + upstream model (the routing target),
+#   - an optional persona .md (prepended to the request as a system message).
+#
+# Clients send `{"model": "<person-name>", ...}`; the proxy rewrites
+# `request.model` to the upstream model declared below before forwarding.
+
+[persons.bob]
+provider = "ollama-local"           # MUST match a [[providers]].name
+model = "granite4.1:3b"             # upstream model id
+persona = "~/.smos/persons/bob.md"  # optional; `~` expands to user home
+
+# Example second person.
+# [persons.alice]
+# provider = "openrouter"
+# model = "z-ai/glm-5.2"
+# persona = "~/.smos/persons/alice.md"
+
+# ---------------------------------------------------------------------------
+# LLM for fact extraction (Qwen3.5:2b or any Ollama-/OpenAI-compatible model).
+# ---------------------------------------------------------------------------
+[llm_extraction]
+url = "http://localhost:11434"           # API base (the adapter appends /api/chat)
+model = "qwen3.5:2b"
+api_key = ""                              # optional, for cloud providers
+timeout_seconds = 30
+# Deterministic extraction: temperature=0 disables random sampling, seed pins
+# the RNG so two runs against the same input re-yield the same bullet list.
+# This is what keeps FactId = SHA1(content) stable across re-extraction runs.
+temperature = 0.0
+seed = 42
+
+# Embedding model for vector search (may be a different provider than the
+# extraction LLM).
+[embedding]
+url = "http://localhost:11434"           # the adapter appends /api/embeddings
+model = "hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest"
+dimensions = 1024                          # MUST match the HNSW index DDL
+api_key = ""
+timeout_seconds = 30
+
+# Reranker — required for enrichment.
+# The enrich pipeline reranks vector-search survivors via a cross-encoder
+# before injecting them into the request. Without a reachable reranker,
+# enrichment returns HTTP 503 (no fallback to vector-order-only ranking).
+# Start the llama.cpp reranker with a Qwen3-Reranker GGUF model:
+#   ./llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
+# The adapter expects an OpenAI-compatible /v1/rerank endpoint.
+[reranker]
+url = "http://localhost:8181"
+model = "qwen3-reranker"
+timeout_seconds = 60
+
+[retrieval]
+top_k_initial = 50
+top_k_final = 5
+min_confidence = 0.7
+min_topic_chars = 3
+
+[merge]
+cosine_threshold = 0.85
+
+[confidence]
+base = 0.5
+multi_source_bonus = 0.2
+no_contradiction_bonus = 0.1
+accept_threshold = 0.7
+pending_threshold = 0.4
+
+# NLI verdict thresholds (domain layer). Drives the `is_contradiction` /
+# `is_entailment` / `decide_merge` predicates. Soft caps so a borderline
+# softmax distribution does not flip a verdict.
+[nli]
+contradiction_threshold = 0.5
+entailment_threshold = 0.6
+
+# Native ort + ONNX Runtime backend for NLI inference — adapter-only sibling
+# of `[nli]`. The model id and cache directory are interpreter-level data
+# that the domain layer never reads; keeping them under their own section
+# preserves the layering invariant ("domain types carry no IO-boundary
+# data"). Putting `model` / `cache_dir` under `[nli]` is a loud startup
+# error — both sections carry `#[serde(deny_unknown_fields)]`, so the
+# parser rejects the misplacement instead of silently dropping it.
+[nli_backend]
+model = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
+# Defaults to ~/.smos/models; uncomment to override.
+# cache_dir = "~/.smos/models"
+
+# Semantic dedup safety net for fact extraction (persist_facts step 2).
+# When the extractor rephrases a fact just enough to break the FactId =
+# SHA1(content) exact match, the semantic layer catches it via cosine
+# similarity and routes it through cross-session confirmation instead of
+# leaving the fact stuck at single-source confidence.
+[extraction]
+dedup_cosine_threshold = 0.95
+
+[heat]
+decay_rate = 0.03
+min_threshold = 0.2
+
+[session]
+timeout_seconds = 1800
+pending_overflow_threshold = 20
+scan_interval_seconds = 60
+
+# SMOS Dreaming Agent — autonomous LLM-driven memory audit. Disabled by
+# default; flip `enabled = true` to opt in. The agent runs on a cron schedule,
+# reviews stored facts via rig tool-calling, applies bounded mutations
+# (deletions, merges, conflict flags), and writes a markdown report.
+[audit]
+enabled = false
+schedule = "0 3 * * *"
+llm_provider = "cloud"
+cloud_model = "z-ai/glm-4.6"
+# Set this to "${OPENROUTER_API_KEY}" to keep the secret out of TOML; the
+# dreaming module expands the placeholder via std::env::var at runtime.
+cloud_api_key = ""
+cloud_base_url = "https://openrouter.ai/api/v1"
+local_model = "granite4.1:3b"
+local_url = "http://localhost:11434"
+max_deletions_per_run = 50
+max_merges_per_run = 100
+# rig 0.14's PromptRequest defaults to single-turn (max_depth = 0); without a
+# non-zero multi-turn depth the tool-calling loop never engages and the audit
+# fails with `MaxDepthError: (reached limit: 0)` on the first prompt that needs
+# a tool. 10 is the canonical headroom for a full audit sweep.
+max_tool_rounds = 10
+# Defaults to ~/.smos/reports; uncomment to override.
+# report_dir = "~/.smos/reports"
+
+# ---------------------------------------------------------------------------
+# llama.cpp auto-launch.
+# ---------------------------------------------------------------------------
+#
+# When `auto_launch = true`, `smos serve` spawns the configured
+# `llama-server` processes at startup so the operator does not have to start
+# them by hand. Each service's port is probed first; an already-running
+# server is reused. Disable if you launch llama-server yourself or use a
+# remote / cloud provider.
+[llama_cpp]
+binary = "llama-server"
+auto_launch = false
+
+[llama_cpp.embedding]
+model_path = "~/.smos/models/jina-embeddings-v5.gguf"
+port = 8081
+extra_args = ["--ctx-size", "2048"]
+
+[llama_cpp.reranker]
+model_path = "~/.smos/models/qwen3-reranker.gguf"
+port = 8181
+extra_args = ["--ctx-size", "8192"]
+
+[llama_cpp.extraction]
+model_path = "~/.smos/models/qwen3.5-2b.gguf"
+port = 8082
+extra_args = ["--ctx-size", "4096"]
+
+# ---------------------------------------------------------------------------
+# Git-backed memory sync.
+# ---------------------------------------------------------------------------
+#
+# When `repo_url` is non-empty, SMOS dual-writes extracted facts to a local
+# clone of the repo as markdown files (one fact per .md) and commits + pushes
+# after every FinalizeSession. The layout is read back by
+# `smos import git <url>` so two SMOS instances can share memory through git.
+#
+# Empty `repo_url` disables sync; the local_path still works for offline use.
+[git]
+repo_url = ""
+branch = "main"
+auto_push = false
+local_path = "~/.smos/git/memory"
+disable_gpg_sign = true            # SMOS commits are unsigned by default
+"#;
+
+/// Minimal stub persona shipped with the default `[persons.bob]` entry.
+///
+/// Kept inline (not loaded from a file) so the binary stays self-contained.
+/// The operator is expected to replace it with the real persona content
+/// after `smos init`.
+pub const DEFAULT_PERSONA_BOB_MD: &str = "\
+# Bob persona\n\
+\n\
+Replace this file with the system prompt you want injected as the leading\n\
+`system` message for every chat-completion request that names `model: \"bob\"`\n\
+in its body. The content is forwarded verbatim to the upstream provider\n\
+declared in `[persons.bob].provider`.\n\
+";

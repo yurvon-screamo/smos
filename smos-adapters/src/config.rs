@@ -499,7 +499,7 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             url: "http://localhost:11434".into(),
-            model: "hf.co/jinaai/jinaai-embeddings-v5-text-small-retrieval-GGUF:latest".into(),
+            model: "hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest".into(),
             dimensions: 1024,
             api_key: String::new(),
             timeout_seconds: 30,

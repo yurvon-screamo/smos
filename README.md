@@ -46,17 +46,15 @@ After [Install](#install) gives you the `smos` binary, follow these steps in ord
 
 ### 1. Install dependencies
 
-SMOS talks to two local services. Set both up before going further.
+SMOS needs two local services. **Install** them now — `smos init` (next step) pulls the models and checks connectivity, but it cannot install the binaries for you.
 
-**Ollama** — runs the LLMs for chat, fact extraction, and embeddings. Install it from <https://ollama.com>, then pull the three models the default config expects:
+**Ollama** — runs the LLMs for chat, fact extraction, and embeddings. Install it from <https://ollama.com> and start the daemon:
 
 ```bash
-ollama pull granite4.1:3b                                          # upstream chat model (person "bob")
-ollama pull qwen3.5:2b                                             # fact-extraction LLM
-ollama pull hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest  # embeddings
+ollama serve
 ```
 
-**llama.cpp** — runs the cross-encoder reranker that enrichment depends on. Build it from <https://github.com/ggerganov/llama.cpp>, grab a Qwen3-Reranker GGUF from HuggingFace, and serve it on port 8181:
+**llama.cpp** — runs the cross-encoder reranker that enrichment depends on. Build `llama-server` from <https://github.com/ggerganov/llama.cpp> and put it on `PATH`, then grab a Qwen3-Reranker GGUF from HuggingFace. `smos init` tells you if it is missing; you can start it later.
 
 ```bash
 llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
@@ -64,44 +62,26 @@ llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
 
 Don't want to babysit these processes? Flip `auto_launch = true` under `[llama_cpp]` in the config and `smos serve` will spawn `llama-server` for you (an already-running server on the same port is reused).
 
-### 2. Initialize
+### 2. Setup
 
 ```bash
 smos init
 ```
 
-Materialises `~/.smos/` with a default `config.toml`, the working directories (`db/`, `models/`, `persons/`, `logs/`, `reports/`), and a stub persona at `persons/bob.md`. Idempotent — re-running never overwrites your `config.toml` or persona edits.
+This single command:
+
+- Creates `~/.smos/` with a default `config.toml`, the working directories (`db/`, `models/`, `persons/`, `logs/`, `reports/`), and a stub persona at `persons/bob.md`.
+- Checks Ollama and pulls the required models (`granite4.1:3b`, `qwen3.5:2b`, `jina-embeddings-v5`).
+- Checks for `llama-server` on `PATH`.
+- Checks the reranker endpoint.
+- Initializes the database (SurrealDB migrations).
+- Reports what is ready and what still needs attention.
+
+Fix any `✗` items shown, then run `smos init` again to verify. For a deeper audit (per-model validation, NLI cache, stats, a Markdown report), run `smos doctor`.
 
 Now edit `~/.smos/config.toml` so it matches your setup: provider URLs, model ids, and which `[persons.*]` identity routes where. See [Configuration](#configuration).
 
-### 3. Verify
-
-```bash
-smos doctor
-```
-
-Probes every dependency and tells you what is wrong — run it before the first start. Output looks roughly like:
-
-```
-SMOS Doctor — Environment Check
-================================
-[PASS] Ollama connectivity (extraction) — available models: 17
-[PASS] Required model: qwen3.5:2b
-[PASS] Ollama connectivity (embedding) — available models: 17
-[PASS] Required model: hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest
-[FAIL] Reranker — url: http://localhost:8181, unreachable
-       Recommendation: start the llama.cpp reranker server; every chat-completion request fails with HTTP 503 while it is down
-[PASS] SurrealDB — namespace: smos, database: smos
-[PASS] SurrealDB migrations — idempotent, applied
-[PASS] SurrealDB stats — facts: 0 (accepted: 0, pending: 0, rejected: 0)
-
-================================
-Result: 7/8 PASS, 0 WARN, 1 FAIL
-```
-
-Every `[FAIL]` / `[WARN]` row prints a `Recommendation:` line with the exact action that fixes it. Resolve them before moving on — `smos doctor` exits non-zero while any `[FAIL]` remains.
-
-### 4. Start
+### 3. Start
 
 ```bash
 smos serve
@@ -109,14 +89,14 @@ smos serve
 
 The first start downloads the DeBERTa NLI model (~643 MB) into `~/.smos/models/`. Subsequent starts are instant — the model is cached. The proxy listens on `127.0.0.1:8888`.
 
-### 5. Verify it works
+### 4. Verify it works
 
 ```bash
 curl http://localhost:8888/health
 # → {"status":"ok","version":"0.1.1"}
 ```
 
-### 6. Install as a service (optional)
+### 5. Install as a service (optional)
 
 ```bash
 smos service install
@@ -301,7 +281,7 @@ curl http://localhost:8888/v1/chat/completions \
 
 | Command | Description |
 |---|---|
-| `smos init` | Initialize `~/.smos` with default config + stub persona. Idempotent. |
+| `smos init` | One-command setup: `~/.smos` bootstrap + Ollama/llama-server/reranker checks + DB migrations. Idempotent. |
 | `smos serve` | Start the HTTP proxy. |
 | `smos doctor` | Validate environment + show SurrealDB stats. |
 | `smos doctor --stats` | Quick memory stats (no model round-trips). |
