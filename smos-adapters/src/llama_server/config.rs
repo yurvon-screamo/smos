@@ -56,7 +56,7 @@ impl Default for LlamaCppConfig {
             embedding: LlamaCppServiceConfig {
                 model_path: mk("jina-embeddings-v5.gguf"),
                 port: 28081,
-                extra_args: vec!["--ctx-size".into(), "2048".into()],
+                extra_args: vec!["--ctx-size".into(), "2048".into(), "--embeddings".into()],
             },
             reranker: LlamaCppServiceConfig {
                 model_path: mk("qwen3-reranker.gguf"),

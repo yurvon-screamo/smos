@@ -1,0 +1,198 @@
+0.00.507.661 I log_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.507.672 I device_info:
+0.00.509.763 I   - Vulkan0 : Intel(R) Arc(TM) Graphics (16110 MiB, 15342 MiB free)
+0.00.509.776 I   - CPU     : Intel(R) Core(TM) Ultra 7 155H (32221 MiB, 10488 MiB free)
+0.00.509.836 I system_info: n_threads = 16 (n_threads_batch = 16) / 22 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+0.00.509.847 I srv  llama_server: n_parallel is set to auto, using n_parallel = 4 and kv_unified = true
+0.00.512.493 I srv          init: running without SSL
+0.00.513.635 I srv          init: using 21 threads for HTTP server
+0.00.517.337 I srv         start: binding port with default address family
+0.00.523.286 I srv  llama_server: loading model
+0.00.523.509 I srv    load_model: loading model 'C:\Users\redmi\.smos/models/jina-embeddings-v5.gguf'
+0.00.525.818 I common_init_result: fitting params to device memory ...
+0.00.525.822 I common_init_result: (for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)
+0.01.281.922 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.01.965.817 W llama_context: n_ctx_seq (2048) < n_ctx_train (40960) -- the full capacity of the model will not be utilized
+0.02.148.565 I common_init_from_params: warming up the model with an empty run - please wait ... (--no-warmup to disable)
+0.00.073.962 I log_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.073.970 I device_info:
+0.00.075.059 I   - Vulkan0 : Intel(R) Arc(TM) Graphics (16110 MiB, 15342 MiB free)
+0.00.075.064 I   - CPU     : Intel(R) Core(TM) Ultra 7 155H (32221 MiB, 8696 MiB free)
+0.00.075.110 I system_info: n_threads = 16 (n_threads_batch = 16) / 22 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+0.00.075.117 I srv  llama_server: n_parallel is set to auto, using n_parallel = 4 and kv_unified = true
+0.00.075.169 I srv          init: running without SSL
+0.00.075.190 I srv          init: using 21 threads for HTTP server
+0.00.075.321 I srv         start: binding port with default address family
+0.00.087.654 I srv  llama_server: loading model
+0.00.087.670 I srv    load_model: loading model 'C:\Users\redmi\.smos/models/qwen3-reranker.gguf'
+0.00.087.746 I common_init_result: fitting params to device memory ...
+0.00.087.746 I common_init_result: (for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)
+0.00.791.927 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.01.914.058 W llama_context: n_ctx_seq (8192) < n_ctx_train (40960) -- the full capacity of the model will not be utilized
+0.00.111.441 I log_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.111.454 I device_info:
+0.00.113.662 I   - Vulkan0 : Intel(R) Arc(TM) Graphics (16110 MiB, 15342 MiB free)
+0.00.113.680 I   - CPU     : Intel(R) Core(TM) Ultra 7 155H (32221 MiB, 6619 MiB free)
+0.00.113.773 I system_info: n_threads = 16 (n_threads_batch = 16) / 22 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+0.00.113.784 I srv  llama_server: n_parallel is set to auto, using n_parallel = 4 and kv_unified = true
+0.00.113.879 I srv          init: running without SSL
+0.00.113.914 I srv          init: using 21 threads for HTTP server
+0.00.114.145 I srv         start: binding port with default address family
+0.00.122.460 I srv  llama_server: loading model
+0.00.122.547 I srv    load_model: loading model 'C:\Users\redmi\.smos/models/nemotron-3-nano-4b.gguf'
+0.00.122.718 I common_init_result: fitting params to device memory ...
+0.00.122.719 I common_init_result: (for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)
+0.02.723.689 I common_init_from_params: warming up the model with an empty run - please wait ... (--no-warmup to disable)
+0.10.193.205 I srv    load_model: initializing slots, n_slots = 4
+0.10.266.710 W common_speculative_init: no implementations specified for speculative decoding
+0.10.267.018 I slot   load_model: id  0 | task -1 | new slot, n_ctx = 2048
+0.10.267.025 I slot   load_model: id  1 | task -1 | new slot, n_ctx = 2048
+0.10.267.027 I slot   load_model: id  2 | task -1 | new slot, n_ctx = 2048
+0.10.267.028 I slot   load_model: id  3 | task -1 | new slot, n_ctx = 2048
+0.10.267.186 I srv    load_model: prompt cache is enabled, size limit: 8192 MiB
+0.10.267.187 I srv    load_model: use `--cache-ram 0` to disable the prompt cache
+0.10.267.189 I srv    load_model: for more info see https://github.com/ggml-org/llama.cpp/pull/16391
+0.10.267.190 I srv    load_model: context checkpoints enabled, max = 32, min spacing = 256
+0.10.268.583 I srv          init: idle slots will be saved to prompt cache and cleared upon starting a new task
+0.10.325.183 I init: chat template, example_format: '<|im_start|>system
+You are a helpful assistant<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+Hi there<|im_end|>
+<|im_start|>user
+How are you?<|im_end|>
+<|im_start|>assistant
+'
+0.10.337.534 I srv          init: init: chat template, thinking = 1
+0.10.339.439 I srv  llama_server: model loaded
+0.10.339.445 I srv  llama_server: server is listening on http://127.0.0.1:28081
+0.10.339.463 I srv  update_slots: all slots are idle
+0.06.126.119 W llama_context: n_ctx_seq (4096) < n_ctx_train (1048576) -- the full capacity of the model will not be utilized
+0.06.596.222 I common_init_from_params: warming up the model with an empty run - please wait ... (--no-warmup to disable)
+0.10.714.984 I srv    load_model: initializing slots, n_slots = 4
+0.10.849.667 W common_speculative_init: no implementations specified for speculative decoding
+0.10.849.678 I slot   load_model: id  0 | task -1 | new slot, n_ctx = 8192
+0.10.849.684 I slot   load_model: id  1 | task -1 | new slot, n_ctx = 8192
+0.10.849.685 I slot   load_model: id  2 | task -1 | new slot, n_ctx = 8192
+0.10.849.685 I slot   load_model: id  3 | task -1 | new slot, n_ctx = 8192
+0.10.849.769 I srv    load_model: prompt cache is enabled, size limit: 8192 MiB
+0.10.849.770 I srv    load_model: use `--cache-ram 0` to disable the prompt cache
+0.10.849.771 I srv    load_model: for more info see https://github.com/ggml-org/llama.cpp/pull/16391
+0.10.849.772 I srv    load_model: context checkpoints enabled, max = 32, min spacing = 256
+0.10.849.826 I srv          init: idle slots will be saved to prompt cache and cleared upon starting a new task
+0.10.871.289 I init: chat template, example_format: '<|im_start|>system
+You are a helpful assistant<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+Hi there<|im_end|>
+<|im_start|>user
+How are you?<|im_end|>
+<|im_start|>assistant
+'
+0.10.877.413 I srv          init: init: chat template, thinking = 1
+0.10.877.452 I srv  llama_server: model loaded
+0.10.877.456 I srv  llama_server: server is listening on http://127.0.0.1:28181
+0.10.877.472 I srv  update_slots: all slots are idle
+0.09.086.863 I srv    load_model: initializing slots, n_slots = 4
+0.09.227.031 W srv    load_model: speculative decoding will use checkpoints
+0.09.227.068 W common_speculative_init: no implementations specified for speculative decoding
+0.09.227.073 I slot   load_model: id  0 | task -1 | new slot, n_ctx = 4096
+0.09.227.076 I slot   load_model: id  1 | task -1 | new slot, n_ctx = 4096
+0.09.227.077 I slot   load_model: id  2 | task -1 | new slot, n_ctx = 4096
+0.09.227.077 I slot   load_model: id  3 | task -1 | new slot, n_ctx = 4096
+0.09.227.172 I srv    load_model: prompt cache is enabled, size limit: 8192 MiB
+0.09.227.173 I srv    load_model: use `--cache-ram 0` to disable the prompt cache
+0.09.227.173 I srv    load_model: for more info see https://github.com/ggml-org/llama.cpp/pull/16391
+0.09.227.174 I srv    load_model: context checkpoints enabled, max = 32, min spacing = 256
+0.09.227.226 I srv          init: idle slots will be saved to prompt cache and cleared upon starting a new task
+0.09.271.307 I init: chat template, example_format: '<|im_start|>system
+You are a helpful assistant<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+<think></think>Hi there<|im_end|>
+<|im_start|>user
+How are you?<|im_end|>
+<|im_start|>assistant
+<think>
+'
+0.09.303.311 I srv          init: init: chat template, thinking = 1
+0.09.303.348 I srv  llama_server: model loaded
+0.09.303.352 I srv  llama_server: server is listening on http://127.0.0.1:28082
+0.09.303.367 I srv  update_slots: all slots are idle
+21.51.593.037 I srv  params_from_: Chat format: peg-native
+21.51.596.169 I slot get_availabl: id  3 | task -1 | selected slot by LRU, t_last = -1
+21.51.596.190 I srv  get_availabl: updating prompt cache
+21.51.596.416 I srv          load:  - looking for better prompt, base f_keep = -1.000, sim = 0.000
+21.51.596.431 I srv        update:  - cache state: 0 prompts, 0.000 MiB (limits: 8192.000 MiB, 4096 tokens, 8589934592 est)
+21.51.596.434 I srv  get_availabl: prompt cache update took 0.24 ms
+21.51.601.633 I slot launch_slot_: id  3 | task 0 | processing task, is_child = 0
+21.53.661.399 I slot create_check: id  3 | task 0 | created context checkpoint 1 of 32 (pos_min = 68, pos_max = 68, n_tokens = 69, size = 81.088 MiB)
+21.55.594.091 I slot print_timing: id  3 | task 0 | prompt processing, n_tokens =     83, progress = 0.95, t =   3.99 s / 20.79 tokens per second
+22.09.973.880 I slot print_timing: id  3 | task 0 | n_decoded =    100, tg =   8.84 t/s
+22.12.973.945 I slot print_timing: id  3 | task 0 | n_decoded =    131, tg =   9.15 t/s
+22.16.087.708 I slot print_timing: id  3 | task 0 | n_decoded =    163, tg =   9.35 t/s
+22.19.155.949 I slot print_timing: id  3 | task 0 | n_decoded =    192, tg =   9.37 t/s
+22.22.421.861 I slot print_timing: id  3 | task 0 | n_decoded =    218, tg =   9.17 t/s
+22.25.549.103 I slot print_timing: id  3 | task 0 | n_decoded =    244, tg =   9.07 t/s
+22.28.600.084 I slot print_timing: id  3 | task 0 | n_decoded =    271, tg =   9.05 t/s
+22.31.602.979 I slot print_timing: id  3 | task 0 | n_decoded =    297, tg =   9.01 t/s
+22.34.698.215 I slot print_timing: id  3 | task 0 | n_decoded =    327, tg =   9.07 t/s
+22.37.800.050 I slot print_timing: id  3 | task 0 | n_decoded =    353, tg =   9.02 t/s
+22.40.856.938 I slot print_timing: id  3 | task 0 | n_decoded =    370, tg =   8.77 t/s
+22.43.906.971 I slot print_timing: id  3 | task 0 | n_decoded =    403, tg =   8.91 t/s
+22.47.019.130 I slot print_timing: id  3 | task 0 | n_decoded =    432, tg =   8.93 t/s
+22.50.086.621 I slot print_timing: id  3 | task 0 | n_decoded =    461, tg =   8.96 t/s
+22.53.150.400 I slot print_timing: id  3 | task 0 | n_decoded =    490, tg =   8.99 t/s
+22.56.203.956 I slot print_timing: id  3 | task 0 | n_decoded =    519, tg =   9.02 t/s
+22.59.291.756 I slot print_timing: id  3 | task 0 | n_decoded =    550, tg =   9.07 t/s
+23.02.346.264 I slot print_timing: id  3 | task 0 | n_decoded =    582, tg =   9.14 t/s
+23.05.392.743 I slot print_timing: id  3 | task 0 | n_decoded =    615, tg =   9.22 t/s
+23.08.412.215 I slot print_timing: id  3 | task 0 | n_decoded =    647, tg =   9.28 t/s
+23.11.504.939 I slot print_timing: id  3 | task 0 | n_decoded =    680, tg =   9.33 t/s
+23.14.574.048 I slot print_timing: id  3 | task 0 | n_decoded =    713, tg =   9.39 t/s
+23.17.630.297 I slot print_timing: id  3 | task 0 | n_decoded =    745, tg =   9.43 t/s
+23.20.632.801 I slot print_timing: id  3 | task 0 | n_decoded =    777, tg =   9.48 t/s
+23.23.676.322 I slot print_timing: id  3 | task 0 | n_decoded =    807, tg =   9.49 t/s
+23.26.741.040 I slot print_timing: id  3 | task 0 | n_decoded =    838, tg =   9.51 t/s
+23.29.777.827 I slot print_timing: id  3 | task 0 | n_decoded =    869, tg =   9.54 t/s
+23.32.802.494 I slot print_timing: id  3 | task 0 | n_decoded =    901, tg =   9.57 t/s
+23.35.931.542 I slot print_timing: id  3 | task 0 | n_decoded =    934, tg =   9.60 t/s
+23.38.956.161 I slot print_timing: id  3 | task 0 | n_decoded =    965, tg =   9.62 t/s
+23.42.006.539 I slot print_timing: id  3 | task 0 | n_decoded =    997, tg =   9.65 t/s
+23.45.069.508 I slot print_timing: id  3 | task 0 | n_decoded =   1029, tg =   9.67 t/s
+23.48.178.098 I slot print_timing: id  3 | task 0 | n_decoded =   1061, tg =   9.69 t/s
+23.51.259.435 I slot print_timing: id  3 | task 0 | n_decoded =   1091, tg =   9.69 t/s
+23.51.573.040 W srv          stop: cancel task, id_task = 0
+23.51.633.111 I slot      release: id  3 | task 0 | stop processing: n_tokens = 1181, truncated = 0
+23.51.634.306 I srv  update_slots: all slots are idle
+24.04.173.689 I srv  params_from_: Chat format: peg-native
+24.04.173.973 I slot get_availabl: id  3 | task -1 | selected slot by LCP similarity, sim_best = 1.000 (> 0.100 thold), f_keep = 0.074
+24.04.173.974 I srv  get_availabl: updating prompt cache
+24.04.177.835 W srv   prompt_save:  - saving prompt with length 1181, total state size = 99.555 MiB (draft: 0.000 MiB)
+24.04.275.042 I srv          load:  - looking for better prompt, base f_keep = 0.074, sim = 1.000
+24.04.275.053 I srv        update:  - cache state: 1 prompts, 180.644 MiB (limits: 8192.000 MiB, 4096 tokens, 53557 est)
+24.04.275.055 I srv        update:    - prompt 00000230F0D279A0:    1181 tokens, checkpoints:  1,   180.644 MiB
+24.04.275.057 I srv  get_availabl: prompt cache update took 101.08 ms
+24.04.275.325 I slot launch_slot_: id  3 | task 1099 | processing task, is_child = 0
+24.04.275.341 I slot update_slots: id  3 | task 1099 | Checking checkpoint with [68, 68] against 86...
+24.04.296.031 W slot update_slots: id  3 | task 1099 | restored context checkpoint (pos_min = 68, pos_max = 68, n_tokens = 69, n_past = 69, size = 81.088 MiB)
+24.13.262.254 I slot print_timing: id  3 | task 1099 | n_decoded =    100, tg =  11.77 t/s
+24.16.330.596 I slot print_timing: id  3 | task 1099 | n_decoded =    136, tg =  11.76 t/s
+24.19.426.343 I slot print_timing: id  3 | task 1099 | n_decoded =    171, tg =  11.66 t/s
+24.22.489.821 I slot print_timing: id  3 | task 1099 | n_decoded =    206, tg =  11.62 t/s
+24.25.506.093 I slot print_timing: id  3 | task 1099 | n_decoded =    241, tg =  11.62 t/s
+24.28.536.865 I slot print_timing: id  3 | task 1099 | n_decoded =    276, tg =  11.61 t/s
+24.31.552.754 I slot print_timing: id  3 | task 1099 | n_decoded =    312, tg =  11.65 t/s
+24.34.552.793 I slot print_timing: id  3 | task 1099 | n_decoded =    347, tg =  11.65 t/s
+24.37.626.711 I slot print_timing: id  3 | task 1099 | n_decoded =    383, tg =  11.66 t/s
+24.40.664.778 I slot print_timing: id  3 | task 1099 | n_decoded =    419, tg =  11.67 t/s
+24.43.669.309 I slot print_timing: id  3 | task 1099 | n_decoded =    453, tg =  11.64 t/s
+24.46.328.786 I slot print_timing: id  3 | task 1099 | prompt eval time =     491.52 ms /    18 tokens (   27.31 ms per token,    36.62 tokens per second)
+24.46.328.795 I slot print_timing: id  3 | task 1099 |        eval time =   41561.91 ms /   484 tokens (   85.87 ms per token,    11.65 tokens per second)
+24.46.328.795 I slot print_timing: id  3 | task 1099 |       total time =   42053.43 ms /   502 tokens
+24.46.328.797 I slot print_timing: id  3 | task 1099 |    graphs reused =       1570
+24.46.334.194 I slot      release: id  3 | task 1099 | stop processing: n_tokens = 570, truncated = 0
+24.46.334.232 I srv  update_slots: all slots are idle

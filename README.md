@@ -172,7 +172,7 @@ auto_launch = true
 [llama_cpp.embedding]
 model_path = "~/.smos/models/jina-embeddings-v5.gguf"
 port = 28081
-extra_args = ["--ctx-size", "2048"]
+extra_args = ["--ctx-size", "2048", "--embeddings"]
 
 [llama_cpp.reranker]
 model_path = "~/.smos/models/qwen3-reranker.gguf"
