@@ -42,46 +42,81 @@ smos --version
 
 ## Setup
 
-### 1. Initialize
+After [Install](#install) gives you the `smos` binary, follow these steps in order. Each one says **what** it does and **why** you need it.
+
+### 1. Install dependencies
+
+SMOS talks to two local services. Set both up before going further.
+
+**Ollama** — runs the LLMs for chat, fact extraction, and embeddings. Install it from <https://ollama.com>, then pull the three models the default config expects:
+
+```bash
+ollama pull granite4.1:3b                                          # upstream chat model (person "bob")
+ollama pull qwen3.5:2b                                             # fact-extraction LLM
+ollama pull hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest  # embeddings
+```
+
+**llama.cpp** — runs the cross-encoder reranker that enrichment depends on. Build it from <https://github.com/ggerganov/llama.cpp>, grab a Qwen3-Reranker GGUF from HuggingFace, and serve it on port 8181:
+
+```bash
+llama-server --model qwen3-reranker-0.6b-q8_0.gguf --port 8181
+```
+
+Don't want to babysit these processes? Flip `auto_launch = true` under `[llama_cpp]` in the config and `smos serve` will spawn `llama-server` for you (an already-running server on the same port is reused).
+
+### 2. Initialize
 
 ```bash
 smos init
 ```
 
-Creates `~/.smos/` with a default config, well-known directories (`db/`, `models/`, `persons/`, `git/`, `logs/`, `reports/`, `cache/`), and a stub persona example. Idempotent — re-running never overwrites an existing `config.toml`.
+Materialises `~/.smos/` with a default `config.toml`, the working directories (`db/`, `models/`, `persons/`, `logs/`, `reports/`), and a stub persona at `persons/bob.md`. Idempotent — re-running never overwrites your `config.toml` or persona edits.
 
-### 2. Start required services
+Now edit `~/.smos/config.toml` so it matches your setup: provider URLs, model ids, and which `[persons.*]` identity routes where. See [Configuration](#configuration).
 
-SMOS needs two local services running: **Ollama** (chat + embedding models) and **llama.cpp** (reranker).
+### 3. Verify
 
 ```bash
-# Ollama — pull the models referenced by the default config
-ollama pull granite4.1:3b
-ollama pull qwen3.5:2b
-ollama pull hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest
-
-# llama.cpp — start the reranker server
-./llama-server --model qwen3-reranker.gguf --port 8181
+smos doctor
 ```
 
-Don't want to manage these by hand? Enable [llama.cpp auto-launch](#llamacpp-auto-launch) in the config and SMOS will spawn them itself.
+Probes every dependency and tells you what is wrong — run it before the first start. Output looks roughly like:
 
-### 3. Run
+```
+SMOS Doctor — Environment Check
+================================
+[PASS] Ollama connectivity (extraction) — available models: 17
+[PASS] Required model: qwen3.5:2b
+[PASS] Ollama connectivity (embedding) — available models: 17
+[PASS] Required model: hf.co/jinaai/jina-embeddings-v5-text-small-retrieval-GGUF:latest
+[FAIL] Reranker — url: http://localhost:8181, unreachable
+       Recommendation: start the llama.cpp reranker server; every chat-completion request fails with HTTP 503 while it is down
+[PASS] SurrealDB — namespace: smos, database: smos
+[PASS] SurrealDB migrations — idempotent, applied
+[PASS] SurrealDB stats — facts: 0 (accepted: 0, pending: 0, rejected: 0)
+
+================================
+Result: 7/8 PASS, 0 WARN, 1 FAIL
+```
+
+Every `[FAIL]` / `[WARN]` row prints a `Recommendation:` line with the exact action that fixes it. Resolve them before moving on — `smos doctor` exits non-zero while any `[FAIL]` remains.
+
+### 4. Start
 
 ```bash
 smos serve
 ```
 
-Health check:
+The first start downloads the DeBERTa NLI model (~643 MB) into `~/.smos/models/`. Subsequent starts are instant — the model is cached. The proxy listens on `127.0.0.1:8888`.
+
+### 5. Verify it works
 
 ```bash
 curl http://localhost:8888/health
-# → {"status":"ok","version":"0.1.0"}
+# → {"status":"ok","version":"0.1.1"}
 ```
 
-SMOS listens on `127.0.0.1:8888`. First startup downloads the NLI model (~643 MB) into `~/.smos/models/`.
-
-### 4. Install as service (optional)
+### 6. Install as a service (optional)
 
 ```bash
 smos service install
