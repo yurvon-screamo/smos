@@ -2,7 +2,7 @@
 
 # SMOS — Semantic Memory Operating System
 
-**The center of gravity shifts from the agent to the operating system.**
+**Your AI agents get a name, a personality, and a memory that survives every chat.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
@@ -10,21 +10,22 @@
 
 </div>
 
-SMOS is an operating system for AI agent memory. Just as a traditional OS
-manages processes, files, and peripherals on behalf of applications, SMOS
-manages the full memory lifecycle — storage, retrieval, consolidation, and
-conflict resolution — on behalf of AI agents.
+Meet **Bob**, your Rust development assistant. Bob remembers the architecture
+decision you made three weeks ago. He knows you changed the cache TTL from 60
+to 10 seconds, and why. Open a new chat and Bob already has the context — not
+because it was pasted into the prompt, but because it lives in his memory.
 
-The LLM becomes a CPU-like component: stateless, replaceable, hot-swappable.
-The agent's identity, knowledge, and history live in SMOS, not in the model's
-context window. Switch from GPT-4o to Llama to a local model — the memory
-persists.
+Bob is not a stateless model. He is a *person*: a memory namespace, a persona,
+and a set of tools. You configure him the way you onboard a teammate — a name,
+a role, and a backend to think with. Tomorrow you create **Alice** for ML
+engineering and **Charlie** for DevOps. Each keeps its own knowledge; Alice
+never mixes up your Rust types with your Python pipelines.
 
-Any OpenAI-compatible client (opencode, Cursor, a custom harness) connects to
-SMOS instead of the model directly. SMOS enriches each request with relevant
-memories, extracts new facts from each response, and runs background
-consolidation — all transparently. Point your client at `http://localhost:8888/v1`,
-send `{"model": "bob"}`, and the conversation remembers.
+That is what *memory operating system* means. The LLM becomes replaceable
+compute: swap GPT-4o for Llama for a local model and Bob stays Bob. The center
+of gravity moves from the model to the system, where identity and history
+persist. Any OpenAI-compatible client — opencode, Cursor, a curl one-liner —
+reaches your agents by their name.
 
 ---
 
