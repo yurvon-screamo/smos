@@ -3,3 +3,10 @@
 /data
 smos.db*
 *.pdb
+
+# service runtime logs and ad-hoc diagnostic output
+*.log
+srv*.log
+*_out.txt
+*_err.txt
+build*.txt
