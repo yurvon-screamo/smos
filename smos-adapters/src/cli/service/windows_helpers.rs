@@ -81,15 +81,51 @@ pub(super) fn format_bin_path(binary: &Path, config: &Path) -> Result<String> {
     Ok(format!("\"{bin_str}\" serve --config \"{cfg_str}\""))
 }
 
-/// Quote `s` as a single argv token in the canonical `CommandLineToArgvW`
-/// form: wrap in outer double quotes and escape every inner `"` as `\"`.
+/// Quote `s` as a single argv token using the canonical `CommandLineToArgvW`
+/// algorithm: wrap in outer double quotes, double every backslash run that
+/// is immediately followed by `"` (or that is trailing, i.e. immediately
+/// before the closing quote we emit), and turn each `"` into `\"`.
 ///
-/// The result must be handed to [`CommandExt::raw_arg`], NOT `Command::arg`,
-/// because `std::process::Command::arg` would otherwise re-wrap the value
-/// in another layer of quotes and double-escape the inner `\"` sequences,
-/// producing a token `sc.exe` cannot parse back into the original value.
+/// The result round-trips through `CommandLineToArgvW` back to `s` for ANY
+/// input — including embedded quotes and backslash-before-quote runs — so it
+/// is safe to pass arbitrary path strings. It must be handed to
+/// [`CommandExt::raw_arg`], NOT `Command::arg`: `arg` would re-wrap the
+/// value in another quote layer and double-escape the inner `\"` sequences,
+/// producing a token sc.exe cannot parse back.
 pub(super) fn quote_for_argv(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\\\""))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in s.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                // A `"` is preceded by an odd number of backslashes in the
+                // encoded form (2n+1: n doubled backslashes + the escaped
+                // quote). Flush the preceding run doubled, then `\"`.
+                for _ in 0..(backslashes * 2 + 1) {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            other => {
+                // Backslashes not adjacent to a `"` are inert — emit verbatim.
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push(other);
+            }
+        }
+    }
+    // Trailing backslashes sit immediately before the closing quote we are
+    // about to emit, so they must be doubled too.
+    for _ in 0..(backslashes * 2) {
+        out.push('\\');
+    }
+    out.push('"');
+    out
 }
 
 /// Surface the real reason `sc.exe` failed.
@@ -230,6 +266,30 @@ mod tests {
         let argv = quote_for_argv("C:\\smos\\smos.exe");
         assert_eq!(argv, "\"C:\\smos\\smos.exe\"");
         assert_eq!(parse_argv(&argv), "C:\\smos\\smos.exe");
+    }
+
+    #[test]
+    fn quote_for_argv_doubles_backslashes_immediately_before_quote() {
+        // The canonical CommandLineToArgvW rule: a backslash run adjacent to
+        // a `"` must be doubled so the run survives argv splitting. The
+        // previous `replace('"', "\\\"")` implementation left such runs
+        // single, breaking round-trip for inputs containing `\` + `"`.
+        // `validate_windows_path` already bans embedded quotes in service
+        // paths, so this case cannot arise from `format_bin_path` today —
+        // but `quote_for_argv` is a general helper and must stay correct.
+        let argv = quote_for_argv("C:\\path\\\"evil");
+        // 3 backslashes before the embedded quote: 2 (doubled run) + 1 (escape).
+        assert_eq!(argv, "\"C:\\path\\\\\\\"evil\"");
+        assert_eq!(parse_argv(&argv), "C:\\path\\\"evil");
+    }
+
+    #[test]
+    fn quote_for_argv_doubles_trailing_backslashes() {
+        // A trailing `\` sits immediately before the closing quote we emit,
+        // so it must be doubled or it would escape our own closing quote.
+        let argv = quote_for_argv("C:\\path\\");
+        assert_eq!(argv, "\"C:\\path\\\\\"");
+        assert_eq!(parse_argv(&argv), "C:\\path\\");
     }
 
     #[test]
