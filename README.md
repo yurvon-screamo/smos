@@ -15,17 +15,22 @@ decision you made three weeks ago. He knows you changed the cache TTL from 60
 to 10 seconds, and why. Open a new chat and Bob already has the context — not
 because it was pasted into the prompt, but because it lives in his memory.
 
-Bob is not a stateless model. He is a *person*: a memory namespace, a persona,
-and a set of tools. You configure him the way you onboard a teammate — a name,
-a role, and a backend to think with. Tomorrow you create **Alice** for ML
-engineering and **Charlie** for DevOps. Each keeps its own knowledge; Alice
-never mixes up your Rust types with your Python pipelines.
+Wherever you open Bob — Cursor, opencode, a browser tab — it is the same Bob
+with the same memories. The experience shifts from *which tool am I using?*
+to *who am I working with?* The client becomes a window; the assistant
+becomes the constant.
 
-That is what *memory operating system* means. The LLM becomes replaceable
-compute: swap GPT-4o for Llama for a local model and Bob stays Bob. The center
-of gravity moves from the model to the system, where identity and history
-persist. Any OpenAI-compatible client — opencode, Cursor, a curl one-liner —
-reaches your agents by their name.
+Bob is a *person*: a memory namespace, a persona, and a set of tools. You
+configure him the way you hand tools to a new teammate — here is your name
+(Bob), your role (a persona file), and your brain (which LLM to think with).
+Tomorrow you hire **Alice** for ML engineering and **Charlie** for DevOps,
+each with their own toolkit and their own memory.
+
+This is what *memory operating system* means. The LLM is a processor —
+replaceable compute that comes and goes. SMOS is the operating system that
+manages identity, knowledge, and history on behalf of every agent. Switch
+from GPT-4o to Llama to a local model and Bob stays Bob. The center of
+gravity moves from the model to the system, where your assistants live.
 
 ---
 
