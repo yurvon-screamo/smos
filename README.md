@@ -125,7 +125,7 @@ Verify it works:
 
 ```bash
 curl http://localhost:8888/health
-# → {"status":"ok","version":"0.1.2"}
+# → {"status":"ok","version":"0.1.6"}
 ```
 
 ### Step 4 — Install as a service (optional)
@@ -241,6 +241,9 @@ launch `llama-server` yourself or use a remote / cloud provider.
 [llama_cpp]
 binary = "llama-server"
 auto_launch = true
+# Unload models from VRAM after this many seconds idle (5 min default).
+# Set to 0 to disable. Only appended when llama-server supports the flag.
+idle_timeout_seconds = 300
 
 [llama_cpp.embedding]
 model_path = "~/.smos/models/jina-embeddings-v5.gguf"
@@ -330,6 +333,8 @@ curl http://localhost:8888/v1/chat/completions \
 | `smos import --list` | List discoverable opencode sessions. |
 | `smos import-dir <path>` | Bulk import from a directory (`*.md`, `*.txt`, `*.json`, …). |
 | `smos import-git <url>` | Re-hydrate facts from a git-synced memory repo. |
+| `smos import raw "<text>"` | Extract facts from arbitrary free-form text. |
+| `smos import raw --stdin` | Same, reading the text body from stdin. |
 | `smos finalize <session>` | Manually trigger memory consolidation for one session. |
 | `smos audit` | Run the dreaming agent once (memory cleanup / merges / pruning). |
 | `smos service install` | Install SMOS as a system service (auto-starts at boot). |

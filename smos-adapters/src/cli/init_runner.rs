@@ -59,10 +59,16 @@ struct FsOutcome {
 /// (step 1) surfaces a hard error, because without `~/.smos` nothing else
 /// makes sense.
 ///
+/// `no_launch = true` skips the launch-and-verify step (4) — the readiness
+/// probe still runs, but SMOS does not spawn any `llama-server` process.
+/// Useful on hosts where the operator already runs `llama-server` by hand
+/// or where the binary is not on `PATH` yet (init still bootstraps the
+/// filesystem + models + database).
+///
 /// `init` always exits 0 (advisory): it is a setup wizard that reports state,
 /// not a strict gate. The strict exit-code gate is `smos doctor` (exits
 /// non-zero on any `[FAIL]`), which the operator runs for CI / scripting.
-pub async fn run_init() -> Result<()> {
+pub async fn run_init(no_launch: bool) -> Result<()> {
     println!("SMOS Setup");
     println!("==========");
 
@@ -78,14 +84,55 @@ pub async fn run_init() -> Result<()> {
     println!("\n[3/5] Downloading GGUF models...");
     init_models::download_gguf_models(&fs.paths);
 
-    println!("\n[4/5] Checking llama-server services (ports 28081 / 28082 / 28181)...");
-    init_checks::check_llama_servers().await;
+    println!("\n[4/5] Verifying llama-server...");
+    if no_launch {
+        println!("  ⚠ --no-launch: skipping live launch verification");
+        println!("    Readiness probe only — services will be spawned by `smos serve`.");
+        init_checks::check_llama_servers().await;
+    } else if config.llama_cpp.auto_launch {
+        match init_checks::verify_llama_servers(&config.llama_cpp).await {
+            Ok(results) if results.is_empty() => {
+                println!("  ⚠ No services configured under [llama_cpp]; nothing to launch.");
+            }
+            Ok(results) => print_verify_results(&results),
+            Err(e) => {
+                println!("  ⚠ Verification failed: {e}");
+                println!("    Services will be launched on `smos serve`.");
+                init_checks::check_llama_servers().await;
+            }
+        }
+    } else {
+        println!("  ⚠ auto_launch disabled, skipping verification");
+        println!("    Make sure llama-server is running on ports 28081/28082/28181");
+        init_checks::check_llama_servers().await;
+    }
 
     println!("\n[5/5] Initializing database...");
     init_checks::init_database(&config.surreal).await;
 
     print_footer(&fs.paths);
     Ok(())
+}
+
+/// Print the per-service verify report. Each row carries an outcome tag:
+/// `✓ reused` (already running, untouched), `✓ verified` (spawned + killed
+/// cleanly), or `✗ failed` (spawned but `/health` never answered — usually
+/// a missing or wrong GGUF model).
+fn print_verify_results(results: &[init_checks::ServiceVerifyResult]) {
+    use init_checks::ServiceVerifyOutcome;
+    for r in results {
+        match r.outcome {
+            ServiceVerifyOutcome::Reused => {
+                println!("  ✓ {} — port {} (reused)", r.name, r.port);
+            }
+            ServiceVerifyOutcome::Verified => {
+                println!("  ✓ {} — port {} verified", r.name, r.port);
+            }
+            ServiceVerifyOutcome::Failed => {
+                println!("  ✗ {} — port {} did not answer /health", r.name, r.port);
+            }
+        }
+    }
 }
 
 /// Create `~/.smos` + subdirectories and drop the default config + stub

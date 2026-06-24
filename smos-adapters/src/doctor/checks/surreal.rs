@@ -34,6 +34,18 @@ struct TotalCount {
 /// to the report (connect + migrations PASS rows).
 pub type CheckOutcome = Result<(Vec<CheckResult>, Option<StatsSnapshot>), Vec<CheckResult>>;
 
+/// Classify a SurrealDB connect error as a lock-conflict.
+///
+/// RocksDB-locked-by-an-existing-SMOS-server is reported by SurrealDB as
+/// `Failed to create lock file … LOCK`. Matching BOTH substrings keeps the
+/// classifier conservative: an ambiguous error (only one of the two tokens)
+/// is treated as a hard failure rather than risking a false PASS that would
+/// hide a genuine misconfiguration behind a misleading "server is running"
+/// message. Fail-safe on the side of "report the real problem".
+fn is_lock_conflict(err: &str) -> bool {
+    err.contains("Failed to create lock file") && err.contains("LOCK")
+}
+
 /// Connect to SurrealDB, run migrations, and (on success) snapshot stats.
 ///
 /// `session_cfg` is the live `[session]` section from `smos.toml`, NOT a
@@ -56,10 +68,20 @@ pub async fn check_surreal(config: &SurrealConfig, session_cfg: &SessionConfig) 
             s
         }
         Err(e) => {
-            rows.push(
-                CheckResult::fail("SurrealDB", format!("connect failed: {e}"))
-                    .with_recommendation("delete ./data/smos.db and retry"),
-            );
+            let err_str = e.to_string();
+            if is_lock_conflict(&err_str) {
+                rows.push(CheckResult::pass(
+                    "SurrealDB",
+                    "Database locked by running SMOS server".to_string(),
+                ));
+            } else {
+                rows.push(
+                    CheckResult::fail("SurrealDB", format!("connect failed: {e}"))
+                        .with_recommendation(
+                            "check surreal config or stop other processes using the database",
+                        ),
+                );
+            }
             return Err(rows);
         }
     };
@@ -189,5 +211,28 @@ mod tests {
         let s = sample_snapshot_for_test();
         assert_eq!(s.total_facts, s.accepted + s.pending + s.rejected);
         assert_eq!(s.total_sessions, s.active_sessions + s.ended_sessions);
+    }
+
+    #[test]
+    fn is_lock_conflict_matches_canonical_lock_message() {
+        let msg = "Failed to create lock file `/x/.lock`. LOCK: IO error";
+        assert!(is_lock_conflict(msg));
+    }
+
+    #[test]
+    fn is_lock_conflict_rejects_message_missing_either_token() {
+        // Only the "Failed to create lock file" half.
+        assert!(!is_lock_conflict(
+            "Failed to create lock file `/x/.lock`: IO error"
+        ));
+        // Only the "LOCK" token.
+        assert!(!is_lock_conflict("Error: LOCK conflict with writer"));
+    }
+
+    #[test]
+    fn is_lock_conflict_rejects_unrelated_errors() {
+        assert!(!is_lock_conflict("connection refused"));
+        assert!(!is_lock_conflict("invalid database name"));
+        assert!(!is_lock_conflict(""));
     }
 }

@@ -201,6 +201,10 @@ max_tool_rounds = 10
 [llama_cpp]
 binary = "llama-server"
 auto_launch = true
+# Unload models from VRAM after this many seconds idle (5 min default).
+# Set to 0 to disable. The flag is only appended when the underlying
+# `llama-server` build advertises support (probed via `--help`).
+idle_timeout_seconds = 300
 
 [llama_cpp.embedding]
 model_path = "~/.smos/models/jina-embeddings-v5.gguf"

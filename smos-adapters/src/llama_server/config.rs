@@ -27,6 +27,13 @@ pub struct LlamaCppConfig {
     /// Extraction service (consumed by [`crate::providers::OllamaExtractor`]
     /// when its URL points at `http://localhost:<port>`).
     pub extraction: LlamaCppServiceConfig,
+    /// Idle timeout (seconds) after which `llama-server` should unload the
+    /// model from VRAM via the `--sleep-idle-seconds` CLI flag. Defaults
+    /// to `Some(300)` (5 minutes); set to `Some(0)` to disable the
+    /// behaviour entirely. The flag is only appended when the underlying
+    /// `llama-server` build advertises support (probed via `--help`) — a
+    /// missing flag is logged as WARN and serve continues without it.
+    pub idle_timeout_seconds: Option<u64>,
 }
 
 /// One llama.cpp service: model path + port + extra CLI args.
@@ -68,6 +75,7 @@ impl Default for LlamaCppConfig {
                 port: 28082,
                 extra_args: vec!["--ctx-size".into(), "4096".into()],
             },
+            idle_timeout_seconds: Some(300),
         }
     }
 }
@@ -102,6 +110,16 @@ mod tests {
         let ports = [cfg.embedding.port, cfg.reranker.port, cfg.extraction.port];
         let unique: std::collections::HashSet<_> = ports.iter().collect();
         assert_eq!(unique.len(), 3, "service ports must be distinct");
+    }
+
+    #[test]
+    fn default_idle_timeout_is_five_minutes() {
+        let cfg = LlamaCppConfig::default();
+        assert_eq!(
+            cfg.idle_timeout_seconds,
+            Some(300),
+            "VRAM-idle default is 5 minutes; opt-out is Some(0), not None"
+        );
     }
 
     #[test]

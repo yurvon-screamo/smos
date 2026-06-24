@@ -12,9 +12,12 @@
 //!   three configured ports), run DB migrations, and report what still
 //!   needs attention.
 //! - `smos serve` — HTTP proxy server (proxy + watcher + native NLI).
-//! - `smos import` — import an opencode session transcript.
-//! - `smos import-dir` — bulk import facts from a directory tree
-//!   (`*.md`, `*.txt`, `*.json`, `*.jsonl`, `*.yaml`, `*.yml`, `*.toml`).
+//! - `smos import [<subcommand>]` — import data into SMOS memory. With no
+//!   subcommand the opencode-transcript path runs (the historical
+//!   `smos import <session_id>` form); `import directory`, `import git`,
+//!   and `import raw` cover the other flavours.
+//! - `smos import-dir <path>` / `smos import-git <url>` — deprecated
+//!   aliases for the new subcommand form, kept for backward compatibility.
 //! - `smos doctor` — environment validation, stats, Markdown report.
 //! - `smos finalize` — manual single-session drain trigger.
 //! - `smos service` — install/uninstall/start/stop/restart/status SMOS as
@@ -29,8 +32,8 @@ use clap::{Parser, Subcommand};
 
 use smos::cli::{
     AuditArgs, AuditProvider, ConfigAction, DoctorArgs, ImportArgs, ImportDirArgs, ImportGitArgs,
-    ServiceAction, run_audit_cli, run_config, run_dir_import, run_doctor, run_finalize, run_import,
-    run_import_git, run_init, run_server, run_service,
+    RawImportArgs, ServiceAction, run_audit_cli, run_config, run_dir_import, run_doctor,
+    run_finalize, run_import, run_import_git, run_init, run_raw_import, run_server, run_service,
 };
 
 #[derive(Parser, Debug)]
@@ -53,69 +56,36 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Initialize SMOS home directory (~/.smos) with default config.
-    Init,
+    Init {
+        /// Skip the live launch-and-verify step. The readiness probe still
+        /// runs, but SMOS will not spawn any `llama-server` process — useful
+        /// on hosts where `llama-server` is started by hand or is not yet
+        /// on `PATH`.
+        #[arg(long)]
+        no_launch: bool,
+    },
 
     /// Start the HTTP proxy server (proxy + watcher + native NLI).
     Serve,
 
-    /// Import an opencode session transcript into SMOS memory.
+    /// Import data into SMOS memory.
+    ///
+    /// With no subcommand the opencode-import path runs (the historical
+    /// `smos import <session_id>` shape). Use `smos import <subcommand>`
+    /// for the directory / git / raw flavours.
     Import {
-        /// opencode session id (e.g. `ses_abc123`). Required unless `--list`
-        /// or `--from-file` is given.
-        #[arg(required_unless_present_any = ["list", "from_file"])]
-        session_id: Option<String>,
+        #[command(subcommand)]
+        subcommand: Option<ImportSub>,
 
-        /// Import from a local opencode-export JSON file instead of discovery.
-        #[arg(long, conflicts_with = "session_id")]
-        from_file: Option<String>,
-
-        /// Memory namespace (project key). Defaults to the shared namespace.
-        #[arg(long, default_value = "shared")]
-        memory_key: String,
-
-        /// Override the opencode server port (skips auto-discovery).
-        #[arg(long)]
-        port: Option<u16>,
-
-        /// Restrict the import to turns emitted by these agents (repeatable).
-        #[arg(long = "agent")]
-        agents: Vec<String>,
-
-        /// Take only the first N turns after `--offset` (smoke testing).
-        #[arg(long)]
-        limit: Option<usize>,
-
-        /// Skip the first N turns before applying `--limit`.
-        #[arg(long, default_value = "0")]
-        offset: usize,
-
-        /// Parse the transcript and print the turns, do NOT call models or save.
-        #[arg(long)]
-        dry_run: bool,
-
-        /// List discovered sessions and exit.
-        #[arg(long)]
-        list: bool,
+        /// Backward-compat carrier for the bare `smos import <session_id>`
+        /// form. Parsed only when no subcommand is given.
+        #[command(flatten)]
+        opencode_args: OpencodeArgs,
     },
 
-    /// Import facts from a git repo previously written by SMOS git-sync.
-    ///
-    /// Clones (or opens) `url` into a temporary local path, reads every
-    /// `facts/<memory_key>/<id>.md` file, and re-hydrates the facts into
-    /// SurrealDB. The clone is left on disk so a subsequent invocation
-    /// can re-use it (incremental pull).
-    ImportGit {
-        /// Git repository URL. Private repos use the system's SSH credentials.
-        url: String,
-    },
-
-    /// Bulk import facts from a directory tree.
-    ///
-    /// Scans `path` recursively for `*.md`, `*.txt`, `*.json`, `*.jsonl`,
-    /// `*.yaml`, `*.yml`, `*.toml` (hidden directories like `.git` are
-    /// skipped), feeds each file's content through the extraction
-    /// pipeline (Qwen → facts), and optionally triggers a single
-    /// finalize drain (NLI) at the end.
+    /// Deprecated alias for `smos import directory <path>`. Kept so existing
+    /// operator scripts and shell history keep working; new invocations
+    /// should use the subcommand form.
     ImportDir {
         /// Directory to scan for documents.
         path: String,
@@ -131,6 +101,14 @@ enum Command {
         /// Skip the NLI finalize drain after the import.
         #[arg(long)]
         no_finalize: bool,
+    },
+
+    /// Deprecated alias for `smos import git <url>`. Kept so existing
+    /// operator scripts and shell history keep working; new invocations
+    /// should use the subcommand form.
+    ImportGit {
+        /// Git repository URL. Private repos use the system's SSH credentials.
+        url: String,
     },
 
     /// Environment validation, stats, and Markdown report generator.
@@ -194,6 +172,100 @@ enum Command {
     },
 }
 
+/// `smos import <subcommand>` selector. Each variant matches one of the
+/// historical top-level `import-*` commands so existing muscle memory
+/// transfers (`import-dir` → `import directory`, `import-git` →
+/// `import git`) while a new `raw` flavour is added for arbitrary text.
+#[derive(Subcommand, Debug)]
+enum ImportSub {
+    /// Import an opencode session transcript (`smos import opencode …`).
+    Opencode(OpencodeArgs),
+
+    /// Bulk import facts from a directory tree (`smos import directory …`).
+    Directory {
+        /// Directory to scan for documents.
+        path: String,
+
+        /// Memory namespace (project key). Defaults to the shared namespace.
+        #[arg(long, default_value = "shared")]
+        memory_key: String,
+
+        /// Limit number of files to process (smoke testing).
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Skip the NLI finalize drain after the import.
+        #[arg(long)]
+        no_finalize: bool,
+    },
+
+    /// Re-hydrate facts from a git-synced memory repo
+    /// (`smos import git <url>`).
+    Git {
+        /// Git repository URL. Private repos use the system's SSH credentials.
+        url: String,
+    },
+
+    /// Extract facts from arbitrary free-form text
+    /// (`smos import raw "<text>"`).
+    Raw {
+        /// Text to extract facts from. Read from stdin when omitted (and
+        /// `--stdin` is passed).
+        text: Option<String>,
+
+        /// Read the input text from stdin instead of the positional arg.
+        #[arg(long)]
+        stdin: bool,
+
+        /// Memory namespace (project key). Defaults to the shared namespace.
+        #[arg(long, default_value = "shared")]
+        memory_key: String,
+    },
+}
+
+/// Flat args for the opencode import flavour. Reused by the bare
+/// `smos import <session_id>` form (no subcommand) and the explicit
+/// `smos import opencode …` form so the two paths stay DRY.
+#[derive(clap::Args, Debug)]
+struct OpencodeArgs {
+    /// opencode session id (e.g. `ses_abc123`). Required unless `--list`
+    /// or `--from-file` is given.
+    #[arg(required_unless_present_any = ["list", "from_file"])]
+    session_id: Option<String>,
+
+    /// Import from a local opencode-export JSON file instead of discovery.
+    #[arg(long, conflicts_with = "session_id")]
+    from_file: Option<String>,
+
+    /// Memory namespace (project key). Defaults to the shared namespace.
+    #[arg(long, default_value = "shared")]
+    memory_key: String,
+
+    /// Override the opencode server port (skips auto-discovery).
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Restrict the import to turns emitted by these agents (repeatable).
+    #[arg(long = "agent")]
+    agents: Vec<String>,
+
+    /// Take only the first N turns after `--offset` (smoke testing).
+    #[arg(long)]
+    limit: Option<usize>,
+
+    /// Skip the first N turns before applying `--limit`.
+    #[arg(long, default_value = "0")]
+    offset: usize,
+
+    /// Parse the transcript and print the turns, do NOT call models or save.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// List discovered sessions and exit.
+    #[arg(long)]
+    list: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
@@ -211,8 +283,8 @@ async fn main() -> anyhow::Result<ExitCode> {
     };
 
     match cli.command {
-        Command::Init => {
-            run_init().await?;
+        Command::Init { no_launch } => {
+            run_init(no_launch).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Serve => {
@@ -220,28 +292,49 @@ async fn main() -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Import {
-            session_id,
-            from_file,
-            memory_key,
-            port,
-            agents,
-            limit,
-            offset,
-            dry_run,
-            list,
+            subcommand,
+            opencode_args,
         } => {
-            let args = ImportArgs {
-                session_id,
-                from_file,
-                memory_key,
-                port,
-                agents,
-                limit,
-                offset,
-                dry_run,
-                list,
-            };
-            run_import(&config_path, args).await?;
+            match subcommand {
+                None => {
+                    let args = opencode_args_to_import_args(opencode_args);
+                    run_import(&config_path, args).await?;
+                }
+                Some(ImportSub::Opencode(oa)) => {
+                    let args = opencode_args_to_import_args(oa);
+                    run_import(&config_path, args).await?;
+                }
+                Some(ImportSub::Directory {
+                    path,
+                    memory_key,
+                    limit,
+                    no_finalize,
+                }) => {
+                    let args = ImportDirArgs {
+                        path,
+                        memory_key,
+                        limit,
+                        no_finalize,
+                    };
+                    run_dir_import(&config_path, args).await?;
+                }
+                Some(ImportSub::Git { url }) => {
+                    let args = ImportGitArgs { url };
+                    run_import_git(&config_path, args).await?;
+                }
+                Some(ImportSub::Raw {
+                    text,
+                    stdin,
+                    memory_key,
+                }) => {
+                    let body = read_raw_text(text, stdin)?;
+                    let args = RawImportArgs {
+                        text: body,
+                        memory_key,
+                    };
+                    run_raw_import(&config_path, args).await?;
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Doctor {
@@ -303,4 +396,43 @@ async fn main() -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// Convert the clap-parsed [`OpencodeArgs`] into the runner-side
+/// [`ImportArgs`] struct. Keeps the runner clap-free.
+fn opencode_args_to_import_args(oa: OpencodeArgs) -> ImportArgs {
+    ImportArgs {
+        session_id: oa.session_id,
+        from_file: oa.from_file,
+        memory_key: oa.memory_key,
+        port: oa.port,
+        agents: oa.agents,
+        limit: oa.limit,
+        offset: oa.offset,
+        dry_run: oa.dry_run,
+        list: oa.list,
+    }
+}
+
+/// Resolve the raw-import text body. When `--stdin` is given the body is
+/// read from stdin (positional `text` must be `None`); otherwise the
+/// positional argument is used verbatim. An empty body is rejected so the
+/// extraction pipeline does not run on a no-op input.
+fn read_raw_text(text: Option<String>, stdin: bool) -> anyhow::Result<String> {
+    let body = if stdin {
+        use std::io::Read;
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    } else {
+        text.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no input text: pass a positional argument or use --stdin to read from stdin"
+            )
+        })?
+    };
+    if body.trim().is_empty() {
+        anyhow::bail!("raw import text is empty; nothing to extract");
+    }
+    Ok(body)
 }

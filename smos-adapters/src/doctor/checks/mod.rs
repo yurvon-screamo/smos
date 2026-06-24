@@ -3,6 +3,8 @@
 //! Each submodule owns one external system:
 //! - [`binaries`] — smos binary presence + version
 //! - [`llm_providers`] — `llama-server` health probes + reranker
+//! - [`models`] — local model-cache existence (GGUF + NLI ONNX + ORT DLL)
+//! - [`persons`] — `[persons.*]` provider + persona reference checks
 //! - [`surreal`] — SurrealDB connect + migrations + stats snapshot
 //!
 //! All checks return [`CheckResult`] rows; the orchestrator in [`mod`]
@@ -12,6 +14,8 @@
 
 pub mod binaries;
 pub mod llm_providers;
+pub mod models;
+pub mod persons;
 pub mod surreal;
 
 use std::time::Duration;
@@ -84,6 +88,12 @@ pub async fn run_full_check(
 
     let binary_results = binaries::check_binaries().await;
     report.extend(binary_results);
+
+    let model_results = models::check_models(config);
+    report.extend(model_results);
+
+    let person_results = persons::check_persons(config);
+    report.extend(person_results);
 
     if !flags.skip_llama {
         match try_build_http_client() {

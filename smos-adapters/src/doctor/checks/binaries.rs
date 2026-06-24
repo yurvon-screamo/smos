@@ -1,73 +1,54 @@
 //! `smos` binary presence + version check.
 //!
-//! The doctor itself is part of the `smos` crate, so when the
-//! operator runs it from the workspace root, `target/{debug,release}/`
-//! contains every binary that the workspace produces. We probe both
-//! profiles (release first — operators should smoke against the release
-//! build) and pick whichever exists.
-
-use std::path::Path;
+//! The doctor is part of the `smos` crate, so the canonical location of the
+//! binary under inspection is the running executable itself — probed via
+//! [`std::env::current_exe`]. This works for development builds (cargo run
+//! from the workspace), `cargo binstall` drops, and any operator-installed
+//! binary without the doctor having to know where the operator placed it.
 
 use super::super::types::CheckResult;
 
-/// Build the canonical binary name with the platform-appropriate suffix.
-/// Windows appends `.exe`; unix does not. The doctor must run on the host
-/// that produced the binary, so the host's exe suffix is the right one.
-fn binary_name(profile: &str) -> String {
-    let base = format!("target/{profile}/smos");
-    if cfg!(windows) {
-        format!("{base}.exe")
-    } else {
-        base
-    }
-}
-
-/// Probe the workspace `target/` directory for the smos binary and
-/// return one [`CheckResult`]. Always returns a row so the report lists
-/// the binary check even on a fresh checkout (where the binary has not
-/// been built yet).
+/// Probe the running executable and report its version + absolute path.
+/// Always returns a row so the report lists the binary check even when
+/// `current_exe` cannot resolve the path (a rare edge case under some
+/// container runtimes).
 pub async fn check_binaries() -> Vec<CheckResult> {
-    let release_name = binary_name("release");
-    let debug_name = binary_name("debug");
-    let release = Path::new(&release_name);
-    let debug = Path::new(&debug_name);
-
-    let (path_str, profile) = if release.exists() {
-        (release.to_string_lossy().to_string(), "release")
-    } else if debug.exists() {
-        (debug.to_string_lossy().to_string(), "debug")
-    } else {
-        return vec![
-            CheckResult::fail("smos binary", "not found in target/{release,debug}")
-                .with_recommendation("run `cargo build --release --bin smos`"),
-        ];
-    };
-
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unknown".to_string());
     let version = env!("CARGO_PKG_VERSION");
-    let details = format!("version: {version}, profile: {profile}, path: {path_str}");
-    vec![CheckResult::pass("smos binary", details)]
+
+    vec![CheckResult::pass(
+        "smos binary",
+        format!("version: {version}, path: {exe}"),
+    )]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn binary_name_appends_exe_suffix_on_windows() {
-        let name = binary_name("release");
-        if cfg!(windows) {
-            assert!(name.ends_with("smos.exe"));
-        } else {
-            assert!(name.ends_with("smos"));
-            assert!(!name.ends_with(".exe"));
-        }
+    #[tokio::test]
+    async fn check_binaries_returns_single_pass_row_with_version() {
+        let rows = check_binaries().await;
+        assert_eq!(rows.len(), 1, "exactly one binary check row expected");
+        let row = &rows[0];
+        assert_eq!(row.name, "smos binary");
+        assert!(row.status.is_pass(), "binary check must pass");
+        assert!(
+            row.details.contains(env!("CARGO_PKG_VERSION")),
+            "details must include the compiled-in version: {}",
+            row.details
+        );
     }
 
-    #[test]
-    fn binary_name_includes_profile_segment() {
-        let release = binary_name("release");
-        let debug = binary_name("debug");
-        assert!(release.contains("target/release/"));
-        assert!(debug.contains("target/debug/"));
+    #[tokio::test]
+    async fn check_binaries_never_returns_fail_even_when_path_unknown() {
+        // The function must not return a FAIL row — `current_exe` failing is
+        // a recoverable "I cannot tell you where I live" case, not a binary
+        // absence. The version is still meaningful even without a path.
+        let rows = check_binaries().await;
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].status.is_fail());
     }
 }

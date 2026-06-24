@@ -109,7 +109,22 @@ impl LlamaCppManager {
             "launching llama-server"
         );
 
-        let child = spawn_llama_server(name, &self.config.binary, service)?;
+        let idle_supported = probe_idle_support(&self.config.binary);
+        let idle_seconds = effective_idle_seconds(self.config.idle_timeout_seconds);
+        if wants_idle_flag(idle_seconds) && !idle_supported {
+            tracing::warn!(
+                binary = %self.config.binary,
+                "llama-server does not advertise --sleep-idle-seconds; \
+                 VRAM idle-unload disabled for this run"
+            );
+        }
+
+        let child = spawn_llama_server(
+            name,
+            &self.config.binary,
+            service,
+            idle_args(idle_seconds, idle_supported),
+        )?;
 
         let mut children = self.children.lock().await;
         children.insert(name.to_string(), child);
@@ -148,20 +163,78 @@ fn expand_paths(service: &LlamaCppServiceConfig) -> LlamaCppServiceConfig {
 /// json-file logger without SMOS having to drain a pipe. A piped stderr
 /// nobody reads would deadlock the server once the OS pipe buffer (~4 KB
 /// on Windows) fills.
+///
+/// `idle_args` carries the optional `--sleep-idle-seconds <n>` argv pair;
+/// an empty slice leaves the command unchanged.
 fn spawn_llama_server(
     name: &'static str,
     binary: &str,
     service: &LlamaCppServiceConfig,
+    idle_args: Vec<String>,
 ) -> Result<Child> {
     let mut cmd = std::process::Command::new(binary);
     cmd.arg("--model").arg(&service.model_path);
     cmd.arg("--port").arg(service.port.to_string());
     cmd.args(&service.extra_args);
+    cmd.args(&idle_args);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
     cmd.spawn()
         .map_err(|e| anyhow!("failed to launch llama-server for {name}: {e}"))
+}
+
+/// Resolve the effective idle timeout. `None` and `Some(0)` both disable
+/// the flag — `None` is treated as "operator never set it" (the default
+/// fills in 300 on the config side, but defensive code here keeps the
+/// manager correct in isolation), `Some(0)` is the explicit opt-out.
+fn effective_idle_seconds(configured: Option<u64>) -> Option<u64> {
+    match configured {
+        Some(0) | None => None,
+        Some(seconds) => Some(seconds),
+    }
+}
+
+/// `true` when the configured idle timeout requests the flag at all.
+fn wants_idle_flag(seconds: Option<u64>) -> bool {
+    seconds.is_some()
+}
+
+/// Build the argv pair for `--sleep-idle-seconds` when both the operator
+/// wants it AND the underlying `llama-server` build advertises support.
+/// Returns an empty `Vec` otherwise.
+fn idle_args(seconds: Option<u64>, supported: bool) -> Vec<String> {
+    if let Some(s) = seconds
+        && supported
+    {
+        return vec!["--sleep-idle-seconds".into(), s.to_string()];
+    }
+    Vec::new()
+}
+
+/// Probe `llama-server --help` for the `--sleep-idle-seconds` flag.
+///
+/// Falls back to `false` on any spawn/IO failure: when the probe cannot
+/// run we MUST NOT add the flag blindly — passing an unknown option to
+/// `llama-server` makes it exit 1 on launch, turning every service into a
+/// 30-second health-probe timeout. A WARN log is emitted by the caller so
+/// the operator sees why VRAM idle-unload did not engage.
+fn probe_idle_support(binary: &str) -> bool {
+    let output = std::process::Command::new(binary).arg("--help").output();
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.contains("--sleep-idle-seconds") || stdout.contains("sleep-idle")
+        }
+        Err(e) => {
+            tracing::warn!(
+                binary = binary,
+                error = %e,
+                "could not run `llama-server --help`; assuming no --sleep-idle-seconds support"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +248,7 @@ mod tests {
             embedding: LlamaCppServiceConfig::default(),
             reranker: LlamaCppServiceConfig::default(),
             extraction: LlamaCppServiceConfig::default(),
+            idle_timeout_seconds: Some(300),
         }
     }
 
@@ -199,5 +273,45 @@ mod tests {
         cfg.auto_launch = false;
         let manager = LlamaCppManager::new(cfg).expect("build");
         manager.launch_all().await.expect("disabled is ok");
+    }
+
+    #[test]
+    fn effective_idle_seconds_disables_for_zero_or_none() {
+        assert_eq!(effective_idle_seconds(None), None);
+        assert_eq!(effective_idle_seconds(Some(0)), None);
+        assert_eq!(effective_idle_seconds(Some(1)), Some(1));
+        assert_eq!(effective_idle_seconds(Some(300)), Some(300));
+    }
+
+    #[test]
+    fn wants_idle_flag_only_when_some_seconds() {
+        assert!(!wants_idle_flag(None));
+        // Some(0) maps to None in effective_idle_seconds, so callers always
+        // pass that resolved value here — wants_idle_flag only ever sees a
+        // real number when it should return true.
+        assert!(wants_idle_flag(Some(300)));
+    }
+
+    #[test]
+    fn idle_args_empty_when_unsupported_or_disabled() {
+        assert!(idle_args(None, true).is_empty(), "disabled → no flag");
+        assert!(
+            idle_args(Some(300), false).is_empty(),
+            "unsupported binary → no flag"
+        );
+    }
+
+    #[test]
+    fn idle_args_emits_pair_when_supported_and_enabled() {
+        let args = idle_args(Some(300), true);
+        assert_eq!(args, vec!["--sleep-idle-seconds".to_string(), "300".into()]);
+    }
+
+    #[test]
+    fn probe_idle_support_returns_false_when_binary_missing() {
+        // A binary that does not exist cannot be probed — the helper must
+        // return false (NOT panic) so serve continues without the flag.
+        let supported = probe_idle_support("/this/binary/does/not/exist/llama-server");
+        assert!(!supported);
     }
 }

@@ -148,10 +148,22 @@ fn create_service(paths: &ServicePaths) -> Result<()> {
         .output()
         .context("failed to spawn sc.exe")?;
     if !output.status.success() {
-        bail!(
-            "sc create failed: {}",
-            sc_failure_detail(&output.stdout, &output.stderr)
-        );
+        let detail = sc_failure_detail(&output.stdout, &output.stderr);
+
+        // Print the diagnostics block BEFORE `bail!` so the operator sees
+        // every variable that fed into the failing `sc create` even when
+        // the error message itself is truncated by tooling. Each line is
+        // an eprintln so it lands on stderr alongside the bail message,
+        // not interleaved with stdout progress output.
+        eprintln!("--- sc create diagnostics ---");
+        eprintln!("smos version: {}", env!("CARGO_PKG_VERSION"));
+        eprintln!("generated binPath: {}", bin_path_value);
+        eprintln!("binary path: {}", paths.binary.display());
+        eprintln!("config path: {}", paths.config.display());
+        eprintln!("sc detail: {}", detail);
+        eprintln!("------------------------------");
+
+        bail!("sc create failed: {}", detail);
     }
     Ok(())
 }
