@@ -326,11 +326,12 @@ pub struct RerankerConfig {
 /// Native ort/ONNX backend for NLI inference — adapter-only sibling of the
 /// domain [`NliConfig`].
 ///
-/// The domain layer never interprets `model` or `cache_dir`; they are read
-/// exactly once at startup by [`crate::nli::build_classifier`] and passed to
-/// the ort session build. Keeping them in this adapter-side struct (rather
-/// than the domain `NliConfig`) preserves the "domain carries no
-/// IO-boundary data" invariant.
+/// The domain layer never interprets `model`, `cache_dir`, `device` or
+/// `ort_cache_dir`; they are read exactly once at startup by
+/// [`crate::nli::build_classifier`] and passed to the ort session build.
+/// Keeping them in this adapter-side struct (rather than the domain
+/// `NliConfig`) preserves the "domain carries no IO-boundary data"
+/// invariant.
 ///
 /// `deny_unknown_fields` mirrors the domain `NliConfig`: a typo here fails
 /// loudly at startup instead of silently dropping the configuration.
@@ -345,6 +346,15 @@ pub struct NliBackendConfig {
     /// downloaded from HF Hub. The native backend writes a flat
     /// `model_quantized.onnx` + `tokenizer.json` here.
     pub cache_dir: String,
+    /// Device selection policy: `"auto"` (default) probes the host at
+    /// startup; `"cpu"`, `"directml"`, `"cuda"`, `"metal"` force a
+    /// specific device. See [`crate::nli::device::detect_device`] for
+    /// the resolution rules.
+    pub device: String,
+    /// Local directory used to cache the dynamically-downloaded ONNX
+    /// Runtime shared library (one subdirectory per device — `cpu/`,
+    /// `cuda/`, `directml/`, `metal/`). See [`crate::nli::ort_cache`].
+    pub ort_cache_dir: String,
 }
 
 /// Per-session lifecycle tunables (§3 session detection, §5 pending overflow).
@@ -531,6 +541,8 @@ impl Default for NliBackendConfig {
         Self {
             model: "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli".into(),
             cache_dir: paths.models.to_string_lossy().into_owned(),
+            device: "auto".into(),
+            ort_cache_dir: paths.models.join("ort").to_string_lossy().into_owned(),
         }
     }
 }

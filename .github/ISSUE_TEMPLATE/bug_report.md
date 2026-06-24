@@ -28,7 +28,8 @@ What happened instead.
 - SMOS version: (`smos --version` or the git commit)
 - Rust toolchain: (`rustc --version`)
 - OS:
-- GPU feature enabled (if any): `nli-cuda` / `nli-directml` / `nli-metal` / `nli-webgpu` / none
+- `[nli_backend].device` value (from `~/.smos/config.toml`): `auto` / `cpu` / `directml` / `cuda` / `metal`
+- Detected NLI device (from startup logs): e.g. `NLI device selected device="directml"`
 - `llama-server` version (if relevant):
 - Extraction model:
 - Embedding model:

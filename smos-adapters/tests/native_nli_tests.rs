@@ -38,21 +38,33 @@ fn cache_dir() -> PathBuf {
     tmp.path().to_path_buf()
 }
 
+/// Cache root for the dynamically-loaded ONNX Runtime shared library.
+/// Kept as a sibling of the HF cache so both are reaped together on test
+/// binary exit. Reuses the same [`OnceLock`] pattern for the same reason.
+fn ort_cache_dir() -> PathBuf {
+    cache_dir().join("ort")
+}
+
 /// Construct the classifier, panicking on failure. The first invocation in
-/// a CI run downloads the model; the panic message preserves the original
-/// error so a flaky network failure surfaces verbatim in the log.
-fn setup_classifier() -> NativeNliClassifier {
+/// a CI run downloads the model + matching ORT runtime; the panic message
+/// preserves the original error so a flaky network failure surfaces
+/// verbatim in the log. Device is forced to `"cpu"` so the test does not
+/// depend on the host having a working GPU driver.
+async fn setup_classifier() -> NativeNliClassifier {
     let cache = cache_dir();
-    NativeNliClassifier::new(MODEL_ID, cache).expect(
-        "failed to construct NativeNliClassifier — check HF Hub connectivity \
-         and that the cache directory is writable",
-    )
+    let ort_cache = ort_cache_dir();
+    NativeNliClassifier::new(MODEL_ID, cache, "cpu".into(), ort_cache)
+        .await
+        .expect(
+            "failed to construct NativeNliClassifier — check HF Hub connectivity \
+             and that the cache directory is writable",
+        )
 }
 
 #[tokio::test]
 #[ignore = "requires 643MB DeBERTa ONNX model download"]
 async fn native_nli_classifies_canonical_entailment() {
-    let clf = setup_classifier();
+    let clf = setup_classifier().await;
     let result = clf
         .classify("A dog runs in the park.", "An animal moves outdoors.")
         .await
@@ -70,7 +82,7 @@ async fn native_nli_classifies_canonical_entailment() {
 #[tokio::test]
 #[ignore = "requires 643MB DeBERTa ONNX model download"]
 async fn native_nli_classifies_canonical_contradiction() {
-    let clf = setup_classifier();
+    let clf = setup_classifier().await;
     let result = clf
         .classify("The sky is blue today.", "The sky is red today.")
         .await
@@ -88,7 +100,7 @@ async fn native_nli_classifies_canonical_contradiction() {
 #[tokio::test]
 #[ignore = "requires 643MB DeBERTa ONNX model download"]
 async fn native_nli_classifies_canonical_neutral() {
-    let clf = setup_classifier();
+    let clf = setup_classifier().await;
     let result = clf
         .classify("I like apples.", "The weather is sunny today.")
         .await
@@ -105,7 +117,7 @@ async fn native_nli_handles_long_input_without_panicking() {
     // when `truncation = true` is passed, so a pathological input must NOT
     // raise. The verdict quality on truncated input is intentionally NOT
     // asserted — truncation can legitimately shift the label.
-    let clf = setup_classifier();
+    let clf = setup_classifier().await;
     let long_text = "word ".repeat(1000);
     let result = clf.classify(&long_text, "a short hypothesis").await;
     assert!(result.is_ok(), "long input must not raise");
@@ -117,7 +129,7 @@ async fn native_nli_softmax_distribution_sums_to_one() {
     // Numerical-stability smoke check: every verdict's softmax distribution
     // must sum to 1.0 within f32 epsilon. The native backend's softmax is
     // max-subtracted, so even pathological logits stay in range.
-    let clf = setup_classifier();
+    let clf = setup_classifier().await;
     let result = clf
         .classify("A man is eating.", "A person is consuming food.")
         .await

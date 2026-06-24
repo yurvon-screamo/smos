@@ -139,6 +139,13 @@ entailment_threshold = 0.6
 model = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
 # Defaults to ~/.smos/models; uncomment to override.
 # cache_dir = "~/.smos/models"
+# Device selection policy. "auto" probes the host at startup (DirectML on
+# Windows, CUDA on Linux, Metal on macOS, CPU otherwise). Override with one
+# of "cpu" / "directml" / "cuda" / "metal" to force a specific device.
+device = "auto"
+# Where the matching ONNX Runtime shared library is cached. One subdirectory
+# per device (`cpu/`, `cuda/`, `directml/`, `metal/`).
+# ort_cache_dir = "~/.smos/models/ort"
 
 # Semantic dedup safety net for fact extraction (persist_facts step 2).
 # When the extractor rephrases a fact just enough to break the FactId =

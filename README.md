@@ -36,22 +36,27 @@ send `{"model": "bob"}`, and the conversation remembers.
 cargo binstall smos
 ```
 
-Includes NLI inference on CPU. For GPU acceleration, install from source:
+The same binary runs on CPU and (when one is detected) on the host GPU.
+SMOS probes the hardware at startup, downloads the matching ONNX Runtime
+shared library into `~/.smos/models/ort/` on first use (~5–300 MB
+depending on the device), and falls back to CPU if no GPU is available.
+No feature flags, no per-vendor rebuild.
 
-### From source with GPU
+Detected devices:
 
-Pick **at most one** GPU feature per build.
+- **Windows** — CUDA (NVIDIA only), DirectML (Intel Arc, AMD, NVIDIA via
+  DirectX 12), CPU fallback.
+- **Linux** — CUDA (NVIDIA), CPU fallback.
+- **macOS** — Metal / CoreML on Apple Silicon, CPU fallback.
+
+Override the probe by setting `[nli_backend].device = "cpu" | "directml"
+| "cuda" | "metal"` in `~/.smos/config.toml`.
+
+### From source
 
 ```bash
-cargo install smos --features smos/nli-directml    # Windows: Intel Arc, AMD
-cargo install smos --features smos/nli-cuda        # NVIDIA
-cargo install smos --features smos/nli-metal       # macOS: Apple Silicon
-cargo install smos --features smos/nli-webgpu      # Universal (Vulkan / DX12 / Metal)
+cargo install smos
 ```
-
-Omit all flags to build for CPU. If the selected GPU provider cannot initialise
-at startup, SMOS logs the issue and falls back to CPU automatically — the HTTP
-server keeps serving.
 
 ### npm
 
@@ -266,7 +271,7 @@ See [`smos.toml`](smos.toml) for the canonical, fully-commented example.
 | `[merge]` | Cosine threshold for merge candidate selection. |
 | `[confidence]` | Base + multi-source/no-contradiction bonuses, accept/pending cut. |
 | `[nli]` | Verdict thresholds (contradiction/entailment). |
-| `[nli_backend]` | Native ONNX model id + cache directory. |
+| `[nli_backend]` | Native ONNX model id + cache directory + device selection. |
 | `[extraction]` | Semantic dedup cosine threshold. |
 | `[heat]` | Decay rate, min threshold (boosts recently-active facts). |
 | `[session]` | Timeout, pending overflow, watcher scan interval. |

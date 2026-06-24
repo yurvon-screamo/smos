@@ -48,16 +48,21 @@ When adding a new `tests/*.rs` binary, decide its category up front:
 
 ### Feature gates (smos)
 
-The NLI backend is always native (ort + ONNX Runtime). The remaining
-features are GPU execution providers (mutually exclusive — pick at most one):
+The NLI backend is always native (ort + ONNX Runtime). There are **no
+compile-time GPU features** — `ort` is built with `load-dynamic`, so the
+matching ONNX Runtime shared library (CPU, CUDA, DirectML, or the macOS
+CoreML build) is downloaded into `~/.smos/models/ort/<device>/` on first
+use and loaded via `ORT_DYLIB_PATH`. The same `smos` binary runs on every
+GPU vendor without rebuilds.
 
-- `nli-cuda`     — enables ort's CUDA EP (NVIDIA).
-- `nli-directml` — enables ort's DirectML EP for DirectX 12-enabled GPUs on
-  Windows (Intel Arc, AMD, NVIDIA). Recommended for Intel Arc on Windows.
-- `nli-metal`    — enables ort's CoreML EP (Apple Silicon).
-- `nli-webgpu`   — enables ort's WebGPU EP (cross-platform: Vulkan/DX12/Metal).
-  Note: ort cannot combine WebGPU with CUDA in a single prebuilt binary; pick
-  one GPU feature.
+Device selection is a runtime config value (`[nli_backend].device`):
+
+- `"auto"` (default) — probe the host at startup.
+  - Windows: CUDA (NVIDIA only, fastest EP for ort), then DirectML
+    (Intel Arc / AMD / NVIDIA via DX12), then CPU.
+  - Linux: CUDA, then CPU.
+  - macOS: Metal / CoreML on Apple Silicon, else CPU.
+- `"cpu"` / `"directml"` / `"cuda"` / `"metal"` — force a specific device.
 
 There are no test-gating features. Tests that need a live external dependency
 (live `llama-server`, 643 MB DeBERTa ONNX download) carry

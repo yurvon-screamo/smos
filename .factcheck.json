@@ -119,11 +119,11 @@
       "note": ""
     },
     {
-      "claim": "GPU features: nli-cuda, nli-directml, nli-metal, nli-webgpu (mutually exclusive).",
+      "claim": "GPU selection is runtime-only via [nli_backend].device; no compile-time GPU feature flags exist. The ort crate uses load-dynamic and the matching DLL is downloaded into ~/.smos/models/ort/<device>/.",
       "confidence": 1.0,
       "status": "verified",
-      "sources": ["smos-adapters/Cargo.toml:88-91 ([features] nli-cuda = [\"ort/cuda\"], nli-metal = [\"ort/coreml\"], nli-directml = [\"ort/directml\"], nli-webgpu = [\"ort/webgpu\"])"],
-      "note": "AGENTS.md notes CoreML is the actual EP behind nli-metal."
+      "sources": ["smos-adapters/Cargo.toml ([features] default = []; the comment notes runtime selection), smos-adapters/src/nli/ort_cache.rs (ensure_ort_binary), smos-adapters/src/config.rs (NliBackendConfig.device, .ort_cache_dir)"],
+      "note": "Removed in this revision: nli-cuda, nli-directml, nli-metal, nli-webgpu. The pre-existing mutually-exclusive-feature model was replaced by runtime device detection (DirectML on Windows, CUDA on Linux/Windows, Metal/CoreML on macOS, CPU fallback)."
     },
     {
       "claim": "Drift-priority walk: scan every candidate, first contradiction wins, merge pick held but not committed until scan is contradiction-free.",

@@ -36,6 +36,10 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build
+        # One build per target — no `--features` flag. The ort `load-dynamic`
+        # feature decouples the binary from the ONNX Runtime shared library;
+        # the matching DLL (CPU/CUDA/DirectML/CoreML) is fetched on first run
+        # on the user's host.
         run: cargo build --release --bin smos --target ${{ matrix.target }}
 
       - name: Package (Windows)

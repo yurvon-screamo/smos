@@ -68,14 +68,24 @@ tokio-cron-scheduler = "0.14"
 # version pin on `ort` is exact (=2.0.0-rc.12) because the API is still
 # pre-stable and a patch release could silently change EP wiring.
 #
-# `tls-rustls` is selected (not the default `tls-native`) so the ort binary
-# downloader shares the rustls stack already pulled in by `reqwest`.
+# `load-dynamic` decouples the binary from the ONNX Runtime shared library:
+# nothing is linked at build time. The matching DLL (CPU, CUDA, DirectML or
+# the macOS CoreML build) is downloaded at runtime by `nli::ort_cache` and
+# loaded via `ORT_DYLIB_PATH`. One binary then runs on every GPU vendor
+# without compile-time feature selection.
+#
+# `api-24` is enabled explicitly because ort 2.0.0-rc.12's `load-dynamic`
+# feature does NOT auto-enable a baseline C-API level (unlike
+# `download-binaries`, which enables `api-24`). Without it, the VitisAI EP
+# code references a struct field gated behind `api-18`, and compilation
+# fails with `no field SessionOptionsAppendExecutionProvider_VitisAI on
+# type &OrtApi`. See pykeio/ort#547. Pinned to `api-24` to match the
+# ORT 1.24.x line we download at runtime.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = [
     "std",
     "ndarray",
-    "download-binaries",
-    "copy-dylibs",
-    "tls-rustls",
+    "load-dynamic",
+    "api-24",
 ] }
 tokenizers = { version = "0.23", default-features = false, features = [
     "onig",
@@ -83,6 +93,13 @@ tokenizers = { version = "0.23", default-features = false, features = [
 hf-hub = { version = "0.4", default-features = false, features = [
     "ureq",
 ] }
+# Archive extraction for the dynamically-downloaded ORT DLL. Microsoft
+# publishes Windows ORT as `.zip` and Linux/macOS as `.tgz`; DirectML ships
+# as a NuGet `.nupkg` (which is also a zip). `flate2` is the gzip decoder
+# behind the `tar` crate's `.tgz` reader.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
 
 [dev-dependencies]
 tempfile = "3"
@@ -93,15 +110,11 @@ wiremock = "0.6"
 [features]
 default = []
 
-# GPU execution-provider features (optional; default build is CPU-only).
-# Exactly one GPU feature should be enabled per build — combining more than one
-# is rarely useful and ort's prebuilt binary matrix cannot satisfy every
-# combination (e.g. `cuda` and `webgpu` cannot ship in the same prebuilt
-# build, so enabling both silently falls back to CPU-only).
-nli-cuda = ["ort/cuda"]
-nli-metal = ["ort/coreml"]
-nli-directml = ["ort/directml"]
-nli-webgpu = ["ort/webgpu"]
+# GPU execution providers are selected at RUNTIME via `[nli_backend].device`
+# (one of: "auto" | "cpu" | "directml" | "cuda" | "metal"). The matching
+# ONNX Runtime DLL is downloaded into the local cache on first use. There
+# are no compile-time GPU features — the same `smos` binary runs on every
+# GPU vendor without rebuilds.
 
 [[bin]]
 name = "smos"

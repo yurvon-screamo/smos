@@ -8,7 +8,7 @@ Requirements:
 
 - **Rust 1.96+** (pinned via [`rust-toolchain.toml`](rust-toolchain.toml)).
 - **`llama-server`** ([llama.cpp](https://github.com/ggerganov/llama.cpp)) on `PATH` for any test that touches extraction, embeddings, or NLI end-to-end.
-- (Optional) a CUDA / DirectML / Metal / WebGPU-capable GPU if you want to exercise a GPU EP.
+- (Optional) a CUDA / DirectML / Metal-capable GPU if you want to exercise a GPU EP at runtime. No rebuild is required — SMOS downloads the matching ONNX Runtime shared library on first use.
 
 ```bash
 git clone https://github.com/yurvon-screamo/smos.git
@@ -61,7 +61,7 @@ Rules: ports are `async fn` **without** a `Send` bound. The bound is added at th
 | Module | Contents |
 |---|---|
 | `storage/` | `SurrealStore`, `surreal_schema`, `SystemClock`, `SystemIdGenerator`. |
-| `nli/` | `native_nli`, `runtime`, `model_cache`, `device` — the `ort` + ONNX Runtime NLI backend. |
+| `nli/` | `native_nli`, `runtime`, `model_cache`, `device`, `ort_cache` — the `ort` + ONNX Runtime NLI backend (one binary, runtime GPU detection). |
 | `http/` | `axum_server`, `routes/`, `stream_transform`, `error_mapper`. |
 | `upstream/` | `reqwest_upstream`, `sse_parser`, `streaming_buffer`. |
 | `providers/` | `ollama/` (extraction + embeddings), `llama_cpp/` (reranker), `noop/`. |
@@ -125,7 +125,7 @@ See [`AGENTS.md`](AGENTS.md) for the full rationale.
 
 - Adding `tokio`, `serde_json`, `surrealdb`, `axum`, `reqwest`, or `ort` as a dependency of `smos-domain` or `smos-application`.
 - `unwrap()` / `expect()` / `panic!()` in adapter code paths that handle user requests. Use typed errors.
-- Adding a new feature flag without documenting it in the README GPU table and `AGENTS.md`.
+- Reintroducing compile-time GPU feature flags (`nli-cuda`, `nli-directml`, `nli-metal`, `nli-webgpu`). GPU selection is runtime-only via `[nli_backend].device` and `ort`'s `load-dynamic` feature.
 - Marking a non-external-dependency test `#[ignore]` to make CI green.
 
 ## PR process

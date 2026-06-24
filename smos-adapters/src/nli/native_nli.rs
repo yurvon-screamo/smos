@@ -2,7 +2,9 @@
 //!
 //! Single-process native implementation. The classifier owns:
 //!
-//! - one ort [`Session`] built against the detected [`DeviceKind`];
+//! - one ort [`Session`] built against the runtime-detected [`DeviceKind`]
+//!   (the matching ONNX Runtime DLL is downloaded on first use — see
+//!   [`super::ort_cache`]);
 //! - one [`Tokenizer`] loaded from the HF-cached `tokenizer.json`;
 //! - a [`std::sync::Mutex`] guarding the session — `Session::run` takes
 //!   `&mut self`, so concurrent classify calls (e.g. from the session watcher
@@ -26,7 +28,7 @@ use smos_domain::enums::NliLabel;
 use tokenizers::Tokenizer;
 
 use super::device::{self, DeviceKind};
-use super::model_cache;
+use super::{model_cache, ort_cache};
 
 /// DeBERTa-v3 NLI label order in the model's output logits tensor.
 ///
@@ -76,19 +78,75 @@ impl NativeNliClassifier {
     /// ONNX graph and `tokenizer.json` are downloaded on first use and reused
     /// thereafter.
     ///
-    /// Heavy: the first call on a fresh cache downloads ~643 MB. The session
-    /// build itself also takes 1–5 s (graph optimisation + EP initialisation);
-    /// production wiring should construct the classifier once at startup, not
-    /// per request.
-    pub fn new(model_id: &str, cache_dir: PathBuf) -> Result<Self, ProviderError> {
+    /// `device_config` is the `[nli_backend].device` value (`"auto"`,
+    /// `"cpu"`, `"directml"`, `"cuda"`, `"metal"`); see
+    /// [`device::detect_device`]. `ort_cache_dir` is where the matching
+    /// ONNX Runtime shared library is downloaded (see
+    /// [`ort_cache::ensure_ort_binary`]).
+    ///
+    /// Heavy: the first call on a fresh cache downloads ~643 MB of model
+    /// artifacts plus ~5–300 MB of ORT runtime (size depends on the
+    /// selected device). The session build itself also takes 1–5 s
+    /// (graph optimisation + EP initialisation); production wiring
+    /// should construct the classifier once at startup, not per request.
+    pub async fn new(
+        model_id: &str,
+        cache_dir: PathBuf,
+        device_config: String,
+        ort_cache_dir: PathBuf,
+    ) -> Result<Self, ProviderError> {
+        // Runtime device selection — no compile-time feature gates.
+        let device = device::detect_device(&device_config);
+        tracing::info!(
+            device = device.as_str(),
+            config = %device_config,
+            "NLI device selected"
+        );
+
+        // Download the matching ORT shared library. Network IO + heavy
+        // archive extraction (the extraction itself runs on the
+        // blocking pool inside `ensure_ort_binary`); failure here is
+        // surfaced verbatim so an operator sees the underlying HTTP
+        // status (404, timeout) instead of a confusing ort load error.
+        let ort_dll_path = ort_cache::ensure_ort_binary(device, &ort_cache_dir)
+            .await
+            .map_err(|e| ProviderError::Unavailable(format!("ORT DLL download: {e}")))?;
+
+        // Heavy sync work (HF download, ort session build, tokenizer
+        // load) must not block the async runtime's worker threads. The
+        // closure is `'static + Send` because every captured value is
+        // owned and `Self` is `Send` (Session + Tokenizer are Send).
+        let model_id_owned = model_id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<Self, ProviderError> {
+            Self::build_blocking(&model_id_owned, cache_dir, device, Some(ort_dll_path))
+        })
+        .await
+        .map_err(|e| ProviderError::Unavailable(format!("native NLI worker task: {e}")))?
+    }
+
+    /// Synchronous construction core executed on the blocking-pool thread.
+    ///
+    /// Split out of [`new`](Self::new) so the async/sync boundary is
+    /// explicit: the async half owns network IO (DLL download), this
+    /// sync half owns HF Hub fetch + ort session commit + tokenizer
+    /// load. Each stage maps its failure mode onto [`ProviderError`]:
+    /// transport/runtime issues become [`Unavailable`], malformed model
+    /// output would become [`InvalidResponse`] (none here — that mapping
+    /// lives at inference time).
+    ///
+    /// [`Unavailable`]: ProviderError::Unavailable
+    /// [`InvalidResponse`]: ProviderError::InvalidResponse
+    fn build_blocking(
+        model_id: &str,
+        cache_dir: PathBuf,
+        device: DeviceKind,
+        ort_dll_path: Option<PathBuf>,
+    ) -> Result<Self, ProviderError> {
         let cache: &Path = &cache_dir;
         let model_path = model_cache::ensure_model_cached(model_id, cache)
             .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
         let tokenizer_path = model_cache::ensure_tokenizer_cached(model_id, cache)
             .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
-
-        let device = device::detect_device();
-        tracing::info!(device = device.as_str(), "native NLI device detected");
 
         let model_str = model_path.to_str().ok_or_else(|| {
             ProviderError::Unavailable(format!(
@@ -96,7 +154,7 @@ impl NativeNliClassifier {
                 model_path.display()
             ))
         })?;
-        let session = device::build_session(model_str, device)
+        let session = device::build_session(model_str, device, ort_dll_path.as_deref())
             .map_err(|e| ProviderError::Unavailable(format!("ort session build: {e}")))?;
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
