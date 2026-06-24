@@ -12,6 +12,7 @@
 
 #![cfg(target_os = "windows")]
 
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -23,8 +24,8 @@ use super::paths::ServicePaths;
 #[path = "windows_helpers.rs"]
 mod helpers;
 use helpers::{
-    extract_state, format_bin_path, is_admin, run_sc, service_exists, set_description,
-    set_failure_recovery,
+    extract_state, format_bin_path, is_admin, quote_for_argv, run_sc, sc_failure_detail,
+    service_exists, set_description, set_failure_recovery,
 };
 
 const DISPLAY_NAME: &str = "SMOS Semantic Memory OS";
@@ -67,14 +68,7 @@ pub async fn uninstall_service(user: bool) -> Result<()> {
     if let Err(e) = run_sc(&["stop", SERVICE_NAME]) {
         tracing::warn!("failed to stop service before uninstall: {e}");
     }
-    let output = Command::new("sc")
-        .args(["delete", SERVICE_NAME])
-        .output()
-        .context("failed to spawn sc.exe")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("sc delete failed: {}", stderr.trim());
-    }
+    run_sc(&["delete", SERVICE_NAME])?;
     println!("✓ Service '{SERVICE_NAME}' uninstalled");
     Ok(())
 }
@@ -121,24 +115,43 @@ pub async fn status_service() -> Result<()> {
 }
 
 fn create_service(paths: &ServicePaths) -> Result<()> {
-    // format_bin_path already quotes both the binary and config segments
-    // (so paths with spaces survive SCM's CommandLineToArgvW parsing) and
-    // doubles every internal backslash (so the closing quote of each
-    // segment is not escaped). Do NOT wrap the result in additional
-    // quotes — `std::process::Command` already escapes the value when
-    // forwarding to sc.exe, and double-wrapping produces a binPath the
-    // SCM cannot parse back.
-    let bin_path_arg = format_bin_path(&paths.binary, &paths.config)?;
+    if service_exists(&paths.service_name)? {
+        bail!(
+            "service '{}' already exists; run `smos service uninstall` first",
+            paths.service_name
+        );
+    }
+    // `format_bin_path` returns the canonical binPath value SCM will store
+    // (each path segment quoted, no outer wrapping). To forward it as a
+    // single argv token to sc.exe we wrap it via `quote_for_argv` (outer
+    // quotes + inner `"` escaped as `\"`) and pass it through `raw_arg`.
+    //
+    // `raw_arg` is critical: `Command::arg` would re-wrap the value in an
+    // extra quote layer and double-escape the inner `\"` sequences, so
+    // sc.exe receives a token it cannot parse back. That produced
+    // `sc create failed:` with no further detail — sc.exe aborts before
+    // reaching CreateService because the inner quotes split the binPath
+    // value at the first segment boundary and the trailing
+    // `serve --config "..."` no longer matches any known parameter.
+    //
+    // sc.exe syntax is `binPath= "<value>"` — a space AFTER `binPath=`, then
+    // the value in quotes. We emit `binPath=` and the value as separate
+    // argv tokens so sc.exe's parameter scanner matches `binPath=`.
+    let bin_path_value = format_bin_path(&paths.binary, &paths.config)?;
     let output = Command::new("sc")
-        .args(["create", &paths.service_name])
-        .args(["binPath=", &bin_path_arg])
+        .arg("create")
+        .arg(&paths.service_name)
+        .arg("binPath=")
+        .raw_arg(quote_for_argv(&bin_path_value))
         .args(["DisplayName=", DISPLAY_NAME])
         .args(["start=", "auto"])
         .output()
         .context("failed to spawn sc.exe")?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("sc create failed: {}", stderr.trim());
+        bail!(
+            "sc create failed: {}",
+            sc_failure_detail(&output.stdout, &output.stderr)
+        );
     }
     Ok(())
 }

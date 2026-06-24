@@ -18,8 +18,11 @@ pub(super) fn run_sc(args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("failed to spawn sc.exe with args {args:?}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("sc {:?} failed: {}", args, stderr.trim());
+        bail!(
+            "sc {:?} failed: {}",
+            args,
+            sc_failure_detail(&output.stdout, &output.stderr)
+        );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -56,22 +59,53 @@ pub(super) fn validate_windows_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build the SCM `binPath=` argument string for `smos serve --config <cfg>`.
+/// Build the logical `binPath` value SCM stores for `smos serve --config <cfg>`.
 ///
-/// Both the binary and the config path are quoted so paths containing
-/// spaces (e.g. `C:\Program Files\smos\smos.exe`) survive SCM's
-/// `CommandLineToArgvW` argv splitting. Backslashes inside each quoted
-/// segment are doubled to prevent the closing quote from being escaped.
-/// Paths containing `"` or ending in `\` are rejected by
-/// [`validate_windows_path`] before formatting.
+/// This is the string SCM persists and later hands verbatim to
+/// `CreateProcessW`, so it must already be a valid `CommandLineToArgvW`
+/// command line: each path segment containing spaces is wrapped in its own
+/// pair of quotes so argv splitting at service start keeps the binary and
+/// config as single tokens. Backslashes are left as-is — they are only
+/// significant when immediately preceding a `"`, and
+/// [`validate_windows_path`] already rejects paths ending in `\` (which
+/// would escape the closing quote).
+///
+/// This is NOT the form passed to `sc.exe` on the command line: that form
+/// needs an extra layer of outer quoting plus inner-quote escaping handled
+/// by [`quote_for_argv`].
 pub(super) fn format_bin_path(binary: &Path, config: &Path) -> Result<String> {
     validate_windows_path(binary)?;
     validate_windows_path(config)?;
-    let escaped_binary = binary.to_string_lossy().replace('\\', "\\\\");
-    let escaped_config = config.to_string_lossy().replace('\\', "\\\\");
-    Ok(format!(
-        "\"{escaped_binary}\" serve --config \"{escaped_config}\""
-    ))
+    let bin_str = binary.to_string_lossy();
+    let cfg_str = config.to_string_lossy();
+    Ok(format!("\"{bin_str}\" serve --config \"{cfg_str}\""))
+}
+
+/// Quote `s` as a single argv token in the canonical `CommandLineToArgvW`
+/// form: wrap in outer double quotes and escape every inner `"` as `\"`.
+///
+/// The result must be handed to [`CommandExt::raw_arg`], NOT `Command::arg`,
+/// because `std::process::Command::arg` would otherwise re-wrap the value
+/// in another layer of quotes and double-escape the inner `\"` sequences,
+/// producing a token `sc.exe` cannot parse back into the original value.
+pub(super) fn quote_for_argv(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\\\""))
+}
+
+/// Surface the real reason `sc.exe` failed.
+///
+/// `sc.exe` is unusual: it writes most failures (e.g.
+/// `CreateService FAILED 1073:` / `The specified service already exists`)
+/// to **stdout**, leaving stderr empty. Returning an empty error suffix
+/// (as the previous `bail!("sc create failed: {}", stderr.trim())` did)
+/// hides the SCM error code from the operator. Prefer stderr when present
+/// (spawn-level errors go there), otherwise fall back to stdout.
+pub(super) fn sc_failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr_s = String::from_utf8_lossy(stderr).trim().to_string();
+    if !stderr_s.is_empty() {
+        return stderr_s;
+    }
+    String::from_utf8_lossy(stdout).trim().to_string()
 }
 
 /// Detect admin rights via `whoami /groups` and the High Mandatory Level
@@ -127,33 +161,29 @@ mod tests {
         let config = PathBuf::from("C:\\Program Files\\smos\\smos.toml");
         let bin_path = format_bin_path(&binary, &config).expect("format_bin_path");
         assert!(
-            bin_path.starts_with("\"C:\\\\Program Files\\\\smos\\\\smos.exe\""),
+            bin_path.starts_with("\"C:\\Program Files\\smos\\smos.exe\""),
             "binary segment must be quoted so SCM does not split at the space: {bin_path}"
         );
         assert!(
-            bin_path.contains("\"C:\\\\Program Files\\\\smos\\\\smos.toml\""),
+            bin_path.contains("\"C:\\Program Files\\smos\\smos.toml\""),
             "config segment must be quoted so the value survives argv splitting: {bin_path}"
         );
         assert!(bin_path.contains(" serve --config "));
     }
 
     #[test]
-    fn format_bin_path_yields_scm_parsable_value() {
-        // End-to-end shape of the value handed to `sc create binPath=`.
-        // `std::process::Command` further escapes it when forwarding to
-        // sc.exe; here we just pin that format_bin_path produces the
-        // canonical `"binary" serve --config "config"` form with no
-        // extra wrapping quotes that would confuse SCM at launch time.
+    fn format_bin_path_yields_canonical_command_line() {
+        // End-to-end shape of the binPath value SCM will store. Each path
+        // segment is independently quoted; backslashes are NOT doubled
+        // (doubling is the job of `quote_for_argv` when the value is
+        // forwarded to sc.exe as a raw argv token).
         let binary = PathBuf::from("C:\\smos\\smos.exe");
         let config = PathBuf::from("C:\\smos\\smos.toml");
         let bin_path = format_bin_path(&binary, &config).expect("format_bin_path");
         assert_eq!(
             bin_path,
-            "\"C:\\\\smos\\\\smos.exe\" serve --config \"C:\\\\smos\\\\smos.toml\""
+            "\"C:\\smos\\smos.exe\" serve --config \"C:\\smos\\smos.toml\""
         );
-        // No spurious outer wrapping.
-        assert!(!bin_path.starts_with("\"\""), "double-wrapping breaks SCM");
-        assert!(!bin_path.ends_with("\"\""), "double-wrapping breaks SCM");
     }
 
     #[test]
@@ -172,5 +202,109 @@ mod tests {
         let ok = PathBuf::from("C:\\smos\\smos.toml");
         assert!(format_bin_path(&bad, &ok).is_err());
         assert!(format_bin_path(&ok, &bad).is_err());
+    }
+
+    #[test]
+    fn quote_for_argv_wraps_and_escapes_inner_quotes() {
+        // Regression: passing `format_bin_path`'s output through
+        // `Command::arg` (instead of `raw_arg`) made std wrap the value
+        // in an extra quote layer and double-escape every inner `"`,
+        // yielding a token sc.exe could not parse — `sc create failed:`
+        // with no further detail. `quote_for_argv` produces the canonical
+        // single-argv form that `raw_arg` forwards verbatim.
+        let bin_path = "\"C:\\Program Files\\smos\\smos.exe\" serve --config \"C:\\Program Files\\smos\\smos.toml\"";
+        let argv = quote_for_argv(bin_path);
+        assert_eq!(
+            argv,
+            "\"\\\"C:\\Program Files\\smos\\smos.exe\\\" serve --config \\\"C:\\Program Files\\smos\\smos.toml\\\"\""
+        );
+        // Round-trips through CommandLineToArgvW back to the original.
+        assert_eq!(parse_argv(&argv), bin_path);
+    }
+
+    #[test]
+    fn quote_for_argv_leaves_backslashes_alone() {
+        // Backslashes not adjacent to `"` are inert under CommandLineToArgvW;
+        // `quote_for_argv` must NOT double them (doubling would corrupt
+        // `C:\smos\smos.exe` into `C:\\smos\\smos.exe` in the stored binPath).
+        let argv = quote_for_argv("C:\\smos\\smos.exe");
+        assert_eq!(argv, "\"C:\\smos\\smos.exe\"");
+        assert_eq!(parse_argv(&argv), "C:\\smos\\smos.exe");
+    }
+
+    #[test]
+    fn sc_failure_detail_prefers_stderr_when_present() {
+        assert_eq!(
+            sc_failure_detail(b"ignored stdout\n", b"  spawn error  \n"),
+            "spawn error"
+        );
+    }
+
+    #[test]
+    fn sc_failure_detail_falls_back_to_stdout_when_stderr_empty() {
+        // sc.exe writes CreateService FAILED / ChangeServiceConfig failures
+        // to stdout, leaving stderr empty — without this fallback the
+        // operator sees a bare "sc create failed:" with no SCM code.
+        assert_eq!(
+            sc_failure_detail(
+                b"[SC] CreateService FAILED 1073:\r\n\r\nThe specified service already exists.\r\n",
+                b""
+            ),
+            "[SC] CreateService FAILED 1073:\r\n\r\nThe specified service already exists."
+        );
+    }
+
+    /// Minimal `CommandLineToArgvW` re-implementation for test round-trips.
+    /// Not for production use — only enough of the algorithm to validate
+    /// that `quote_for_argv` produces values Windows parses back correctly.
+    fn parse_argv(cmd_line: &str) -> String {
+        let mut out = String::new();
+        let mut in_quotes = false;
+        let chars: Vec<char> = cmd_line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            i = match chars[i] {
+                '\\' => parse_backslash_run(&chars, i, &mut out, &mut in_quotes),
+                '"' => {
+                    in_quotes = !in_quotes;
+                    i + 1
+                }
+                c => {
+                    out.push(c);
+                    i + 1
+                }
+            };
+        }
+        out
+    }
+
+    /// Consume a run of backslashes starting at `start`. If the run is
+    /// followed by `"`, apply the `2n`/`2n+1` backslash-before-quote rule;
+    /// otherwise emit the backslashes verbatim. Returns the index after
+    /// the consumed run (and the trailing `"` if any).
+    fn parse_backslash_run(
+        chars: &[char],
+        start: usize,
+        out: &mut String,
+        in_quotes: &mut bool,
+    ) -> usize {
+        let mut count = 0;
+        let mut i = start;
+        while i < chars.len() && chars[i] == '\\' {
+            count += 1;
+            i += 1;
+        }
+        if i < chars.len() && chars[i] == '"' {
+            out.push_str(&"\\".repeat(count / 2));
+            if count % 2 == 1 {
+                out.push('"');
+            } else {
+                *in_quotes = !*in_quotes;
+            }
+            i + 1
+        } else {
+            out.push_str(&"\\".repeat(count));
+            i
+        }
     }
 }
