@@ -19,9 +19,7 @@
 //!    (28081 embedding, 28082 extraction, 28181 reranker). An already-running
 //!    service is reported as ✓ so the operator sees what `auto_launch` will
 //!    reuse vs. spawn.
-//! 5. **Reranker** — probes the configured `/health` endpoint (kept separate
-//!    from the port sweep so a non-default `[reranker]` URL still validates).
-//! 6. **Database** — connects to SurrealDB and applies migrations.
+//! 5. **Database** — connects to SurrealDB and applies migrations.
 //!
 //! This module owns the orchestration + filesystem bootstrap only; the
 //! network probes live in [`crate::cli::init_checks`], the GGUF download in
@@ -68,25 +66,22 @@ pub async fn run_init() -> Result<()> {
     println!("SMOS Setup");
     println!("==========");
 
-    println!("\n[1/6] Creating ~/.smos/ directory structure...");
+    println!("\n[1/5] Creating ~/.smos/ directory structure...");
     let fs = bootstrap_filesystem()?;
     print_filesystem_details(&fs);
 
     let config = load_config(&fs.paths.config);
 
-    println!("\n[2/6] Checking llama-server on PATH...");
+    println!("\n[2/5] Checking llama-server on PATH...");
     init_checks::check_llama_server();
 
-    println!("\n[3/6] Downloading GGUF models...");
+    println!("\n[3/5] Downloading GGUF models...");
     init_models::download_gguf_models(&fs.paths);
 
-    println!("\n[4/6] Checking llama-server services (ports 28081 / 28082 / 28181)...");
+    println!("\n[4/5] Checking llama-server services (ports 28081 / 28082 / 28181)...");
     init_checks::check_llama_servers().await;
 
-    println!("\n[5/6] Checking reranker ({})...", config.reranker.url);
-    init_checks::check_reranker(&config.reranker).await;
-
-    println!("\n[6/6] Initializing database...");
+    println!("\n[5/5] Initializing database...");
     init_checks::init_database(&config.surreal).await;
 
     print_footer(&fs.paths);
@@ -142,8 +137,12 @@ fn print_filesystem_details(fs: &FsOutcome) {
     // `ensure_smos_home` materialises, so print from the constant rather
     // than a free-hand string that would silently drift when a new subdir
     // is added.
-    let dirs = SMOS_HOME_SUBDIRS.join("/");
-    println!("  ✓ Directories: {dirs}/");
+    let dirs: Vec<String> = SMOS_HOME_SUBDIRS
+        .iter()
+        .map(|name| format!("{name}/"))
+        .collect();
+    println!("  ✓ Directories:");
+    println!("    {}", dirs.join("  "));
 }
 
 /// Load the just-bootstrapped config. A parse/validation failure on a

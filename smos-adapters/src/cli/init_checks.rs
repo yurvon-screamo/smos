@@ -1,5 +1,5 @@
-//! Inline setup probes for `smos init` — `llama-server` health + reranker +
-//! SurrealDB.
+//! Inline setup probes for `smos init` — `llama-server` health (embedding,
+//! extraction, reranker ports) + SurrealDB.
 //!
 //! Each probe is deliberately lightweight: it answers "is the box ready to
 //! `smos serve`?" and prints a ✓ / ✗ row with a remediation hint. Detailed
@@ -16,10 +16,9 @@ use anyhow::{Context, Result};
 
 use crate::SurrealStore;
 use crate::cli::init_path::find_in_path;
-use crate::config::{RerankerConfig, SurrealConfig};
+use crate::config::SurrealConfig;
 
 const LLAMA_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const RERANKER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The three `llama-server` ports the default config points the local roles
 /// at: embedding (28081), extraction (28082), reranker (28181). `init` probes
@@ -70,29 +69,6 @@ pub(super) fn check_llama_server() {
             println!(
                 "    Required for embedding / extraction / reranker — every chat-completion request fails without it"
             );
-        }
-    }
-}
-
-/// Probe the reranker `/health` endpoint. A miss is a soft warning (✗), not
-/// fatal: the operator may legitimately start the reranker after init, or
-/// point `[reranker]` at a remote host.
-pub(super) async fn check_reranker(config: &RerankerConfig) {
-    let client = match reqwest::Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => {
-            println!("  ✗ Cannot construct HTTP client: {e}");
-            println!("    Verify rustls / native-tls setup and re-run");
-            return;
-        }
-    };
-    let url = format!("{}/health", config.url.trim_end_matches('/'));
-    match probe_http(&client, &url, RERANKER_PROBE_TIMEOUT).await {
-        Ok(()) => println!("  ✓ Reranker reachable at {}", config.url),
-        Err(_) => {
-            println!("  ✗ Reranker not reachable at {}", config.url);
-            println!("    Start: llama-server --model <qwen3-reranker.gguf> --port 28181");
-            println!("    Or enable [llama_cpp] auto_launch = true in config.toml");
         }
     }
 }
