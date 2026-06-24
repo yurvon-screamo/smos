@@ -2,7 +2,7 @@
 
 # SMOS — Semantic Memory Operating System
 
-**Your AI agents get a name, a personality, and a memory that survives every chat.**
+**An operating system for AI agent memory. Swap the model, keep the assistant.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
@@ -10,27 +10,25 @@
 
 </div>
 
-Meet **Bob**, your Rust development assistant. Bob remembers the architecture
-decision you made three weeks ago. He knows you changed the cache TTL from 60
-to 10 seconds, and why. Open a new chat and Bob already has the context — not
-because it was pasted into the prompt, but because it lives in his memory.
+Open a new chat in Cursor and your assistant starts from scratch. Switch to
+Claude or opencode and you re-explain why the cache TTL is 10 seconds, not 60.
+The model is stateless. The tool is replaceable. The memory should not be.
+**Bob** is a Rust development assistant that remembers: he knows why you
+picked that TTL, and he carries that context into every new chat — not pasted
+into the prompt, but living in his memory.
 
-Wherever you open Bob — Cursor, opencode, a browser tab — it is the same Bob
-with the same memories. The experience shifts from *which tool am I using?*
-to *who am I working with?* The client becomes a window; the assistant
-becomes the constant.
+SMOS is a *memory operating system*. Treat the agent as an *application*, the
+model as a *CPU*, and SMOS as the *OS* that manages memory between them. You
+do not swap a CPU to keep your files. You do not lose programs on reboot.
+Swap GPT-4o for a local model and Bob stays Bob. Cursor, Claude, opencode, a
+curl one-liner — each is a window you talk to Bob through.
 
-Bob is a *person*: a memory namespace, a persona, and a set of tools. You
-configure him the way you hand tools to a new teammate — here is your name
-(Bob), your role (a persona file), and your brain (which LLM to think with).
-Tomorrow you hire **Alice** for ML engineering and **Charlie** for DevOps,
-each with their own toolkit and their own memory.
-
-This is what *memory operating system* means. The LLM is a processor —
-replaceable compute that comes and goes. SMOS is the operating system that
-manages identity, knowledge, and history on behalf of every agent. Switch
-from GPT-4o to Llama to a local model and Bob stays Bob. The center of
-gravity moves from the model to the system, where your assistants live.
+Configuring an agent is not writing routing rules. It is handing a teammate
+their toolkit: a name, a role, and a brain to think with. Tomorrow you create
+**Alice** for ML engineering and **Charlie** for DevOps, each with its own
+knowledge — Alice never mixes your Rust types with your Python pipelines.
+Wherever you run the model, it is still your assistant. Identity and history
+live at the OS layer, not in a chat log you rebuild by hand.
 
 ---
 
