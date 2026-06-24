@@ -26,7 +26,8 @@ use smos::upstream::ReqwestUpstreamRouter;
 use smos::{LlamaCppReranker, OllamaEmbedding, OllamaExtractor, SurrealStore};
 use smos_application::ports::{Clock, FactRepository, IdGenerator};
 use smos_domain::{
-    Confidence, Embedding, Fact, FactId, FactStatus, MemoryKey, SessionId, Timestamp,
+    Confidence, Embedding, Fact, FactId, FactStatus, MemoryKey, NewPendingRequest, SessionId,
+    Timestamp,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::RocksDb;
@@ -323,10 +324,12 @@ pub fn fixed_now() -> Timestamp {
     SystemClock.now()
 }
 
-/// Reference embedding dimensionality — pinned to 1024 to match the HNSW
-/// index declared in `surreal_schema::FACT_DDL`. Tests that exercise vector
-/// search must seed embeddings of this dimensionality.
-pub const EMBEDDING_DIM: usize = 1024;
+/// Reference embedding dimensionality — re-exported from
+/// [`smos::storage::surreal_schema::EMBEDDING_DIM`] (itself an alias for the
+/// domain's canonical `Embedding::EXPECTED_DIM`), so tests stay in lockstep
+/// with the HNSW index declared in `surreal_schema::FACT_DDL`. Tests that
+/// exercise vector search must seed embeddings of this dimensionality.
+pub use smos::storage::surreal_schema::EMBEDDING_DIM;
 
 /// Build a unit-norm embedding of `dim` dimensions with `1.0` at `axis`.
 pub fn unit_embedding(dim: usize, axis: usize) -> Embedding {
@@ -386,14 +389,14 @@ pub async fn seed_accepted_fact_with_threshold(
     extracted_at: Timestamp,
     accept_threshold: f32,
 ) -> FactId {
-    let mut fact = Fact::new_pending(
+    let mut fact = Fact::new_pending(NewPendingRequest {
         content,
-        enrichment_memory_key(),
+        memory_key: enrichment_memory_key(),
         session,
         embedding,
         extracted_at,
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("pending fact");
     let cfg = smos_domain::config::ConfidenceConfig {
         accept_threshold,
@@ -418,14 +421,14 @@ pub async fn seed_pending_fact(
     session: SessionId,
     extracted_at: Timestamp,
 ) -> FactId {
-    let fact = Fact::new_pending(
+    let fact = Fact::new_pending(NewPendingRequest {
         content,
-        enrichment_memory_key(),
+        memory_key: enrichment_memory_key(),
         session,
         embedding,
         extracted_at,
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("pending fact");
     let id = fact.id().clone();
     FactRepository::save(store, &fact).await.expect("save fact");
@@ -441,14 +444,14 @@ pub async fn seed_expired_fact(
     session: SessionId,
     extracted_at: Timestamp,
 ) -> FactId {
-    let mut fact = Fact::new_pending(
+    let mut fact = Fact::new_pending(NewPendingRequest {
         content,
-        enrichment_memory_key(),
+        memory_key: enrichment_memory_key(),
         session,
         embedding,
         extracted_at,
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("pending fact");
     fact.set_status_and_confidence(
         FactStatus::Accepted,

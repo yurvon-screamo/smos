@@ -26,8 +26,8 @@ use smos_application::{
     types::{SearchHit, SearchHitMetadata},
 };
 use smos_domain::{
-    Confidence, Embedding, Fact, FactContent, FactId, FactStatus, FactType, Heat, MemoryKey,
-    SessionId, SessionState, SourceSessions, Timestamp,
+    Confidence, Embedding, Fact, FactContent, FactId, FactRecord, FactStatus, FactType, Heat,
+    MemoryKey, SessionId, SessionRecord, SessionState, SourceSessions, Timestamp,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Db;
@@ -258,7 +258,7 @@ impl FactRow {
         // Round-trip safe path: `Fact::rehydrate` rebuilds every field
         // verbatim with no recomputation (no `reclassify`, no `boost_heat`).
         // All invariants are enforced by the domain constructor.
-        Fact::rehydrate(
+        Fact::rehydrate(FactRecord {
             id,
             memory_key,
             content,
@@ -273,7 +273,7 @@ impl FactRow {
             heat_base,
             last_access_at,
             embedding,
-        )
+        })
         .map_err(domain_to_repo)
     }
 }
@@ -391,14 +391,14 @@ impl SessionRow {
         // public mutator. The `?` propagates the `last_active < created_at`
         // invariant failure as a `SerializationFailed` so a corrupt row is
         // surfaced loudly instead of silently producing an impossible state.
-        SessionState::rehydrate(
+        SessionState::rehydrate(SessionRecord {
             id,
             memory_key,
             injected_facts,
             pending_facts,
             created_at,
             last_active,
-        )
+        })
         .map_err(|e| RepoError::SerializationFailed(e.to_string()))
     }
 }

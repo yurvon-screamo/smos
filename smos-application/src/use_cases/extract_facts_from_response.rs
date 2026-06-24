@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use smos_domain::chat::ToolCall;
 use smos_domain::config::{ConfidenceConfig, ExtractionConfig};
-use smos_domain::{Embedding, Fact, FactId, MemoryKey, SessionId};
+use smos_domain::{Embedding, Fact, FactId, MemoryKey, NewPendingRequest, SessionId};
 
 use crate::errors::{ProviderError, UseCaseError};
 use crate::helpers::noise_filter;
@@ -286,14 +286,14 @@ where
 
         // Layer 3 — no match: store a new pending fact.
         let emb = Embedding::new(vector)?;
-        let fact = Fact::new_pending(
-            raw,
-            memory_key.clone(),
-            session_id.clone(),
-            emb,
-            self.clock.now(),
-            self.confidence_cfg.base,
-        )?;
+        let fact = Fact::new_pending(NewPendingRequest {
+            content: raw,
+            memory_key: memory_key.clone(),
+            session: session_id.clone(),
+            embedding: emb,
+            extracted_at: self.clock.now(),
+            base_confidence: self.confidence_cfg.base,
+        })?;
         self.facts.save(&fact).await?;
         Ok(Some(fact_id))
     }
@@ -875,14 +875,14 @@ mod tests {
         let sessions = RecordingSessions::default();
 
         // Seed a fact from session 1.
-        let first = Fact::new_pending(
-            "shared fact content here",
-            mk(),
-            sid(1),
-            Embedding::new(vec![1.0]).unwrap(),
-            Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+        let first = Fact::new_pending(NewPendingRequest {
+            content: "shared fact content here",
+            memory_key: mk(),
+            session: sid(1),
+            embedding: Embedding::new(vec![1.0]).unwrap(),
+            extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap();
         let fid = first.id().clone();
         facts
@@ -960,14 +960,14 @@ mod tests {
         let sessions = RecordingSessions::default();
 
         // Seed an existing fact from session 1 under one phrasing.
-        let stored = Fact::new_pending(
-            "the token cache uses TTL=60 to avoid stale entries",
-            mk(),
-            sid(1),
-            Embedding::new(vec![1.0]).unwrap(),
-            Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+        let stored = Fact::new_pending(NewPendingRequest {
+            content: "the token cache uses TTL=60 to avoid stale entries",
+            memory_key: mk(),
+            session: sid(1),
+            embedding: Embedding::new(vec![1.0]).unwrap(),
+            extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap();
         let stored_id = stored.id().clone();
         facts
@@ -1046,14 +1046,14 @@ mod tests {
         let facts = InMemoryFacts::default();
         let sessions = RecordingSessions::default();
 
-        let stored = Fact::new_pending(
-            "auth module uses Argon2id for password hashing",
-            mk(),
-            sid(1),
-            Embedding::new(vec![1.0]).unwrap(),
-            Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+        let stored = Fact::new_pending(NewPendingRequest {
+            content: "auth module uses Argon2id for password hashing",
+            memory_key: mk(),
+            session: sid(1),
+            embedding: Embedding::new(vec![1.0]).unwrap(),
+            extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap();
         let stored_id = stored.id().clone();
         facts
@@ -1113,14 +1113,14 @@ mod tests {
         let facts = InMemoryFacts::default();
         let sessions = RecordingSessions::default();
 
-        let stored = Fact::new_pending(
-            "config reload triggers a graceful drain",
-            mk(),
-            sid(1),
-            Embedding::new(vec![1.0]).unwrap(),
-            Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+        let stored = Fact::new_pending(NewPendingRequest {
+            content: "config reload triggers a graceful drain",
+            memory_key: mk(),
+            session: sid(1),
+            embedding: Embedding::new(vec![1.0]).unwrap(),
+            extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap();
         let stored_id = stored.id().clone();
         facts
@@ -1173,14 +1173,14 @@ mod tests {
         let facts = InMemoryFacts::default();
         let sessions = RecordingSessions::default();
 
-        let stored = Fact::new_pending(
-            "indexer batches at most 1024 documents per commit",
-            mk(),
-            sid(1),
-            Embedding::new(vec![1.0]).unwrap(),
-            Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+        let stored = Fact::new_pending(NewPendingRequest {
+            content: "indexer batches at most 1024 documents per commit",
+            memory_key: mk(),
+            session: sid(1),
+            embedding: Embedding::new(vec![1.0]).unwrap(),
+            extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap();
         let stored_id = stored.id().clone();
         facts

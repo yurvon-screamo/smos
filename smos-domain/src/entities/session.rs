@@ -20,6 +20,24 @@ pub struct SessionState {
     last_active: Timestamp,
 }
 
+/// Named-argument bundle for [`SessionState::rehydrate`]: the full
+/// persisted state of a `SessionState`, one field per positional parameter of
+/// [`SessionState::rehydrate`].
+///
+/// `injected_facts` is materialised as a `Vec<FactId>` (rather than the
+/// `impl IntoIterator<Item = FactId>` of the positional form) because a struct
+/// field cannot carry an `impl Trait` generic; `Vec` satisfies `IntoIterator`
+/// so the dedup-into-`BTreeSet` semantics are preserved verbatim.
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    pub id: SessionId,
+    pub memory_key: MemoryKey,
+    pub injected_facts: Vec<FactId>,
+    pub pending_facts: Vec<FactId>,
+    pub created_at: Timestamp,
+    pub last_active: Timestamp,
+}
+
 impl SessionState {
     pub fn new(id: SessionId, memory_key: MemoryKey, now: Timestamp) -> Self {
         Self {
@@ -37,22 +55,24 @@ impl SessionState {
     /// Mirrors [`crate::entities::Fact::rehydrate`]: the only path that lets a
     /// persistence adapter rebuild the full session state — including
     /// `injected_facts`, which has no public mutator — without recomputation.
-    /// The `injected_facts` iterator is consumed into a `BTreeSet` (duplicates
-    /// collapse); `pending_facts` is taken as-is.
+    /// The caller assembles a [`SessionRecord`] on read; `injected_facts` is
+    /// deduped into a `BTreeSet` (duplicates collapse), `pending_facts` is
+    /// taken as-is.
     ///
     /// Returns [`DomainError::InvalidTimestamp`] when `last_active < created_at`:
     /// a session that was last touched before it was created is an impossible
     /// state and indicates a corrupt row. Fail-fast at rehydrate keeps the
     /// invariant pinned in one place rather than relying on every caller to
     /// remember the check.
-    pub fn rehydrate(
-        id: SessionId,
-        memory_key: MemoryKey,
-        injected_facts: impl IntoIterator<Item = FactId>,
-        pending_facts: Vec<FactId>,
-        created_at: Timestamp,
-        last_active: Timestamp,
-    ) -> Result<Self, DomainError> {
+    pub fn rehydrate(rec: SessionRecord) -> Result<Self, DomainError> {
+        let SessionRecord {
+            id,
+            memory_key,
+            injected_facts,
+            pending_facts,
+            created_at,
+            last_active,
+        } = rec;
         if last_active < created_at {
             return Err(DomainError::InvalidTimestamp(format!(
                 "last_active ({last_active}) < created_at ({created_at})"
@@ -229,14 +249,14 @@ mod tests {
         let injected = [fid("i1"), fid("i2"), fid("i1")]; // duplicate intentional
         state.touch(at(1_700_000_999));
 
-        let rehydrated = SessionState::rehydrate(
-            state.id().clone(),
-            state.memory_key().clone(),
-            injected.iter().cloned(),
-            state.pending_facts().to_vec(),
-            state.created_at(),
-            state.last_active(),
-        )
+        let rehydrated = SessionState::rehydrate(SessionRecord {
+            id: state.id().clone(),
+            memory_key: state.memory_key().clone(),
+            injected_facts: injected.to_vec(),
+            pending_facts: state.pending_facts().to_vec(),
+            created_at: state.created_at(),
+            last_active: state.last_active(),
+        })
         .expect("valid timestamps: last_active >= created_at");
 
         assert_eq!(rehydrated.id(), state.id());
@@ -260,14 +280,14 @@ mod tests {
         // never reaches the rest of the system.
         let created = at(2_000);
         let last_active = at(1_000);
-        let result = SessionState::rehydrate(
-            sid(),
-            key(),
-            std::iter::empty(),
-            Vec::new(),
-            created,
+        let result = SessionState::rehydrate(SessionRecord {
+            id: sid(),
+            memory_key: key(),
+            injected_facts: Vec::new(),
+            pending_facts: Vec::new(),
+            created_at: created,
             last_active,
-        );
+        });
         let err = result.expect_err("last_active < created_at must fail rehydrate");
         let msg = err.to_string();
         assert!(msg.contains("last_active"), "msg = {msg}");
@@ -279,8 +299,15 @@ mod tests {
         // Boundary: created_at == last_active is the freshly-created state —
         // must NOT trip the `last_active < created_at` invariant.
         let now = at(1_700_000_000);
-        let state = SessionState::rehydrate(sid(), key(), std::iter::empty(), Vec::new(), now, now)
-            .expect("created_at == last_active is valid");
+        let state = SessionState::rehydrate(SessionRecord {
+            id: sid(),
+            memory_key: key(),
+            injected_facts: Vec::new(),
+            pending_facts: Vec::new(),
+            created_at: now,
+            last_active: now,
+        })
+        .expect("created_at == last_active is valid");
         assert_eq!(state.created_at(), state.last_active());
     }
 }

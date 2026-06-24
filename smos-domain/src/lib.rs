@@ -15,7 +15,7 @@ pub mod error;
 pub mod value_objects;
 
 // Re-export commonly-used types at the crate root for ergonomic call sites.
-pub use entities::{Fact, SessionState};
+pub use entities::{Fact, FactRecord, NewPendingRequest, SessionRecord, SessionState};
 pub use enums::{FactStatus, FactType, MergeReason, NliLabel};
 pub use error::DomainError;
 pub use value_objects::{

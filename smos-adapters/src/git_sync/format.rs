@@ -22,8 +22,8 @@
 
 use serde::{Deserialize, Serialize};
 use smos_domain::{
-    Confidence, Fact, FactContent, FactId, FactStatus, FactType, Heat, MemoryKey, SourceSessions,
-    Timestamp,
+    Confidence, Fact, FactContent, FactId, FactRecord, FactStatus, FactType, Heat, MemoryKey,
+    SourceSessions, Timestamp,
 };
 use time::OffsetDateTime;
 
@@ -179,7 +179,7 @@ impl FactFrontmatter {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Fact::rehydrate(
+        Fact::rehydrate(FactRecord {
             id,
             memory_key,
             content,
@@ -189,12 +189,12 @@ impl FactFrontmatter {
             valid_from,
             valid_until,
             extracted_at,
-            SourceSessions::from_vec(source_sessions),
+            source_sessions: SourceSessions::from_vec(source_sessions),
             conflicts_with,
             heat_base,
             last_access_at,
-            None,
-        )
+            embedding: None,
+        })
         .map_err(|e| RehydrateError::invalid("rehydrate", e.to_string()))
     }
 }

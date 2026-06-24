@@ -20,7 +20,8 @@ use smos_application::use_cases::{FinalizeSession, FinalizeStats};
 use smos_domain::config::{ConfidenceConfig, MergeConfig, NliConfig};
 use smos_domain::enums::NliLabel;
 use smos_domain::{
-    Confidence, Embedding, Fact, FactId, FactStatus, MemoryKey, NliScores, SessionId, Timestamp,
+    Confidence, Embedding, Fact, FactId, FactStatus, MemoryKey, NewPendingRequest, NliScores,
+    SessionId, Timestamp,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::RocksDb;
@@ -176,27 +177,27 @@ fn blend_embedding(b: f32) -> Embedding {
 
 /// Pending fact (status `Pending`, single-source provenance, base confidence).
 fn pending_fact(content: &str, embedding: Embedding, session: SessionId) -> Fact {
-    Fact::new_pending(
+    Fact::new_pending(NewPendingRequest {
         content,
-        memory_key(),
+        memory_key: memory_key(),
         session,
         embedding,
-        ts(),
-        ConfidenceConfig::default().base,
-    )
+        extracted_at: ts(),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending fact")
 }
 
 /// Accepted fact lifted above the accept threshold via `set_status_and_confidence`.
 fn accepted_fact(content: &str, embedding: Embedding, session: SessionId) -> Fact {
-    let mut f = Fact::new_pending(
+    let mut f = Fact::new_pending(NewPendingRequest {
         content,
-        memory_key(),
+        memory_key: memory_key(),
         session,
         embedding,
-        ts(),
-        ConfidenceConfig::default().base,
-    )
+        extracted_at: ts(),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending");
     f.set_status_and_confidence(
         FactStatus::Accepted,
@@ -1175,14 +1176,14 @@ async fn list_memory_keys_for_session_returns_distinct_keys() {
     // namespace. All three carry the same session in source_sessions.
     let mk_a = pending_fact("canonical-ns fact one", unit_embedding(1), sid(1));
     let mk_b = pending_fact("canonical-ns fact two", unit_embedding(2), sid(1));
-    let other_mk_fact = Fact::new_pending(
-        "other-ns fact",
-        other_key.clone(),
-        sid(1),
-        unit_embedding(3),
-        ts(),
-        ConfidenceConfig::default().base,
-    )
+    let other_mk_fact = Fact::new_pending(NewPendingRequest {
+        content: "other-ns fact",
+        memory_key: other_key.clone(),
+        session: sid(1),
+        embedding: unit_embedding(3),
+        extracted_at: ts(),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending");
     FactRepository::save(&store, &mk_a).await.expect("save a");
     FactRepository::save(&store, &mk_b).await.expect("save b");
@@ -1193,14 +1194,14 @@ async fn list_memory_keys_for_session_returns_distinct_keys() {
     // Sanity: a fact under the same memory_key but a DIFFERENT session
     // must NOT contribute its memory_key to the discovery result for
     // `session`.
-    let other_session_fact = Fact::new_pending(
-        "unrelated-session fact in third namespace",
-        MemoryKey::from_raw("third-namespace").expect("mk"),
-        sid(2),
-        unit_embedding(4),
-        ts(),
-        ConfidenceConfig::default().base,
-    )
+    let other_session_fact = Fact::new_pending(NewPendingRequest {
+        content: "unrelated-session fact in third namespace",
+        memory_key: MemoryKey::from_raw("third-namespace").expect("mk"),
+        session: sid(2),
+        embedding: unit_embedding(4),
+        extracted_at: ts(),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending");
     FactRepository::save(&store, &other_session_fact)
         .await
@@ -1251,41 +1252,41 @@ async fn list_memory_keys_returns_every_distinct_namespace() {
     // Seed facts across three namespaces, mixing sessions so the test would
     // catch a regression that filtered by session (the sibling
     // `list_memory_keys_for_session` does filter; this method must NOT).
-    let a_one = Fact::new_pending(
-        "ns_a fact one",
-        ns_a.clone(),
-        sid(1),
-        unit_embedding(1),
-        ts(),
-        ConfidenceConfig::default().base,
-    )
+    let a_one = Fact::new_pending(NewPendingRequest {
+        content: "ns_a fact one",
+        memory_key: ns_a.clone(),
+        session: sid(1),
+        embedding: unit_embedding(1),
+        extracted_at: ts(),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending");
-    let a_two = Fact::new_pending(
-        "ns_a fact two",
-        ns_a.clone(),
-        sid(2),
-        unit_embedding(2),
-        ts(),
-        ConfidenceConfig::default().base,
-    )
+    let a_two = Fact::new_pending(NewPendingRequest {
+        content: "ns_a fact two",
+        memory_key: ns_a.clone(),
+        session: sid(2),
+        embedding: unit_embedding(2),
+        extracted_at: ts(),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending");
-    let b_fact = Fact::new_pending(
-        "ns_b fact",
-        ns_b.clone(),
-        sid(1),
-        unit_embedding(3),
-        ts(),
-        ConfidenceConfig::default().base,
-    )
+    let b_fact = Fact::new_pending(NewPendingRequest {
+        content: "ns_b fact",
+        memory_key: ns_b.clone(),
+        session: sid(1),
+        embedding: unit_embedding(3),
+        extracted_at: ts(),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending");
-    let c_fact = Fact::new_pending(
-        "ns_c fact",
-        ns_c.clone(),
-        sid(3),
-        unit_embedding(4),
-        ts(),
-        ConfidenceConfig::default().base,
-    )
+    let c_fact = Fact::new_pending(NewPendingRequest {
+        content: "ns_c fact",
+        memory_key: ns_c.clone(),
+        session: sid(3),
+        embedding: unit_embedding(4),
+        extracted_at: ts(),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending");
     FactRepository::save(&store, &a_one)
         .await

@@ -485,14 +485,14 @@ async fn extraction_cross_session_confirmation_unions_provenance() {
     let state = build_state(config).await;
 
     // Seed a pending fact observed from session 1.
-    let fact = smos_domain::Fact::new_pending(
-        "TTL=10 prevents the token refresh loop",
-        enrichment_memory_key(),
-        fixed_session(1),
-        unit_embedding_1024(0),
-        SystemClock.now(),
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+    let fact = smos_domain::Fact::new_pending(smos_domain::NewPendingRequest {
+        content: "TTL=10 prevents the token refresh loop",
+        memory_key: enrichment_memory_key(),
+        session: fixed_session(1),
+        embedding: unit_embedding_1024(0),
+        extracted_at: SystemClock.now(),
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("pending fact");
     let fact_id = fact.id().clone();
     FactRepository::save(&state.store, &fact)

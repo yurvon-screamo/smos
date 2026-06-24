@@ -14,7 +14,7 @@
 #![allow(dead_code)]
 
 use serde::Deserialize;
-use smos_domain::{Embedding, Fact, FactId, MemoryKey, SessionId, Timestamp};
+use smos_domain::{Embedding, Fact, FactId, MemoryKey, NewPendingRequest, SessionId, Timestamp};
 use std::collections::BTreeSet;
 use surrealdb::Surreal;
 use surrealdb::engine::local::RocksDb;
@@ -473,14 +473,14 @@ fn unit_embedding_f64(dim: usize, index: usize) -> Vec<f64> {
 // Build a domain `Fact` to confirm we still can — kept around as a sanity
 // check that nothing in `smos-domain` has shifted.
 fn sample_fact(content: &str, embedding: Vec<f32>) -> Fact {
-    Fact::new_pending(
+    Fact::new_pending(NewPendingRequest {
         content,
-        MemoryKey::from_raw("origa").unwrap(),
-        SessionId::from_raw("sess_abcdef012345").unwrap(),
-        Embedding::new(embedding).unwrap(),
-        Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+        memory_key: MemoryKey::from_raw("origa").unwrap(),
+        session: SessionId::from_raw("sess_abcdef012345").unwrap(),
+        embedding: Embedding::new(embedding).unwrap(),
+        extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .unwrap()
 }
 

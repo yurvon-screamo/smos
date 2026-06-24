@@ -45,6 +45,49 @@ pub struct MergeCandidate {
     pub cosine_similarity: Cosine,
 }
 
+/// Named-argument bundle for [`Fact::rehydrate`]: the full persisted
+/// state of a `Fact`, one field per positional parameter of [`Fact::rehydrate`].
+///
+/// Persistence adapters assemble this on read and hand it to
+/// [`Fact::rehydrate`]; the record-struct shape makes call sites
+/// order-independent and self-documenting, eliminating the 14-argument
+/// positional data-clump. Field types and order mirror `Fact` itself so the
+/// round-trip `save(f); get(id) == f` holds exactly.
+#[derive(Debug, Clone)]
+pub struct FactRecord {
+    pub id: FactId,
+    pub memory_key: MemoryKey,
+    pub content: FactContent,
+    pub fact_type: FactType,
+    pub confidence: Confidence,
+    pub status: FactStatus,
+    pub valid_from: Timestamp,
+    pub valid_until: Option<Timestamp>,
+    pub extracted_at: Timestamp,
+    pub source_sessions: SourceSessions,
+    pub conflicts_with: Vec<FactId>,
+    pub heat_base: Heat,
+    pub last_access_at: Timestamp,
+    pub embedding: Option<Embedding>,
+}
+
+/// Named-argument bundle for [`Fact::new_pending`]: the six inputs a
+/// freshly-extracted pending fact needs.
+///
+/// `content` borrows (lifetime `'a`) so a caller holding a `&str` from the
+/// extraction pipeline can construct the request without an intermediate
+/// allocation. The borrowing request is consumed synchronously by
+/// [`Fact::new_pending`], which returns an owned [`Fact`].
+#[derive(Debug)]
+pub struct NewPendingRequest<'a> {
+    pub content: &'a str,
+    pub memory_key: MemoryKey,
+    pub session: SessionId,
+    pub embedding: Embedding,
+    pub extracted_at: Timestamp,
+    pub base_confidence: f32,
+}
+
 impl Fact {
     /// Construct a fresh pending fact right after extraction.
     ///
@@ -52,32 +95,26 @@ impl Fact {
     /// heat `1.0`, fact_type `Entity`, no conflicts, no `valid_until`.
     /// Confidence and status are recomputed by [`Fact::reclassify`] once NLI
     /// is available. The caller passes the configured
-    /// [`ConfidenceConfig::base`] so the domain stays free of the
-    /// "default 0.5" hard-coding that bit the POC (a config tweak to
-    /// `confidence.base` was silently ignored at extraction time).
-    pub fn new_pending(
-        content: &str,
-        memory_key: MemoryKey,
-        session: SessionId,
-        embedding: Embedding,
-        now: Timestamp,
-        base_confidence: f32,
-    ) -> Result<Self, DomainError> {
+    /// [`ConfidenceConfig::base`] (via [`NewPendingRequest::base_confidence`])
+    /// so the domain stays free of the "default 0.5" hard-coding that bit the
+    /// POC (a config tweak to `confidence.base` was silently ignored at
+    /// extraction time).
+    pub fn new_pending(req: NewPendingRequest<'_>) -> Result<Self, DomainError> {
         Ok(Self {
-            id: FactId::from_content(content),
-            memory_key,
-            content: FactContent::new(content.to_string())?,
+            id: FactId::from_content(req.content),
+            memory_key: req.memory_key,
+            content: FactContent::new(req.content.to_string())?,
             fact_type: FactType::Entity,
-            confidence: Confidence::new(base_confidence)?,
+            confidence: Confidence::new(req.base_confidence)?,
             status: FactStatus::Pending,
-            valid_from: now,
+            valid_from: req.extracted_at,
             valid_until: None,
-            extracted_at: now,
-            source_sessions: SourceSessions::from_one(session),
+            extracted_at: req.extracted_at,
+            source_sessions: SourceSessions::from_one(req.session),
             conflicts_with: Vec::new(),
             heat_base: Heat::new(1.0)?,
-            last_access_at: now,
-            embedding: Some(embedding),
+            last_access_at: req.extracted_at,
+            embedding: Some(req.embedding),
         })
     }
 
@@ -85,10 +122,10 @@ impl Fact {
     ///
     /// This constructor is the **only** way to rebuild a fact with arbitrary
     /// field values; every other constructor derives some fields from inputs
-    /// (e.g. `new_pending` derives `id` from content). Persistence adapters
-    /// call this on read so the round-trip `save(f); get(id) == f` holds
-    /// exactly, without recomputation that would silently mutate stored
-    /// confidence/status/heat.
+    /// (e.g. [`Fact::new_pending`] derives `id` from content). Persistence
+    /// adapters assemble a [`FactRecord`] on read and call this so the
+    /// round-trip `save(f); get(id) == f` holds exactly, without recomputation
+    /// that would silently mutate stored confidence/status/heat.
     ///
     /// All invariants are still enforced: confidence and heat must be in
     /// `[0.0, 1.0]`, `valid_until` (when `Some`) must be strictly after
@@ -96,57 +133,41 @@ impl Fact {
     /// The constructor returns the matching `DomainError` if any invariant
     /// fails so the caller can surface data corruption rather than silently
     /// re-stamp it.
-    #[allow(clippy::too_many_arguments)] // full-state rehydrate; arg count is inherent
-    pub fn rehydrate(
-        id: FactId,
-        memory_key: MemoryKey,
-        content: FactContent,
-        fact_type: FactType,
-        confidence: Confidence,
-        status: FactStatus,
-        valid_from: Timestamp,
-        valid_until: Option<Timestamp>,
-        extracted_at: Timestamp,
-        source_sessions: SourceSessions,
-        conflicts_with: Vec<FactId>,
-        heat_base: Heat,
-        last_access_at: Timestamp,
-        embedding: Option<Embedding>,
-    ) -> Result<Self, DomainError> {
+    pub fn rehydrate(rec: FactRecord) -> Result<Self, DomainError> {
         // Sanity check: the caller-supplied id must match the canonical
         // content-derived id. If it doesn't, the persisted row is corrupt
         // (someone wrote a row whose record id disagrees with its content).
-        if id != FactId::from_content(content.as_str()) {
+        if rec.id != FactId::from_content(rec.content.as_str()) {
             return Err(DomainError::InvalidFactId(format!(
                 "rehydrate id mismatch: record={} expected={}",
-                id,
-                FactId::from_content(content.as_str())
+                rec.id,
+                FactId::from_content(rec.content.as_str())
             )));
         }
         // `valid_until` invariant (mirrors `set_valid_until`).
-        if let Some(until) = valid_until
-            && until <= valid_from
+        if let Some(until) = rec.valid_until
+            && until <= rec.valid_from
         {
             return Err(DomainError::ValidUntilBeforeValidFrom {
-                from: valid_from,
+                from: rec.valid_from,
                 until,
             });
         }
         Ok(Self {
-            id,
-            memory_key,
-            content,
-            fact_type,
-            confidence,
-            status,
-            valid_from,
-            valid_until,
-            extracted_at,
-            source_sessions,
-            conflicts_with,
-            heat_base,
-            last_access_at,
-            embedding,
+            id: rec.id,
+            memory_key: rec.memory_key,
+            content: rec.content,
+            fact_type: rec.fact_type,
+            confidence: rec.confidence,
+            status: rec.status,
+            valid_from: rec.valid_from,
+            valid_until: rec.valid_until,
+            extracted_at: rec.extracted_at,
+            source_sessions: rec.source_sessions,
+            conflicts_with: rec.conflicts_with,
+            heat_base: rec.heat_base,
+            last_access_at: rec.last_access_at,
+            embedding: rec.embedding,
         })
     }
 
@@ -451,14 +472,14 @@ mod tests {
     }
 
     fn pending_fact(content: &str, session: SessionId) -> Fact {
-        Fact::new_pending(
+        Fact::new_pending(NewPendingRequest {
             content,
-            MemoryKey::from_raw("origa").unwrap(),
+            memory_key: MemoryKey::from_raw("origa").unwrap(),
             session,
-            emb(8),
-            Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+            embedding: emb(8),
+            extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap()
     }
 
@@ -486,14 +507,14 @@ mod tests {
 
     #[test]
     fn new_pending_rejects_empty_content() {
-        let err = Fact::new_pending(
-            "  ",
-            MemoryKey::shared(),
-            sid(1),
-            emb(4),
-            Timestamp::from_unix_secs(0).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+        let err = Fact::new_pending(NewPendingRequest {
+            content: "  ",
+            memory_key: MemoryKey::shared(),
+            session: sid(1),
+            embedding: emb(4),
+            extracted_at: Timestamp::from_unix_secs(0).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap_err();
         assert!(matches!(err, DomainError::EmptyFactContent));
     }
@@ -789,22 +810,22 @@ mod tests {
         ))
         .unwrap();
 
-        let rehydrated = Fact::rehydrate(
-            fact.id().clone(),
-            fact.memory_key().clone(),
-            FactContent::new(fact.content().to_string()).unwrap(),
-            fact.fact_type(),
-            fact.confidence(),
-            fact.status(),
-            fact.valid_from(),
-            fact.valid_until(),
-            fact.extracted_at(),
-            fact.source_sessions().clone(),
-            fact.conflicts_with().to_vec(),
-            fact.heat_base(),
-            fact.last_access_at(),
-            fact.embedding().cloned(),
-        )
+        let rehydrated = Fact::rehydrate(FactRecord {
+            id: fact.id().clone(),
+            memory_key: fact.memory_key().clone(),
+            content: FactContent::new(fact.content().to_string()).unwrap(),
+            fact_type: fact.fact_type(),
+            confidence: fact.confidence(),
+            status: fact.status(),
+            valid_from: fact.valid_from(),
+            valid_until: fact.valid_until(),
+            extracted_at: fact.extracted_at(),
+            source_sessions: fact.source_sessions().clone(),
+            conflicts_with: fact.conflicts_with().to_vec(),
+            heat_base: fact.heat_base(),
+            last_access_at: fact.last_access_at(),
+            embedding: fact.embedding().cloned(),
+        })
         .unwrap();
 
         assert_eq!(rehydrated.id(), fact.id());
@@ -828,22 +849,22 @@ mod tests {
     fn rehydrate_rejects_id_that_disagrees_with_content() {
         let fact = pending_fact("Rust fact", sid(1));
         let wrong_id = FactId::from_content("different content");
-        let err = Fact::rehydrate(
-            wrong_id.clone(),
-            fact.memory_key().clone(),
-            FactContent::new(fact.content().to_string()).unwrap(),
-            fact.fact_type(),
-            fact.confidence(),
-            fact.status(),
-            fact.valid_from(),
-            None,
-            fact.extracted_at(),
-            fact.source_sessions().clone(),
-            Vec::new(),
-            fact.heat_base(),
-            fact.last_access_at(),
-            None,
-        )
+        let err = Fact::rehydrate(FactRecord {
+            id: wrong_id.clone(),
+            memory_key: fact.memory_key().clone(),
+            content: FactContent::new(fact.content().to_string()).unwrap(),
+            fact_type: fact.fact_type(),
+            confidence: fact.confidence(),
+            status: fact.status(),
+            valid_from: fact.valid_from(),
+            valid_until: None,
+            extracted_at: fact.extracted_at(),
+            source_sessions: fact.source_sessions().clone(),
+            conflicts_with: Vec::new(),
+            heat_base: fact.heat_base(),
+            last_access_at: fact.last_access_at(),
+            embedding: None,
+        })
         .unwrap_err();
         assert!(matches!(err, DomainError::InvalidFactId(_)));
     }
@@ -852,22 +873,22 @@ mod tests {
     fn rehydrate_rejects_valid_until_at_or_before_valid_from() {
         let fact = pending_fact("Rust fact", sid(1));
         let at_valid_from = fact.valid_from();
-        let err = Fact::rehydrate(
-            fact.id().clone(),
-            fact.memory_key().clone(),
-            FactContent::new(fact.content().to_string()).unwrap(),
-            fact.fact_type(),
-            fact.confidence(),
-            fact.status(),
-            fact.valid_from(),
-            Some(at_valid_from),
-            fact.extracted_at(),
-            fact.source_sessions().clone(),
-            Vec::new(),
-            fact.heat_base(),
-            fact.last_access_at(),
-            None,
-        )
+        let err = Fact::rehydrate(FactRecord {
+            id: fact.id().clone(),
+            memory_key: fact.memory_key().clone(),
+            content: FactContent::new(fact.content().to_string()).unwrap(),
+            fact_type: fact.fact_type(),
+            confidence: fact.confidence(),
+            status: fact.status(),
+            valid_from: fact.valid_from(),
+            valid_until: Some(at_valid_from),
+            extracted_at: fact.extracted_at(),
+            source_sessions: fact.source_sessions().clone(),
+            conflicts_with: Vec::new(),
+            heat_base: fact.heat_base(),
+            last_access_at: fact.last_access_at(),
+            embedding: None,
+        })
         .unwrap_err();
         assert!(matches!(err, DomainError::ValidUntilBeforeValidFrom { .. }));
     }
@@ -988,14 +1009,14 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn fact_with_key_embedding(content: &str, key: &str, embedding: Vec<f32>) -> Fact {
-        Fact::new_pending(
+        Fact::new_pending(NewPendingRequest {
             content,
-            MemoryKey::from_raw(key).unwrap(),
-            sid(1),
-            Embedding::new(embedding).unwrap(),
-            Timestamp::from_unix_secs(0).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+            memory_key: MemoryKey::from_raw(key).unwrap(),
+            session: sid(1),
+            embedding: Embedding::new(embedding).unwrap(),
+            extracted_at: Timestamp::from_unix_secs(0).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap()
     }
 

@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
-use smos_domain::{Confidence, Fact, FactId, FactStatus, MemoryKey, Timestamp};
+use smos_domain::{Confidence, Fact, FactId, FactRecord, FactStatus, MemoryKey, Timestamp};
 
 use super::ToolError;
 
@@ -95,27 +95,28 @@ pub fn rehydrate_with(
     status: FactStatus,
     valid_until: Option<Timestamp>,
 ) -> Result<Fact, ToolError> {
-    Ok(Fact::rehydrate(
-        source.id().clone(),
-        source.memory_key().clone(),
-        smos_domain::FactContent::new(source.content().to_string())?,
-        source.fact_type(),
+    Ok(Fact::rehydrate(FactRecord {
+        id: source.id().clone(),
+        memory_key: source.memory_key().clone(),
+        content: smos_domain::FactContent::new(source.content().to_string())?,
+        fact_type: source.fact_type(),
         confidence,
         status,
-        source.valid_from(),
+        valid_from: source.valid_from(),
         valid_until,
-        source.extracted_at(),
-        source.source_sessions().clone(),
-        source.conflicts_with().to_vec(),
-        source.heat_base(),
-        source.last_access_at(),
-        source.embedding().cloned(),
-    )?)
+        extracted_at: source.extracted_at(),
+        source_sessions: source.source_sessions().clone(),
+        conflicts_with: source.conflicts_with().to_vec(),
+        heat_base: source.heat_base(),
+        last_access_at: source.last_access_at(),
+        embedding: source.embedding().cloned(),
+    })?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smos_domain::NewPendingRequest;
 
     #[test]
     fn parse_memory_key_rejects_empty() {
@@ -143,14 +144,14 @@ mod tests {
     fn rehydrate_with_preserves_unchanged_fields() {
         let session = smos_domain::SessionId::from_raw("sess_aaaaaaaaaaaa").unwrap();
         let emb = smos_domain::Embedding::new(vec![1.0, 0.0, 0.0, 0.0]).unwrap();
-        let fact = Fact::new_pending(
-            "hello",
-            MemoryKey::from_raw("origa").unwrap(),
+        let fact = Fact::new_pending(NewPendingRequest {
+            content: "hello",
+            memory_key: MemoryKey::from_raw("origa").unwrap(),
             session,
-            emb,
-            Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            0.5,
-        )
+            embedding: emb,
+            extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: 0.5,
+        })
         .unwrap();
         let rebuilt = rehydrate_with(
             &fact,

@@ -515,7 +515,8 @@ mod tests {
     use smos_domain::config::{ConfidenceConfig, MergeConfig, NliConfig};
     use smos_domain::enums::NliLabel;
     use smos_domain::{
-        Embedding, FactStatus, MemoryKey, NliScores, SessionId, SessionState, Timestamp,
+        Embedding, FactStatus, MemoryKey, NewPendingRequest, NliScores, SessionId, SessionState,
+        Timestamp,
     };
 
     // ---- Fakes (classicist style: in-memory state, scripted verdicts) ----
@@ -860,28 +861,28 @@ mod tests {
 
     /// Build a pending fact whose content-derived id is deterministic.
     fn pending(content: &str, embedding: Vec<f32>) -> Fact {
-        Fact::new_pending(
+        Fact::new_pending(NewPendingRequest {
             content,
-            memory_key(),
-            sid(1),
-            Embedding::new(embedding).unwrap(),
-            ts(),
-            ConfidenceConfig::default().base,
-        )
+            memory_key: memory_key(),
+            session: sid(1),
+            embedding: Embedding::new(embedding).unwrap(),
+            extracted_at: ts(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap()
     }
 
     /// Build an accepted fact (single source, base confidence lifted above the
     /// accept threshold via `set_status_and_confidence`).
     fn accepted(content: &str, embedding: Vec<f32>) -> Fact {
-        let mut f = Fact::new_pending(
+        let mut f = Fact::new_pending(NewPendingRequest {
             content,
-            memory_key(),
-            sid(2),
-            Embedding::new(embedding).unwrap(),
-            ts(),
-            ConfidenceConfig::default().base,
-        )
+            memory_key: memory_key(),
+            session: sid(2),
+            embedding: Embedding::new(embedding).unwrap(),
+            extracted_at: ts(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap();
         f.set_status_and_confidence(
             FactStatus::Accepted,

@@ -116,19 +116,19 @@ fn apply_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smos_domain::{Embedding, FactStatus, MemoryKey, SessionId};
+    use smos_domain::{Embedding, FactStatus, MemoryKey, NewPendingRequest, SessionId};
 
     fn fixture() -> Fact {
         let session = SessionId::from_raw("sess_aaaaaaaaaaaa").unwrap();
         let emb = Embedding::new(vec![1.0, 0.0, 0.0, 0.0]).unwrap();
-        Fact::new_pending(
-            "hello",
-            MemoryKey::from_raw("origa").unwrap(),
+        Fact::new_pending(NewPendingRequest {
+            content: "hello",
+            memory_key: MemoryKey::from_raw("origa").unwrap(),
             session,
-            emb,
-            smos_domain::Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            0.5,
-        )
+            embedding: emb,
+            extracted_at: smos_domain::Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: 0.5,
+        })
         .unwrap()
     }
 

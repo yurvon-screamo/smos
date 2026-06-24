@@ -10,7 +10,9 @@
 
 use smos_domain::Fact;
 use smos_domain::config::ConfidenceConfig;
-use smos_domain::{Confidence, Embedding, FactStatus, MemoryKey, SessionId, Timestamp};
+use smos_domain::{
+    Confidence, Embedding, FactStatus, MemoryKey, NewPendingRequest, SessionId, Timestamp,
+};
 
 /// Build an `Accepted` fact with a fixed session + a 3-dim placeholder
 /// embedding. The caller picks the body content and the memory key — the
@@ -21,14 +23,14 @@ pub fn sample_fact(content: &str, memory_key: &str) -> Fact {
     let mk = MemoryKey::from_raw(memory_key)
         .unwrap_or_else(|e| panic!("invalid memory key {memory_key:?}: {e}"));
     let emb = Embedding::new(vec![0.1, 0.2, 0.3]).expect("3-dim embedding");
-    let mut fact = Fact::new_pending(
+    let mut fact = Fact::new_pending(NewPendingRequest {
         content,
-        mk,
+        memory_key: mk,
         session,
-        emb,
-        Timestamp::from_unix_secs(1_700_000_000).expect("valid timestamp"),
-        ConfidenceConfig::default().base,
-    )
+        embedding: emb,
+        extracted_at: Timestamp::from_unix_secs(1_700_000_000).expect("valid timestamp"),
+        base_confidence: ConfidenceConfig::default().base,
+    })
     .expect("pending fact construction");
     fact.set_status_and_confidence(
         FactStatus::Accepted,

@@ -17,8 +17,8 @@ use smos_application::ports::{
 };
 use smos_application::types::{ChatRequest, ChatResponse, MergeResult, RerankResult, SearchHit};
 use smos_domain::{
-    Fact, FactId, Heat, MemoryKey, NliResult, NliScores, SessionId, SessionState, Timestamp,
-    chat::ToolCall, config::ConfidenceConfig,
+    Fact, FactId, Heat, MemoryKey, NewPendingRequest, NliResult, NliScores, SessionId,
+    SessionState, Timestamp, chat::ToolCall, config::ConfidenceConfig,
 };
 use std::time::Duration;
 
@@ -319,14 +319,14 @@ async fn fact_repository_stub_implements_all_methods() {
     let id = FactId::from_content("a");
     // Every method must be callable without panicking.
     repo.save(
-        &Fact::new_pending(
-            "a",
-            mk.clone(),
-            SessionId::from_raw("sess_abcdef012345").unwrap(),
-            smos_domain::Embedding::new(vec![1.0]).unwrap(),
-            Timestamp::from_unix_secs(0).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+        &Fact::new_pending(NewPendingRequest {
+            content: "a",
+            memory_key: mk.clone(),
+            session: SessionId::from_raw("sess_abcdef012345").unwrap(),
+            embedding: smos_domain::Embedding::new(vec![1.0]).unwrap(),
+            extracted_at: Timestamp::from_unix_secs(0).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap(),
     )
     .await

@@ -6,6 +6,18 @@
 //! (`tests/spike_surrealdb_syntax.rs`) against SurrealDB 2.6 with the
 //! embedded RocksDB engine.
 
+use smos_domain::value_objects::embedding::Embedding;
+
+/// Reference embedding dimensionality, mirroring the domain's canonical
+/// [`Embedding::EXPECTED_DIM`] so the HNSW DDL, config validation, and test
+/// fixtures all derive from a single source of truth.
+///
+/// The `DIMENSION 1024` literal in [`FACT_DDL`] is intentionally kept as a
+/// raw string (SurrealQL has no symbol indirection); this alias exists to
+/// keep every Rust-side consumer honest. The invariant test below fails
+/// loudly if the domain ever changes `EXPECTED_DIM` without updating the DDL.
+pub const EMBEDDING_DIM: usize = Embedding::EXPECTED_DIM;
+
 /// DDL statements for the `fact` aggregate.
 ///
 /// Schema decisions:
@@ -88,3 +100,18 @@ pub const DEDUP_AND_MARK_TX: &str = r#"
         RETURN $new;
     COMMIT TRANSACTION;
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::EMBEDDING_DIM;
+    use smos_domain::value_objects::embedding::Embedding;
+
+    /// The `EMBEDDING_DIM` alias MUST stay in lockstep with the domain's
+    /// canonical [`Embedding::EXPECTED_DIM`]. If the domain ever changes the
+    /// reference dimensionality, this assertion fails first — before the
+    /// `DIMENSION 1024` literal baked into `FACT_DDL` can drift out of sync.
+    #[test]
+    fn embedding_dim_alias_matches_domain_expected() {
+        assert_eq!(EMBEDDING_DIM, Embedding::EXPECTED_DIM);
+    }
+}

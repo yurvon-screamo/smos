@@ -39,6 +39,8 @@ pub use smos_domain::config::{
     ConfidenceConfig, ExtractionConfig, HeatConfig, MergeConfig, NliConfig, RetrievalConfig,
 };
 
+use crate::storage::surreal_schema::EMBEDDING_DIM;
+
 /// Error surface for [`SmosConfig`] loading + validation.
 ///
 /// Wraps the foreign `::config::ConfigError` (file IO + deserialisation
@@ -728,9 +730,9 @@ impl SmosConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errors: Vec<String> = Vec::new();
 
-        if self.embedding.dimensions != 1024 {
+        if self.embedding.dimensions != EMBEDDING_DIM {
             errors.push(format!(
-                "embedding.dimensions must be 1024 (HNSW index dimension), got {}",
+                "embedding.dimensions must be {EMBEDDING_DIM} (HNSW index dimension), got {}",
                 self.embedding.dimensions
             ));
         }
@@ -1433,7 +1435,9 @@ mod tests {
         let mut cfg = SmosConfig::default();
         cfg.embedding.dimensions = 512;
         cfg.providers.push(one_provider());
-        let err = cfg.validate().expect_err("dimensions != 1024 must fail");
+        let err = cfg
+            .validate()
+            .expect_err("non-canonical dimensions must fail");
         let msg = err.to_string();
         assert!(msg.contains("embedding.dimensions"), "msg = {msg}");
         assert!(msg.contains("1024"), "msg = {msg}");

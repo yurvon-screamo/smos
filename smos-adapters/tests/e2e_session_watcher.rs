@@ -27,8 +27,8 @@ use smos_application::types::NliResult;
 use smos_domain::config::{ConfidenceConfig, MergeConfig, NliConfig};
 use smos_domain::enums::NliLabel;
 use smos_domain::{
-    Confidence, Embedding, Fact, FactId, FactStatus, MemoryKey, NliScores, SessionId, SessionState,
-    Timestamp,
+    Confidence, Embedding, Fact, FactId, FactStatus, MemoryKey, NewPendingRequest, NliScores,
+    SessionId, SessionRecord, SessionState, Timestamp,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::RocksDb;
@@ -151,27 +151,27 @@ fn constant_embedding(value: f32) -> Embedding {
 
 /// Pending fact (status `Pending`, single-source provenance, base confidence).
 fn pending_fact(content: &str, embedding: Embedding, session: SessionId) -> Fact {
-    Fact::new_pending(
+    Fact::new_pending(NewPendingRequest {
         content,
-        memory_key(),
+        memory_key: memory_key(),
         session,
         embedding,
-        SystemClock.now(),
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+        extracted_at: SystemClock.now(),
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("pending fact")
 }
 
 /// Accepted fact lifted above the accept threshold via `set_status_and_confidence`.
 fn accepted_fact(content: &str, embedding: Embedding, session: SessionId) -> Fact {
-    let mut f = Fact::new_pending(
+    let mut f = Fact::new_pending(NewPendingRequest {
         content,
-        memory_key(),
+        memory_key: memory_key(),
         session,
         embedding,
-        SystemClock.now(),
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+        extracted_at: SystemClock.now(),
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("pending");
     f.set_status_and_confidence(
         FactStatus::Accepted,
@@ -227,14 +227,14 @@ async fn seed_session_aged(
     let now_secs = SystemClock.now().as_unix_secs();
     let aged_secs = now_secs - age.as_secs() as i64;
     let aged_ts = Timestamp::from_unix_secs(aged_secs).expect("aged ts");
-    let state = SessionState::rehydrate(
-        session.clone(),
-        memory_key(),
-        std::iter::empty(),
-        pending,
-        aged_ts,
-        aged_ts,
-    )
+    let state = SessionState::rehydrate(SessionRecord {
+        id: session.clone(),
+        memory_key: memory_key(),
+        injected_facts: Vec::new(),
+        pending_facts: pending,
+        created_at: aged_ts,
+        last_active: aged_ts,
+    })
     .expect("valid: created_at == last_active");
     SessionRepository::save(store, session, &state)
         .await

@@ -13,7 +13,8 @@ use smos::SurrealStore;
 use smos_application::errors::RepoError;
 use smos_application::ports::{FactRepository, SessionRepository};
 use smos_domain::{
-    Confidence, Embedding, Fact, FactId, FactStatus, Heat, MemoryKey, SessionId, Timestamp,
+    Confidence, Embedding, Fact, FactId, FactStatus, Heat, MemoryKey, NewPendingRequest, SessionId,
+    Timestamp,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::RocksDb;
@@ -58,14 +59,14 @@ fn unit_embedding(dim: usize, index: usize) -> Embedding {
 }
 
 fn accepted_fact(content: &str, embedding: Embedding, session: SessionId) -> Fact {
-    let mut fact = Fact::new_pending(
+    let mut fact = Fact::new_pending(NewPendingRequest {
         content,
-        memory_key(),
+        memory_key: memory_key(),
         session,
         embedding,
-        timestamp(1_700_000_000),
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+        extracted_at: timestamp(1_700_000_000),
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("pending fact");
     fact.set_status_and_confidence(
         FactStatus::Accepted,
@@ -77,14 +78,14 @@ fn accepted_fact(content: &str, embedding: Embedding, session: SessionId) -> Fac
 }
 
 fn pending_fact(content: &str, embedding: Embedding, session: SessionId) -> Fact {
-    Fact::new_pending(
+    Fact::new_pending(NewPendingRequest {
         content,
-        memory_key(),
+        memory_key: memory_key(),
         session,
         embedding,
-        timestamp(1_700_000_000),
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+        extracted_at: timestamp(1_700_000_000),
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("pending fact")
 }
 
@@ -309,14 +310,14 @@ async fn search_similar_orders_by_cosine_distance_ascending() {
 async fn search_similar_excludes_other_memory_keys() {
     let (store, _tmp) = fresh_store("search_excludes_other_keys").await;
     let other_key = MemoryKey::from_raw("other").expect("key");
-    let foreign = Fact::new_pending(
-        "foreign",
-        other_key,
-        session_id(1),
-        unit_embedding(1024, 0),
-        timestamp(1_700_000_000),
-        smos_domain::config::ConfidenceConfig::default().base,
-    )
+    let foreign = Fact::new_pending(NewPendingRequest {
+        content: "foreign",
+        memory_key: other_key,
+        session: session_id(1),
+        embedding: unit_embedding(1024, 0),
+        extracted_at: timestamp(1_700_000_000),
+        base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+    })
     .expect("fact");
     FactRepository::save(&store, &foreign)
         .await
@@ -359,14 +360,14 @@ async fn search_similar_returns_full_top_k_when_namespace_is_skewed() {
         let mut emb = vec![0.0_f32; 1024];
         emb[0] = 1.0;
         emb[1] = i as f32 * 0.0001; // very close to Q
-        let mut fact = Fact::new_pending(
-            &format!("foreign-{i}"),
-            other_key.clone(),
-            session_id(1),
-            Embedding::new(emb).unwrap(),
-            timestamp(1_700_000_000),
-            smos_domain::config::ConfidenceConfig::default().base,
-        )
+        let mut fact = Fact::new_pending(NewPendingRequest {
+            content: &format!("foreign-{i}"),
+            memory_key: other_key.clone(),
+            session: session_id(1),
+            embedding: Embedding::new(emb).unwrap(),
+            extracted_at: timestamp(1_700_000_000),
+            base_confidence: smos_domain::config::ConfidenceConfig::default().base,
+        })
         .unwrap();
         fact.set_status_and_confidence(
             FactStatus::Accepted,

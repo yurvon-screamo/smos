@@ -204,7 +204,7 @@ mod tests {
 
     use super::*;
     use crate::types::SearchHit;
-    use smos_domain::{Fact, FactId, Heat, SessionState, Timestamp};
+    use smos_domain::{Fact, FactId, Heat, NewPendingRequest, SessionState, Timestamp};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -570,14 +570,14 @@ mod tests {
         // First import seeds the fact; second import re-observes it from a
         // different session → cross-session confirmation, no new count.
         let seeded_content = "shared fact content here";
-        let first = Fact::new_pending(
-            seeded_content,
-            mk(),
-            sid(1),
-            smos_domain::Embedding::new(vec![1.0]).unwrap(),
-            Timestamp::from_unix_secs(1_700_000_000).unwrap(),
-            ConfidenceConfig::default().base,
-        )
+        let first = Fact::new_pending(NewPendingRequest {
+            content: seeded_content,
+            memory_key: mk(),
+            session: sid(1),
+            embedding: smos_domain::Embedding::new(vec![1.0]).unwrap(),
+            extracted_at: Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            base_confidence: ConfidenceConfig::default().base,
+        })
         .unwrap();
         let fid = first.id().clone();
         fix.facts
