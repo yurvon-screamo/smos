@@ -66,16 +66,18 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "TOCTOU: a free port can be reassigned between the listener drop and the probe"]
     async fn is_port_responding_returns_false_for_dead_port() {
         let client = probe_client().expect("client");
-        // Acquire a free port by binding a throwaway listener then dropping
-        // it. This is racy in principle — another process can grab the same
-        // port between `drop(listener)` and the probe — so the test is
-        // marked `#[ignore]` and only run via `cargo tall`.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        // Bind a throwaway TCP listener and HOLD it (do not drop) across
+        // the probe. A listener that never speaks HTTP still accepts the
+        // probe's connection but never returns an HTTP response, so the
+        // probe times out and reports "not responding" - the same answer
+        // a truly dead port gives. Holding the port removes the TOCTOU
+        // window: no other process can bind an HTTP server on it between
+        // bind and probe, so the test is deterministic and runs by
+        // default. `listener` is dropped at end of scope (after the probe).
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let port = listener.local_addr().expect("addr").port();
-        drop(listener);
         assert!(!is_port_responding(&client, port).await);
     }
 }
