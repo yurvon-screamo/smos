@@ -107,6 +107,82 @@ fn local_audit_base_url(local_url: &str) -> String {
     format!("{}/v1", local_url.trim_end_matches('/'))
 }
 
+/// Every concrete dependency the 11 audit tools need, grouped so the tool
+/// assembly in [`attach_audit_tools`] reads by field name instead of a long
+/// positional list.
+struct AuditToolDeps {
+    store: SurrealStore,
+    classifier: Arc<NativeNliClassifier>,
+    embedder: Arc<OllamaEmbedding>,
+    limits: AuditLimits,
+    merge_counter: Arc<AtomicUsize>,
+    deletion_counter: Arc<AtomicUsize>,
+    report_dir: PathBuf,
+    clock: Arc<dyn Clock + Send + Sync>,
+}
+
+/// Attach the 11 dreaming audit tools to `builder` in the fixed registration
+/// order (the same order the inline `.tool(...)` chain used before this
+/// helper existed).
+///
+/// Returning a `Vec<...>` is not achievable with rig 0.14: its `Tool` trait is
+/// `Sized` (not object-safe) and [`AgentBuilder::tool`] takes `impl Tool`, so
+/// the heterogeneous tool instances cannot be collected into a single
+/// container. Threading the builder through this function is the faithful
+/// adaptation — it still centralises the tool list + registration order in one
+/// named place, which is the actual goal of the slice.
+fn attach_audit_tools<M: rig::completion::CompletionModel + 'static>(
+    builder: AgentBuilder<M>,
+    deps: AuditToolDeps,
+) -> AgentBuilder<M> {
+    let AuditToolDeps {
+        store,
+        classifier,
+        embedder,
+        limits,
+        merge_counter,
+        deletion_counter,
+        report_dir,
+        clock,
+    } = deps;
+    builder
+        .tool(ListMemoryKeysTool {
+            store: store.clone(),
+        })
+        .tool(ListFactsTool {
+            store: store.clone(),
+        })
+        .tool(SearchFactsTool {
+            store: store.clone(),
+            embedder,
+        })
+        .tool(GetFactTool {
+            store: store.clone(),
+        })
+        .tool(CountFactsTool {
+            store: store.clone(),
+        })
+        .tool(NliClassifyTool { classifier })
+        .tool(UpdateFactTool {
+            store: store.clone(),
+        })
+        .tool(MergeFactsTool {
+            store: store.clone(),
+            limits,
+            counter: merge_counter,
+        })
+        .tool(FlagConflictTool {
+            store: store.clone(),
+        })
+        .tool(DeleteFactTool {
+            store,
+            limits,
+            counter: deletion_counter,
+            clock: clock.clone(),
+        })
+        .tool(WriteReportTool { report_dir, clock })
+}
+
 /// Generic audit runner: builds the agent with the supplied completion model
 /// and prompts it. Generic over `M` so the cloud (OpenRouter) and local
 /// (`llama-server` via the OpenAI-compatible transport) provider branches
@@ -122,57 +198,31 @@ async fn run_audit_with_model<M>(
 where
     M: rig::completion::CompletionModel + 'static,
 {
-    let deletion_counter = Arc::new(AtomicUsize::new(0));
+    // Fresh per-run mutation counters. The same Arc is shared with the bounded
+    // write tools (cloned into `deps` below), so the final `.load()` reflects
+    // every mutation the agent made through MergeFactsTool / DeleteFactTool.
     let merge_counter = Arc::new(AtomicUsize::new(0));
-    let limits = AuditLimits {
-        max_deletions: config.max_deletions_per_run,
-        max_merges: config.max_merges_per_run,
-    };
-    let report_dir = PathBuf::from(&config.report_dir);
+    let deletion_counter = Arc::new(AtomicUsize::new(0));
 
-    let agent = AgentBuilder::new(model)
-        .preamble(prompts::SYSTEM_PROMPT)
-        .tool(ListMemoryKeysTool {
-            store: store.clone(),
-        })
-        .tool(ListFactsTool {
-            store: store.clone(),
-        })
-        .tool(SearchFactsTool {
-            store: store.clone(),
-            embedder: embedder.clone(),
-        })
-        .tool(GetFactTool {
-            store: store.clone(),
-        })
-        .tool(CountFactsTool {
-            store: store.clone(),
-        })
-        .tool(NliClassifyTool {
-            classifier: classifier.clone(),
-        })
-        .tool(UpdateFactTool {
-            store: store.clone(),
-        })
-        .tool(MergeFactsTool {
-            store: store.clone(),
-            limits,
-            counter: merge_counter.clone(),
-        })
-        .tool(FlagConflictTool {
-            store: store.clone(),
-        })
-        .tool(DeleteFactTool {
-            store: store.clone(),
-            limits,
-            counter: deletion_counter.clone(),
-            clock: clock.clone(),
-        })
-        .tool(WriteReportTool {
-            report_dir,
-            clock: clock.clone(),
-        })
-        .build();
+    let deps = AuditToolDeps {
+        store,
+        classifier,
+        embedder,
+        limits: AuditLimits {
+            max_deletions: config.max_deletions_per_run,
+            max_merges: config.max_merges_per_run,
+        },
+        merge_counter: merge_counter.clone(),
+        deletion_counter: deletion_counter.clone(),
+        report_dir: PathBuf::from(&config.report_dir),
+        clock: clock.clone(),
+    };
+
+    let agent = attach_audit_tools(
+        AgentBuilder::new(model).preamble(prompts::SYSTEM_PROMPT),
+        deps,
+    )
+    .build();
 
     tracing::info!(
         provider = %config.llm_provider,
