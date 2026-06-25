@@ -87,3 +87,41 @@ Run `cargo tall` only when the change touches the native NLI path.
   port definition.
 - Comments and git commits are in English; doc-comments (`///`) are welcome
   on public API.
+
+## Refactoring conventions (v0.1.6+)
+
+These conventions were set by the v0.1.6 refactor (24 slices, 915 tests
+green). The reasoning for each is in [`docs/decisions/`](docs/decisions/).
+
+- **Record-struct constructors** — `Fact::rehydrate(FactRecord{...})`,
+  `Fact::new_pending(NewPendingRequest{...})`,
+  `SessionState::rehydrate(SessionRecord{...})`. Do NOT introduce positional
+  parameters for new rehydrate-style constructors; use a record-struct.
+  See [ADR-0001](docs/decisions/0001-record-struct-constructors.md).
+- **Test fakes** — in-memory test doubles (`InMemoryFacts`,
+  `ScriptedNliClassifier`, `ConstantEmbedder`, etc.) live in
+  `smos_application::testkit`. Do NOT duplicate them in use-case test
+  modules; import `use smos_application::testkit::*;`. When changing a
+  fake, update the parity tests in `testkit/tests`. The adapter-layer
+  `MockNliClassifier` is NOT part of testkit (different crate/concern).
+  See [ADR-0002](docs/decisions/0002-shared-testkit-parity-gate.md).
+- **Module splits** — god-modules are split into sub-modules
+  (`config/`, `storage/`, `finalize_session/`, `extract_facts/`). The
+  public API is stable via `mod.rs`/`lib.rs` re-exports. When adding a new
+  facade module, keep `cargo doc --workspace --no-deps` at 0 warnings.
+  See [ADR-0003](docs/decisions/0003-god-module-split-stable-pubapi.md).
+- **ScanState** — the drift-priority walk in `finalize_session` mutates
+  state only through `ScanState` methods (`observe_verdict`,
+  `commit_merge_pick`). Do not reintroduce loose `let mut` accumulators
+  in `resolve_one`. Behaviour is pinned by
+  `resolve_one_outcome_matrix_golden`.
+  See [ADR-0004](docs/decisions/0004-scanstate-encapsulation-drift-priority.md).
+- **EMBEDDING_DIM** — canonical source is `Embedding::EXPECTED_DIM`
+  (domain). In the adapter, use the alias
+  `smos::storage::surreal_schema::EMBEDDING_DIM`. Do NOT introduce new
+  `1024` literals for embedding dimensionality. Note the alias is a
+  `const`, not `pub use` — see ADR for the E0432 reason.
+  See [ADR-0005](docs/decisions/0005-embedding-dim-canonical-source.md).
+- **fail-open swallow** — the `if let Err(e) = ... { tracing::warn!(...) }`
+  pattern for fail-open uses the `log_nonfatal!` macro
+  (`smos-application`). Semantics are identical, without the duplication.
