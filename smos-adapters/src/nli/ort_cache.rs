@@ -251,9 +251,7 @@ pub async fn ensure_ort_binary(device: DeviceKind, cache_dir: &Path) -> Result<P
 async fn download_archive(url: &str) -> Result<Vec<u8>> {
     use futures::StreamExt;
 
-    let client = reqwest::Client::builder()
-        .timeout(DOWNLOAD_TIMEOUT)
-        .build()?;
+    let client = crate::upstream::http_client::with_timeout(DOWNLOAD_TIMEOUT)?;
     let response = client.get(url).send().await?.error_for_status()?;
 
     let mut buffer: Vec<u8> = Vec::new();

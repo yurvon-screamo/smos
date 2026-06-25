@@ -37,7 +37,7 @@ const LLAMA_PORTS: &[(u16, &str)] = &[
 /// server is reported as ✓ so the operator sees what was reused vs. what
 /// `smos serve` will spawn via `[llama_cpp].auto_launch`.
 pub(super) async fn check_llama_servers() {
-    let client = match reqwest::Client::builder().build() {
+    let client = match crate::upstream::http_client::default_client() {
         Ok(c) => c,
         Err(e) => {
             println!("  ✗ Cannot construct HTTP client: {e}");
@@ -162,9 +162,7 @@ pub(super) async fn verify_llama_servers(
     config: &LlamaCppConfig,
 ) -> Result<Vec<ServiceVerifyResult>> {
     let manager = LlamaCppManager::new(config.clone())?;
-    let probe_client = reqwest::Client::builder()
-        .timeout(LLAMA_PROBE_TIMEOUT)
-        .build()?;
+    let probe_client = crate::upstream::http_client::with_timeout(LLAMA_PROBE_TIMEOUT)?;
 
     let services = configured_services_for_verify(config);
     if services.is_empty() {

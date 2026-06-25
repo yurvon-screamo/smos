@@ -41,7 +41,7 @@ pub struct DoctorFlags {
 /// failure is rare but must NOT abort a diagnostic tool whose entire purpose
 /// is to report degraded infrastructure.
 fn try_build_http_client() -> Option<reqwest::Client> {
-    reqwest::Client::builder().build().ok()
+    crate::upstream::http_client::default_client().ok()
 }
 
 /// Build the check-result rows emitted when the HTTP client itself could not

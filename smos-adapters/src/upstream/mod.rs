@@ -15,6 +15,7 @@
 //! extraction stream wrapper in `http/stream_transform` uses both the parser
 //! and `streaming_buffer` to feed the post-`[DONE]` extraction task.
 
+pub mod http_client;
 pub mod reqwest_upstream;
 pub mod sse_parser;
 pub mod streaming_buffer;
