@@ -19,6 +19,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::SurrealStore;
+use crate::cli::shutdown::shutdown_signal;
 use crate::config::SmosConfig;
 use crate::http::routes;
 use crate::providers::{LlamaCppReranker, OllamaEmbedding, OllamaExtractor};
@@ -191,41 +192,6 @@ where
     );
     extraction_supervisor.drain(extraction_grace).await;
     Ok(())
-}
-
-/// Wait for Ctrl+C (all platforms) or SIGTERM (unix). Returns on the first
-/// signal so `axum::serve` stops accepting new connections and drains.
-///
-/// Signal-handler setup errors are logged and the future returns without
-/// panicking — a missing Ctrl+C handler is a graceful-shutdown regression
-/// (the proxy can still be killed via SIGKILL or `docker stop`), not a
-/// reason to crash the server we are trying to drain.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            tracing::error!("ctrl_c signal handler failed: {e}");
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut stream) => {
-                stream.recv().await;
-            }
-            Err(e) => {
-                tracing::error!("SIGTERM handler installation failed: {e}");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => tracing::info!("Ctrl+C received, initiating graceful shutdown"),
-        _ = terminate => tracing::info!("SIGTERM received, initiating graceful shutdown"),
-    }
 }
 
 #[cfg(test)]
