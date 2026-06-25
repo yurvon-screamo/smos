@@ -833,15 +833,20 @@ async fn dedup_and_mark_concurrent_calls_do_not_double_inject() {
 // ---------------------------------------------------------------------------
 // Performance test (1047 facts)
 //
-// Skipped in `debug_assertions` because brute-force cosine over 1047 × 1024-dim
-// vectors in an unoptimised build is dominated by interpreter overhead. Run
-// `cargo test --release -p smos search_similar_p95_under_threshold_on_1047_facts`
-// to exercise this test and confirm the spec's p95 budget.
+// Gated behind #[ignore]; run via `cargo tall`, or explicitly via
+// `cargo test --release -p smos search_similar_p95_under_threshold_on_1047_facts -- --ignored`.
+// The 200 ms p95 budget is a release-build target: a debug run's unoptimised
+// brute-force cosine is ~30x slower and is not a valid signal, so the body
+// early-returns under debug_assertions (keeping `cargo tall` green) and only
+// measures in a release build.
 // ---------------------------------------------------------------------------
 
-#[cfg(not(debug_assertions))]
+#[ignore = "perf test: run via cargo test --release -- --ignored search_similar_p95"]
 #[tokio::test]
 async fn search_similar_p95_under_threshold_on_1047_facts() {
+    if cfg!(debug_assertions) {
+        return;
+    }
     let (store, _tmp) = fresh_store("perf_1047").await;
     let n = 1047;
     // Synthetic reproducible embeddings via xorshift — values in [-1, 1].
