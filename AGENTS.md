@@ -16,19 +16,18 @@ SMOS uses a single test surface (defined in
 | `cargo tf`  | After editing `smos-domain` or `smos-application` only.   |
 | `cargo t`   | Default pre-commit check. Runs every non-`#[ignore]` test. |
 | `cargo ti`  | Alias kept for compat — same scope as `cargo t`.            |
-| `cargo tall`| Pre-release. Includes every `#[ignore]` test (643 MB model download + live `llama-server`). |
+| `cargo tall`| Pre-release. Includes every `#[ignore]` test (the 643 MB DeBERTa-v3 ONNX download). |
 
 See [README.md](README.md) → Testing for the full breakdown.
 
 ### `#[ignore]` policy
 
 Tests must pass ALWAYS. If a test cannot pass without an external dependency
-(live `llama-server`, model download), mark it `#[ignore = "<reason>"]`:
+(e.g. the 643 MB DeBERTa-v3 ONNX model download), mark it
+`#[ignore = "<reason>"]`:
 
 - **Native NLI model download** —
   `#[ignore = "requires 643MB DeBERTa ONNX model download"]`
-- **Live `llama-server`** —
-  `#[ignore = "requires live llama-server on localhost:{28081,28082,28181}"]`
 
 `#[ignore]` is reserved for **external dependencies**. A bug in our own
 code (including a SurrealQL syntax mistake) is NOT a reason to `#[ignore]`
@@ -43,7 +42,7 @@ When adding a new `tests/*.rs` binary, decide its category up front:
 1. **Pure unit helpers** (no IO, no async runtime) → no special handling.
 2. **Embedded-SurrealDB / wiremock / TCP listener** → universal, runs by
    default. No gating.
-3. **Needs a live `llama-server` / model download** → `#[ignore]` per test
+3. **Needs the 643 MB DeBERTa model download** → `#[ignore]` per test
    with the reason above.
 
 ### Feature gates (smos)
@@ -65,8 +64,8 @@ Device selection is a runtime config value (`[nli_backend].device`):
 - `"cpu"` / `"directml"` / `"cuda"` / `"metal"` — force a specific device.
 
 There are no test-gating features. Tests that need a live external dependency
-(live `llama-server`, 643 MB DeBERTa ONNX download) carry
-`#[ignore = "<reason>"]` and run via `cargo tall`.
+(the 643 MB DeBERTa-v3 ONNX download) carry `#[ignore = "<reason>"]` and run
+via `cargo tall`.
 
 ## Quality gates (run before declaring a task done)
 
@@ -76,8 +75,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-Run `cargo tall` only when the change touches the native NLI path or any
-live-`llama-server` integration surface.
+Run `cargo tall` only when the change touches the native NLI path.
 
 ## Architecture reminders
 
