@@ -437,10 +437,12 @@ mod tests {
 
     #[test]
     fn router_from_config_resolves_api_key_from_env() {
+        let _guard = crate::test_env_lock::lock();
         let prior = std::env::var("SMOS_TEST_ROUTER_KEY").ok();
-        // SAFETY: env-mutating tests in this binary hold no parallelism
-        // guarantee from the harness; the prior value is restored before
-        // return so other tests are unaffected.
+        // SAFETY: the workspace env-test lock is held for the duration
+        // of the env mutation + read, and the prior value is restored
+        // before return so other tests in the binary see the original
+        // state.
         unsafe {
             std::env::set_var("SMOS_TEST_ROUTER_KEY", "sk-from-env");
         }

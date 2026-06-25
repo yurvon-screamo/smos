@@ -57,8 +57,10 @@ mod tests {
 
     #[test]
     fn resolve_env_var_expands_present_env_var() {
-        // SAFETY: env var mutation is process-global; this test sets a unique
-        // var name to avoid colliding with any other test or code path.
+        let _guard = crate::test_env_lock::lock();
+        // SAFETY: the workspace env-test lock serialises this mutation
+        // so a parallel test cannot observe it mid-flight; the var is
+        // also removed before return.
         unsafe {
             std::env::set_var("SMOS_DREAMING_TEST_KEY_PRESENT", "expanded-value");
         }
