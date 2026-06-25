@@ -85,25 +85,33 @@ pub async fn handle(
 
     let marker = session_id.to_marker();
 
+    let ctx = ResponseContext {
+        state,
+        response,
+        marker,
+        memory_key,
+        session_id,
+        enable_extraction,
+    };
     if is_streaming {
-        streaming_response(
-            state,
-            response,
-            marker,
-            memory_key,
-            session_id,
-            enable_extraction,
-        )
+        streaming_response(ctx)
     } else {
-        non_streaming_response(
-            state,
-            response,
-            marker,
-            memory_key,
-            session_id,
-            enable_extraction,
-        )
+        non_streaming_response(ctx)
     }
+}
+
+/// Shared inputs for the streaming / non-streaming response builders.
+///
+/// Groups the six positional params the two builders previously took so the
+/// `handle` dispatch and the builders read by field name. The fields mirror
+/// the previous parameter list verbatim (same names, same types, same order).
+struct ResponseContext {
+    state: Arc<AppState>,
+    response: ChatResponse,
+    marker: String,
+    memory_key: MemoryKey,
+    session_id: SessionId,
+    enable_extraction: bool,
 }
 
 /// Build the SSE response. When extraction is ENABLED, the stream is wrapped
@@ -111,15 +119,15 @@ pub async fn handle(
 /// lightweight marker-only wrapper (no per-chunk buffering overhead). A
 /// non-streaming upstream reply when streaming was requested is a protocol
 /// mismatch → 500.
-#[allow(clippy::too_many_arguments)]
-fn streaming_response(
-    state: Arc<AppState>,
-    response: ChatResponse,
-    marker: String,
-    memory_key: MemoryKey,
-    session_id: SessionId,
-    enable_extraction: bool,
-) -> Response {
+fn streaming_response(ctx: ResponseContext) -> Response {
+    let ResponseContext {
+        state,
+        response,
+        marker,
+        memory_key,
+        session_id,
+        enable_extraction,
+    } = ctx;
     let stream = match response {
         ChatResponse::Streaming(s) => s,
         ChatResponse::NonStreaming(_) => {
@@ -148,15 +156,15 @@ fn streaming_response(
 /// Inject the marker into the buffered JSON reply, then spawn the extraction
 /// task with the pre-marker content. A streaming reply when a buffered one was
 /// requested is a protocol mismatch → 500.
-#[allow(clippy::too_many_arguments)]
-fn non_streaming_response(
-    state: Arc<AppState>,
-    response: ChatResponse,
-    marker: String,
-    memory_key: MemoryKey,
-    session_id: SessionId,
-    enable_extraction: bool,
-) -> Response {
+fn non_streaming_response(ctx: ResponseContext) -> Response {
+    let ResponseContext {
+        state,
+        response,
+        marker,
+        memory_key,
+        session_id,
+        enable_extraction,
+    } = ctx;
     match response {
         ChatResponse::NonStreaming(value) => {
             if enable_extraction {
