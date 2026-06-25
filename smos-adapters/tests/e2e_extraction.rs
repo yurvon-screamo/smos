@@ -460,8 +460,16 @@ async fn extraction_gives_up_after_all_attempts_fail() {
     let smos = serve_state(state.clone()).await;
     send(&smos, &extraction_request()).await;
 
-    // Wait beyond the 3 s retry backoff so the give-up has surely completed.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Wait for all 3 retry attempts to land on the extractor mock (the
+    // give-up point) instead of a fixed 5 s wall-clock wait. The pending
+    // list is empty throughout (failure persists nothing), so the
+    // attempt count is the only positive completion signal.
+    common::wait_for(
+        || async { llama.received_requests().await.unwrap_or_default().len() >= 3 },
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+    )
+    .await;
     let pending = FactRepository::list_pending(&state.store, &enrichment_memory_key())
         .await
         .unwrap();

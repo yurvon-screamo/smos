@@ -13,6 +13,8 @@
 //! same patterns (constant / unit / blend embeddings, scripted verdicts)
 //! without re-testing the finalize pipeline itself.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -319,8 +321,14 @@ async fn watcher_triggers_finalize_on_expired_session() {
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
 
-    // One scan interval (1 s) + slack for the finalize round-trip.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for the watcher to clear the pending bookkeeping (bounded by
+    // the original 1.5 s ceiling) instead of a fixed sleep, then stop.
+    common::wait_for(
+        || async { pending_count(&store, &session).await == 0 },
+        Duration::from_millis(1500),
+        Duration::from_millis(50),
+    )
+    .await;
 
     // Stop the watcher before assertions so it does not race the test exit.
     let _ = tx.send(()).await;
@@ -365,6 +373,10 @@ async fn watcher_skips_active_sessions() {
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
 
+    // Fixed cycle-wait, not a `wait_for`: this test asserts the ABSENCE
+    // of change (the periodic scan must leave an active session alone),
+    // so there is no positive state transition to poll for — wait one
+    // scan interval (1 s) + slack to know the scan ran.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // Assert BEFORE the shutdown signal — `drain_all` deliberately
@@ -413,7 +425,12 @@ async fn watcher_triggers_on_overflow() {
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    common::wait_for(
+        || async { pending_count(&store, &session).await == 0 },
+        Duration::from_millis(1500),
+        Duration::from_millis(50),
+    )
+    .await;
     let _ = tx.send(()).await;
     let _ = handle.await;
 
@@ -471,7 +488,12 @@ async fn watcher_inflight_guard_holds_high_water_mark_at_one() {
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    common::wait_for(
+        || async { high_water.load(Ordering::SeqCst) >= 1 },
+        Duration::from_millis(1500),
+        Duration::from_millis(50),
+    )
+    .await;
     let _ = tx.send(()).await;
     let _ = handle.await;
 
@@ -527,7 +549,12 @@ async fn watcher_graceful_loop_continues_on_error() {
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
 
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    common::wait_for(
+        || async { call_count.load(Ordering::SeqCst) > 0 },
+        Duration::from_millis(2500),
+        Duration::from_millis(50),
+    )
+    .await;
 
     assert!(
         !handle.is_finished(),
@@ -636,7 +663,19 @@ async fn watcher_processes_multiple_expired_sessions() {
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    common::wait_for(
+        || async {
+            for (session, _) in &sessions {
+                if pending_count(&store, session).await != 0 {
+                    return false;
+                }
+            }
+            true
+        },
+        Duration::from_millis(1500),
+        Duration::from_millis(50),
+    )
+    .await;
     let _ = tx.send(()).await;
     let _ = handle.await;
 
@@ -663,6 +702,10 @@ async fn watcher_no_op_when_no_expired_sessions() {
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
 
+    // Fixed cycle-wait, not a `wait_for`: an empty store produces no
+    // finalize calls and no state change, so there is no positive
+    // transition to poll for — wait one scan interval (1 s) + slack
+    // to confirm the watcher cycled without spurious work.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     assert!(
@@ -764,7 +807,19 @@ async fn watcher_continues_after_a_per_session_failure() {
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    common::wait_for(
+        || async {
+            for (session, _) in &sessions_with_pending {
+                if pending_count(&store, session).await != 0 {
+                    return false;
+                }
+            }
+            true
+        },
+        Duration::from_millis(1500),
+        Duration::from_millis(50),
+    )
+    .await;
     let _ = tx.send(()).await;
     let _ = handle.await;
 

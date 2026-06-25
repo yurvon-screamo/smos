@@ -34,6 +34,34 @@ use surrealdb::engine::local::RocksDb;
 use tempfile::TempDir;
 use wiremock::MockServer;
 
+/// Poll `predicate` every `interval` until it returns `true` or `timeout`
+/// elapses. A final check after the loop keeps the caller's next assertion
+/// message aligned with the post-timeout state.
+///
+/// Replaces a fixed `tokio::time::sleep` + state-check with a bounded poll:
+/// the test proceeds as soon as the condition holds (instead of always
+/// paying the full sleep) and a slow host gets the whole `timeout` headroom
+/// rather than failing on a fixed deadline. The predicate is async because
+/// the e2e state-checks are async SurrealDB / wiremock reads; sync checks
+/// (`AtomicUsize` counters) are wrapped in an `async {}` block.
+pub async fn wait_for<F, Fut>(
+    mut predicate: F,
+    timeout: std::time::Duration,
+    interval: std::time::Duration,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if predicate().await {
+            return;
+        }
+        tokio::time::sleep(interval).await;
+    }
+    let _ = predicate().await;
+}
+
 /// The canonical two-chunk stream the OpenAI shape produces:
 /// `Hello` → ` world` (stop) → `[DONE]`. Reused across several streaming tests.
 pub const SSE_HELLO_WORLD: &str = "\
