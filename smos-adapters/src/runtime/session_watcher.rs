@@ -49,6 +49,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use smos_application::errors::UseCaseError;
@@ -85,6 +86,7 @@ pub struct SessionWatcher<FR, SR, NC> {
     /// skips the remaining sessions, whose pending facts stay pending for
     /// the next process start.
     server_cfg: Arc<ServerConfig>,
+    shutdown_deadline: Arc<OnceLock<tokio::time::Instant>>,
     /// Sync mutex guarding the in-flight session set.
     ///
     /// Deliberately `std::sync::Mutex` (not `tokio::sync::Mutex`): the only
@@ -133,6 +135,16 @@ pub struct WatcherConfig {
     pub session: Arc<SessionConfig>,
     /// Server-level config (shutdown drain budget).
     pub server: Arc<ServerConfig>,
+    /// Shared coordination point for the §12 unified shutdown deadline (B3).
+    ///
+    /// Populated by `server_runner` right before the watcher shutdown signal
+    /// is sent; read by `drain_all` so the watcher drain competes for the
+    /// SAME remaining budget the extraction drain already consumed. If
+    /// unset (e.g. in tests that drive `drain_all` directly without going
+    /// through `server_runner`), `drain_all` falls back to a fresh
+    /// `now + shutdown_extraction_grace_seconds` budget — preserving the
+    /// pre-B3 behaviour for those callers.
+    pub shutdown_deadline: Arc<OnceLock<tokio::time::Instant>>,
 }
 
 impl<FR, SR, NC> SessionWatcher<FR, SR, NC>
@@ -149,6 +161,7 @@ where
             merge,
             session,
             server,
+            shutdown_deadline,
         } = &*config;
         Self {
             facts: deps.facts,
@@ -159,6 +172,7 @@ where
             merge_cfg: merge.clone(),
             session_cfg: session.clone(),
             server_cfg: server.clone(),
+            shutdown_deadline: shutdown_deadline.clone(),
             inflight: Arc::new(StdMutex::new(HashSet::new())),
         }
     }
@@ -372,9 +386,21 @@ where
     /// process start (graceful degradation, not data loss).
     async fn drain_all(&self) -> Result<(), UseCaseError> {
         let total_budget = Duration::from_secs(self.server_cfg.shutdown_extraction_grace_seconds);
-        let deadline = tokio::time::Instant::now() + total_budget;
+        // B3 unified deadline: if `server_runner` populated the shared
+        // `shutdown_deadline` (the §12 contract — the extraction drain
+        // and the watcher drain compete for ONE budget, not two), honour
+        // the remaining slice. Fall back to a fresh `now + total_budget`
+        // when the deadline was not set (tests / standalone `drain_all`
+        // callers), preserving the pre-B3 behaviour for those paths.
+        let deadline = self
+            .shutdown_deadline
+            .get()
+            .copied()
+            .unwrap_or_else(|| tokio::time::Instant::now() + total_budget);
+        let remaining_at_start = deadline.saturating_duration_since(tokio::time::Instant::now());
         tracing::info!(
             total_budget_secs = total_budget.as_secs(),
+            remaining_secs = remaining_at_start.as_secs(),
             "draining all sessions on shutdown"
         );
         let all = self.sessions.snapshot_all().await?;

@@ -29,7 +29,18 @@ use smos_application::ports::{Clock, IdGenerator};
 /// §12 drain ordering. The watcher task + its shutdown sender live or die
 /// together; `None` means no NLI backend was available so the watcher
 /// never started.
-type WatcherHandle = Option<(tokio::task::JoinHandle<()>, mpsc::Sender<()>)>;
+///
+/// The third tuple element is the shared `Arc<OnceLock<Instant>>`
+/// coordination point for the §12 unified shutdown deadline (B3):
+/// `run_server` populates it with the single wall-clock deadline before
+/// signalling shutdown, so the watcher's `drain_all` competes with the
+/// extraction drain for the SAME remaining budget instead of starting a
+/// fresh full grace window (closing the pre-B3 2× grace regression).
+type WatcherHandle = Option<(
+    tokio::task::JoinHandle<()>,
+    mpsc::Sender<()>,
+    Arc<std::sync::OnceLock<tokio::time::Instant>>,
+)>;
 
 /// Handle returned by [`spawn_audit_scheduler`]. The [`JobScheduler`] is
 /// held until [`run_server`] returns so the audit cron keeps firing for the
@@ -118,6 +129,27 @@ pub async fn run_server(config_path: &str) -> Result<()> {
 
     let extraction_grace =
         std::time::Duration::from_secs(config.server.shutdown_extraction_grace_seconds);
+    // B3 unified deadline: captured ONCE before the HTTP + extraction drain
+    // starts, then shared with the watcher drain via the `Arc<OnceLock>` in
+    // the `WatcherHandle`. The extraction drain (inside `serve_with_shutdown`)
+    // consumes up to the full `extraction_grace`; the subsequent watcher
+    // drain reads `remaining = deadline - now`, so the TOTAL §12 drain
+    // wall-clock is bounded by `extraction_grace` (not 2×). Pre-B3, each
+    // drain started a fresh full budget and the worst-case total was 2×
+    // grace, which exceeds a K8s `terminationGracePeriodSeconds` set to
+    // exactly `extraction_grace` and gets SIGKILLed mid-finalize.
+    let shutdown_deadline = tokio::time::Instant::now() + extraction_grace;
+    if let Some((_, _, ref deadline_slot)) = watcher_handle {
+        // Best-effort: if the OnceLock was already set (shouldn't happen on
+        // a clean shutdown — the watcher is single-shot), the `set` call
+        // returns Err and we keep the original value. Logged at debug so a
+        // double-shutdown attempt is visible without spamming.
+        if deadline_slot.set(shutdown_deadline).is_err() {
+            tracing::debug!(
+                "shutdown deadline already set; keeping existing value (double shutdown signal?)"
+            );
+        }
+    }
     serve_with_shutdown(
         listener,
         router,
@@ -313,6 +345,9 @@ async fn spawn_watcher(config: &SmosConfig, store: SurrealStore) -> WatcherHandl
         }
     };
 
+    let shutdown_deadline: Arc<std::sync::OnceLock<tokio::time::Instant>> =
+        Arc::new(std::sync::OnceLock::new());
+
     let watcher = SessionWatcher::new(
         WatcherDeps {
             facts: store.clone(),
@@ -325,6 +360,7 @@ async fn spawn_watcher(config: &SmosConfig, store: SurrealStore) -> WatcherHandl
             merge: Arc::new(config.merge.clone()),
             session: Arc::new(config.session.clone()),
             server: Arc::new(config.server.clone()),
+            shutdown_deadline: shutdown_deadline.clone(),
         }),
     );
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
@@ -332,14 +368,19 @@ async fn spawn_watcher(config: &SmosConfig, store: SurrealStore) -> WatcherHandl
     // `tokio::spawn` discharges against `SurrealStore` +
     // `NativeNliClassifier` (both return `Send` futures).
     let handle = tokio::spawn(watcher.into_loop(shutdown_rx));
-    Some((handle, shutdown_tx))
+    Some((handle, shutdown_tx, shutdown_deadline))
 }
 
 /// §12 ordering step 4: stop the watcher scan loop and drain every
 /// still-tracked session through FinalizeSession so pending facts reach
 /// `Accepted` / `Rejected` before the process exits.
 async fn drain_watcher(watcher_handle: WatcherHandle) {
-    if let Some((handle, shutdown_tx)) = watcher_handle {
+    if let Some((handle, shutdown_tx, _deadline_slot)) = watcher_handle {
+        // The shared deadline slot was already populated by `run_server`
+        // before `serve_with_shutdown` was invoked, so by the time the
+        // watcher's `drain_all` runs (after we send the shutdown signal
+        // and the loop picks it up) it reads the SAME deadline the
+        // extraction drain competed against — no fresh budget window.
         let _ = shutdown_tx.send(()).await;
         let _ = handle.await;
     }

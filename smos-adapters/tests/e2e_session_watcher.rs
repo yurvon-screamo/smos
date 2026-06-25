@@ -265,6 +265,7 @@ fn build_watcher(
                 pending_overflow_threshold: 20,
             }),
             server: Arc::new(ServerConfig::default()),
+            shutdown_deadline: Arc::new(std::sync::OnceLock::new()),
         }),
     )
 }
@@ -947,6 +948,7 @@ async fn watcher_drain_stops_within_budget_when_finalize_hangs() {
                 pending_overflow_threshold: 20,
             }),
             server: Arc::new(server_cfg),
+            shutdown_deadline: Arc::new(std::sync::OnceLock::new()),
         }),
     );
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -978,5 +980,113 @@ async fn watcher_drain_stops_within_budget_when_finalize_hangs() {
         pending_count(&store, &session).await,
         1,
         "the wedged finalize was cancelled before the bookkeeping cleanup"
+    );
+}
+
+// Regression (B3): the §12 unified shutdown deadline. The watcher's
+// `drain_all` MUST honour the shared `shutdown_deadline` coordination point
+// (populated by `server_runner` before the extraction drain starts) instead
+// of starting a fresh full `shutdown_extraction_grace_seconds` budget. The
+// pre-B3 code computed `deadline = now + total_budget` inside drain_all, so
+// the watcher drain ran AFTER the extraction drain already consumed its own
+// full budget — worst-case total wall-clock = 2× grace, which exceeds a K8s
+// `terminationGracePeriodSeconds` set to exactly `grace` and gets SIGKILLed
+// mid-finalize.
+//
+// This test sets the config budget to a LARGE value (30 s) but the shared
+// deadline to a TIGHT value (~1 s). If drain_all still uses the config
+// budget (the pre-B3 path), the test hangs for 30 s and the outer 5 s
+// timeout fails it. If drain_all honours the shared deadline (the B3 path),
+// it terminates in ~1 s.
+#[tokio::test]
+async fn watcher_drain_honours_shared_shutdown_deadline_over_config_budget() {
+    let (store, _tmp) = fresh_store("b3_shared_deadline").await;
+    let session = sid(1);
+
+    seed_accepted(
+        &store,
+        "shared anchor fact",
+        constant_embedding(0.5),
+        sid(2),
+    )
+    .await;
+    let pending_id = seed_pending(
+        &store,
+        &session,
+        "shared anchor fact paraphrase",
+        constant_embedding(0.5),
+        sid(1),
+    )
+    .await;
+    seed_session_aged(
+        &store,
+        &session,
+        vec![pending_id.clone()],
+        Duration::from_secs(31 * 60),
+    )
+    .await;
+
+    // LARGE config budget — the trap a pre-B3 regression falls into. If
+    // drain_all read this directly, the test would wait 30 s before the
+    // budget fired.
+    let server_cfg = ServerConfig {
+        shutdown_extraction_grace_seconds: 30,
+        ..ServerConfig::default()
+    };
+
+    // TIGHT shared deadline — what `server_runner` would set right before
+    // `serve_with_shutdown`. Simulates "the extraction drain already ate
+    // most of the grace, only ~1 s remains for the watcher drain."
+    let deadline_slot: Arc<std::sync::OnceLock<tokio::time::Instant>> =
+        Arc::new(std::sync::OnceLock::new());
+    let tight_deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+    deadline_slot.set(tight_deadline).unwrap();
+
+    let watcher = SessionWatcher::new(
+        WatcherDeps {
+            facts: store.clone(),
+            sessions: store.clone(),
+            classifier: HangingClassifier,
+        },
+        Arc::new(WatcherConfig {
+            confidence: Arc::new(ConfidenceConfig::default()),
+            nli: Arc::new(NliConfig::default()),
+            merge: Arc::new(MergeConfig::default()),
+            session: Arc::new(SessionConfig {
+                scan_interval_seconds: 60,
+                timeout_seconds: 1800,
+                pending_overflow_threshold: 20,
+            }),
+            server: Arc::new(server_cfg),
+            shutdown_deadline: deadline_slot,
+        }),
+    );
+    let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+    let handle = tokio::spawn(watcher.into_loop(rx));
+
+    let started = tokio::time::Instant::now();
+    let _ = tx.send(()).await;
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("drain_all must honour the shared deadline (1 s), not the config budget (30 s)")
+        .expect("watcher task must not panic");
+
+    let elapsed = started.elapsed();
+    // The shared deadline is 1 s. Allow generous slack for CI / scheduler
+    // latency, but the upper bound MUST stay far below the 30 s config
+    // budget — otherwise the test is silently exercising the pre-B3 path.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "drain_all elapsed {elapsed:?} must be bounded by the ~1 s shared deadline, \
+         not the 30 s config budget (B3 regression: deadline not honoured)"
+    );
+
+    // The wedged finalize was cancelled before committing (same invariant
+    // as the budget test above).
+    let fact = get_fact(&store, &pending_id).await;
+    assert_eq!(
+        fact.status(),
+        FactStatus::Pending,
+        "the wedged finalize was cancelled before it could commit any state"
     );
 }
