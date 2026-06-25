@@ -20,4 +20,4 @@ pub mod session_watcher;
 
 pub use delay::TokioDelay;
 pub use extraction_supervisor::ExtractionSupervisor;
-pub use session_watcher::SessionWatcher;
+pub use session_watcher::{SessionWatcher, WatcherConfig, WatcherDeps};

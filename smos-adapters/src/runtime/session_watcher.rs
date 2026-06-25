@@ -100,6 +100,41 @@ pub struct SessionWatcher<FR, SR, NC> {
     inflight: Arc<StdMutex<HashSet<SessionId>>>,
 }
 
+/// Concrete port instances handed to [`SessionWatcher::new`].
+///
+/// Grouping the three port refs (fact repo, session repo, NLI classifier)
+/// into one struct keeps the `new` signature stable as the watcher grows
+/// additional ports — callers build the deps struct by field name instead of
+/// memorising a positional order.
+pub struct WatcherDeps<FR, SR, NC> {
+    /// Fact repository port.
+    pub facts: FR,
+    /// Session repository port.
+    pub sessions: SR,
+    /// NLI classifier port.
+    pub classifier: NC,
+}
+
+/// Configuration snapshots the watcher reads on every cycle.
+///
+/// Wrapped in `Arc` at the call site so a future live-reload path can swap
+/// the whole bundle atomically. [`SessionWatcher::new`] clones the inner
+/// `Arc`s into its own fields at construction, so a swap after `new` does
+/// not retroactively change a running watcher — consistent with the current
+/// "config snapshot baked in at startup" contract.
+pub struct WatcherConfig {
+    /// Confidence threshold config (accepted vs. pending vs. rejected).
+    pub confidence: Arc<ConfidenceConfig>,
+    /// NLI backend config (model path, device, ...).
+    pub nli: Arc<NliConfig>,
+    /// Merge policy config (similarity thresholds, conflict handling).
+    pub merge: Arc<MergeConfig>,
+    /// Session sweeper cadence + thresholds.
+    pub session: Arc<SessionConfig>,
+    /// Server-level config (shutdown drain budget).
+    pub server: Arc<ServerConfig>,
+}
+
 impl<FR, SR, NC> SessionWatcher<FR, SR, NC>
 where
     FR: FactRepository + Send + Sync + 'static,
@@ -107,26 +142,23 @@ where
     NC: NliClassifier + Send + Sync + 'static,
     Self: Send + 'static,
 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        facts: FR,
-        sessions: SR,
-        classifier: NC,
-        confidence_cfg: Arc<ConfidenceConfig>,
-        nli_cfg: Arc<NliConfig>,
-        merge_cfg: Arc<MergeConfig>,
-        session_cfg: Arc<SessionConfig>,
-        server_cfg: Arc<ServerConfig>,
-    ) -> Self {
+    pub fn new(deps: WatcherDeps<FR, SR, NC>, config: Arc<WatcherConfig>) -> Self {
+        let WatcherConfig {
+            confidence,
+            nli,
+            merge,
+            session,
+            server,
+        } = &*config;
         Self {
-            facts,
-            sessions,
-            classifier,
-            confidence_cfg,
-            nli_cfg,
-            merge_cfg,
-            session_cfg,
-            server_cfg,
+            facts: deps.facts,
+            sessions: deps.sessions,
+            classifier: deps.classifier,
+            confidence_cfg: confidence.clone(),
+            nli_cfg: nli.clone(),
+            merge_cfg: merge.clone(),
+            session_cfg: session.clone(),
+            server_cfg: server.clone(),
             inflight: Arc::new(StdMutex::new(HashSet::new())),
         }
     }

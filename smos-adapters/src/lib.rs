@@ -38,8 +38,8 @@ pub use paths::{
     SmosPaths, ensure_smos_home, expand_tilde, resolve_config_path, smos_home, user_home_dir,
 };
 pub use providers::{LlamaCppReranker, NoopExtractor, OllamaEmbedding, OllamaExtractor};
-pub use runtime::SessionWatcher;
 pub use runtime::TokioDelay;
+pub use runtime::{SessionWatcher, WatcherConfig, WatcherDeps};
 pub use storage::surreal_store::SurrealStore;
 pub use storage::system_clock::SystemClock;
 pub use storage::system_id_generator::SystemIdGenerator;

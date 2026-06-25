@@ -17,7 +17,7 @@ use crate::config::SmosConfig;
 use crate::dreaming::start_scheduler;
 use crate::http::axum_server::{AppState, build_router, is_loopback_host, serve_with_shutdown};
 use crate::nli::build_classifier;
-use crate::runtime::{ExtractionSupervisor, SessionWatcher};
+use crate::runtime::{ExtractionSupervisor, SessionWatcher, WatcherConfig, WatcherDeps};
 use crate::upstream::ReqwestUpstreamRouter;
 use crate::{
     LlamaCppReranker, OllamaEmbedding, OllamaExtractor, SurrealStore, SystemClock,
@@ -314,14 +314,18 @@ async fn spawn_watcher(config: &SmosConfig, store: SurrealStore) -> WatcherHandl
     };
 
     let watcher = SessionWatcher::new(
-        store.clone(),
-        store.clone(),
-        classifier,
-        Arc::new(config.confidence.clone()),
-        Arc::new(config.nli.clone()),
-        Arc::new(config.merge.clone()),
-        Arc::new(config.session.clone()),
-        Arc::new(config.server.clone()),
+        WatcherDeps {
+            facts: store.clone(),
+            sessions: store.clone(),
+            classifier,
+        },
+        Arc::new(WatcherConfig {
+            confidence: Arc::new(config.confidence.clone()),
+            nli: Arc::new(config.nli.clone()),
+            merge: Arc::new(config.merge.clone()),
+            session: Arc::new(config.session.clone()),
+            server: Arc::new(config.server.clone()),
+        }),
     );
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
     // Spawn at a concrete-type call site so the `Send` bound on

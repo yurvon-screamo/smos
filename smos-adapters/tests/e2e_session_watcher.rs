@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use smos::SessionWatcher;
 use smos::SurrealStore;
 use smos::SystemClock;
 use smos::config::{ServerConfig, SessionConfig};
+use smos::{SessionWatcher, WatcherConfig, WatcherDeps};
 use smos_application::errors::ProviderError;
 use smos_application::ports::{Clock, FactRepository, NliClassifier, SessionRepository};
 use smos_application::types::NliResult;
@@ -248,18 +248,22 @@ fn build_watcher(
     classifier: MockNliClassifier,
 ) -> SessionWatcher<SurrealStore, SurrealStore, MockNliClassifier> {
     SessionWatcher::new(
-        store.clone(),
-        store,
-        classifier,
-        Arc::new(ConfidenceConfig::default()),
-        Arc::new(NliConfig::default()),
-        Arc::new(MergeConfig::default()),
-        Arc::new(SessionConfig {
-            scan_interval_seconds: 1,
-            timeout_seconds: 1800,
-            pending_overflow_threshold: 20,
+        WatcherDeps {
+            facts: store.clone(),
+            sessions: store,
+            classifier,
+        },
+        Arc::new(WatcherConfig {
+            confidence: Arc::new(ConfidenceConfig::default()),
+            nli: Arc::new(NliConfig::default()),
+            merge: Arc::new(MergeConfig::default()),
+            session: Arc::new(SessionConfig {
+                scan_interval_seconds: 1,
+                timeout_seconds: 1800,
+                pending_overflow_threshold: 20,
+            }),
+            server: Arc::new(ServerConfig::default()),
         }),
-        Arc::new(ServerConfig::default()),
     )
 }
 
@@ -873,18 +877,22 @@ async fn watcher_drain_stops_within_budget_when_finalize_hangs() {
         ..ServerConfig::default()
     };
     let watcher = SessionWatcher::new(
-        store.clone(),
-        store.clone(),
-        HangingClassifier,
-        Arc::new(ConfidenceConfig::default()),
-        Arc::new(NliConfig::default()),
-        Arc::new(MergeConfig::default()),
-        Arc::new(SessionConfig {
-            scan_interval_seconds: 60,
-            timeout_seconds: 1800,
-            pending_overflow_threshold: 20,
+        WatcherDeps {
+            facts: store.clone(),
+            sessions: store.clone(),
+            classifier: HangingClassifier,
+        },
+        Arc::new(WatcherConfig {
+            confidence: Arc::new(ConfidenceConfig::default()),
+            nli: Arc::new(NliConfig::default()),
+            merge: Arc::new(MergeConfig::default()),
+            session: Arc::new(SessionConfig {
+                scan_interval_seconds: 60,
+                timeout_seconds: 1800,
+                pending_overflow_threshold: 20,
+            }),
+            server: Arc::new(server_cfg),
         }),
-        Arc::new(server_cfg),
     );
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(watcher.into_loop(rx));
