@@ -1278,4 +1278,179 @@ mod tests {
         let stats = uc.execute(&sid(7), &memory_key()).await.unwrap();
         assert_eq!(stats.session_id, sid(7).as_str());
     }
+
+    // -----------------------------------------------------------------------
+    // Golden snapshot -- resolve_one outcome matrix (R8 behaviour lock)
+    // -----------------------------------------------------------------------
+    // Captures the current FactOutcome for each (pending, pool, nli-verdicts)
+    // combination produced by `resolve_one`. Written BEFORE the R8 structural
+    // split (ScanState extraction) so the drift-priority algorithm is locked.
+    // After R8 this test must pass WITHOUT any assertion change.
+    // golden snapshot -- must not change across R8
+    #[tokio::test]
+    async fn resolve_one_outcome_matrix_golden() {
+        // Row 1 -- candidates empty -> standalone finalize.
+        {
+            let facts = InMemoryFacts::default();
+            let sessions = InMemorySessions::default();
+            let classifier = ScriptedNliClassifier::new(vec![]);
+            let fix = Fix::new();
+            let uc = build(&facts, &sessions, &classifier, &fix);
+            let p = pending("standalone with no candidate at all", vec![1.0, 0.0, 0.0]);
+            let mut pool: Vec<Fact> = vec![];
+            let outcome = uc.resolve_one(&p, &mut pool).await;
+            assert_eq!(
+                outcome,
+                FactOutcome::Finalized,
+                "row1: empty pool -> standalone finalize"
+            );
+        }
+
+        // Row 2 -- exact-text match short-circuits to merge (no NLI call).
+        {
+            let facts = InMemoryFacts::default();
+            let sessions = InMemorySessions::default();
+            // Scripted contradiction that MUST NOT be consumed.
+            let classifier = ScriptedNliClassifier::new(vec![Ok(contradiction_available())]);
+            let fix = Fix::new();
+            let uc = build(&facts, &sessions, &classifier, &fix);
+            let existing = accepted("identical fact content", vec![1.0, 0.0, 0.0]);
+            // CASE-normalised exact match of the existing content.
+            let p = pending("IDENTICAL FACT CONTENT", vec![1.0, 0.0, 0.0]);
+            let mut pool = vec![existing];
+            let outcome = uc.resolve_one(&p, &mut pool).await;
+            assert_eq!(
+                outcome,
+                FactOutcome::Merged,
+                "row2: exact-text match -> merge"
+            );
+            assert!(
+                classifier.calls().is_empty(),
+                "row2: exact-match must not call NLI"
+            );
+        }
+
+        // Row 3 -- single entailment candidate -> merge.
+        {
+            let facts = InMemoryFacts::default();
+            let sessions = InMemorySessions::default();
+            let classifier = ScriptedNliClassifier::new(vec![Ok(entailment_available())]);
+            let fix = Fix::new();
+            let uc = build(&facts, &sessions, &classifier, &fix);
+            let existing = accepted("ttl=10 prevents refresh loop", vec![1.0, 0.0, 0.0]);
+            let p = pending("ttl=10 stops the refresh loop", vec![1.0, 0.0, 0.0]);
+            let mut pool = vec![existing];
+            let outcome = uc.resolve_one(&p, &mut pool).await;
+            assert_eq!(outcome, FactOutcome::Merged, "row3: entailment -> merge");
+        }
+
+        // Row 4 -- single contradiction candidate -> conflict flag.
+        {
+            let facts = InMemoryFacts::default();
+            let sessions = InMemorySessions::default();
+            let classifier = ScriptedNliClassifier::new(vec![Ok(contradiction_available())]);
+            let fix = Fix::new();
+            let uc = build(&facts, &sessions, &classifier, &fix);
+            let existing = accepted("ttl=60 seconds", vec![1.0, 0.0, 0.0]);
+            let p = pending("ttl=10 seconds", vec![1.0, 0.0, 0.0]);
+            let mut pool = vec![existing];
+            let outcome = uc.resolve_one(&p, &mut pool).await;
+            assert_eq!(
+                outcome,
+                FactOutcome::Conflict,
+                "row4: contradiction -> conflict"
+            );
+        }
+
+        // Row 5 -- first entailment + second contradiction -> drift wins (Conflict).
+        {
+            let facts = InMemoryFacts::default();
+            let sessions = InMemorySessions::default();
+            let classifier = ScriptedNliClassifier::new(vec![
+                Ok(entailment_available()),
+                Ok(contradiction_available()),
+            ]);
+            let fix = Fix::new();
+            let uc = build(&facts, &sessions, &classifier, &fix);
+            let entailed = accepted("the api runs on port 8080", vec![1.0, 0.0, 0.0]);
+            let drift = accepted("the api runs on port 9090", vec![0.95, 0.05, 0.0]);
+            let p = pending("the api runs on port 8080 today", vec![1.0, 0.0, 0.0]);
+            let mut pool = vec![entailed, drift];
+            let outcome = uc.resolve_one(&p, &mut pool).await;
+            assert_eq!(
+                outcome,
+                FactOutcome::Conflict,
+                "row5: drift-priority - contradiction overrides earlier entailment"
+            );
+        }
+
+        // Row 6 -- entailment + neutral -> first entailment wins (Merged).
+        {
+            let facts = InMemoryFacts::default();
+            let sessions = InMemorySessions::default();
+            let classifier = ScriptedNliClassifier::new(vec![
+                Ok(entailment_available()),
+                Ok(neutral_available()),
+            ]);
+            let fix = Fix::new();
+            let uc = build(&facts, &sessions, &classifier, &fix);
+            let entailed = accepted("the api runs on port 8080", vec![1.0, 0.0, 0.0]);
+            let neutral_cand = accepted("the api runs on port 9090", vec![0.95, 0.05, 0.0]);
+            let p = pending("the api runs on port 8080 today", vec![1.0, 0.0, 0.0]);
+            let mut pool = vec![entailed, neutral_cand];
+            let outcome = uc.resolve_one(&p, &mut pool).await;
+            assert_eq!(
+                outcome,
+                FactOutcome::Merged,
+                "row6: first entailment wins; later neutral does not override"
+            );
+        }
+
+        // Row 7 -- NLI unavailable for every candidate -> Skipped (stay pending).
+        {
+            let facts = InMemoryFacts::default();
+            let sessions = InMemorySessions::default();
+            let classifier = ScriptedNliClassifier::new(vec![
+                Err(ProviderError::Unavailable("backend down".into())),
+                Err(ProviderError::Unavailable("backend down".into())),
+            ]);
+            let fix = Fix::new();
+            let uc = build(&facts, &sessions, &classifier, &fix);
+            let a = accepted("content alpha marker", vec![1.0, 0.0, 0.0]);
+            let b = accepted("content beta marker", vec![0.9, 0.1, 0.0]);
+            let p = pending("content gamma marker", vec![1.0, 0.0, 0.0]);
+            let mut pool = vec![a, b];
+            let outcome = uc.resolve_one(&p, &mut pool).await;
+            assert_eq!(
+                outcome,
+                FactOutcome::Skipped,
+                "row7: NLI never observed -> skip (stay pending)"
+            );
+        }
+
+        // Row 8 -- C3 guard only (already-flagged pair) -> standalone finalize.
+        {
+            let facts = InMemoryFacts::default();
+            let sessions = InMemorySessions::default();
+            // Would-be contradiction is never consumed - the C3 guard fires first.
+            let classifier = ScriptedNliClassifier::new(vec![Ok(contradiction_available())]);
+            let fix = Fix::new();
+            let uc = build(&facts, &sessions, &classifier, &fix);
+            let mut existing = accepted("ttl=60 seconds", vec![1.0, 0.0, 0.0]);
+            let mut p = pending("ttl=10 seconds", vec![1.0, 0.0, 0.0]);
+            existing.flag_conflict(p.id().clone()).unwrap();
+            p.flag_conflict(existing.id().clone()).unwrap();
+            let mut pool = vec![existing];
+            let outcome = uc.resolve_one(&p, &mut pool).await;
+            assert_eq!(
+                outcome,
+                FactOutcome::Finalized,
+                "row8: C3 guard -> standalone finalize (nli_observed via flag)"
+            );
+            assert!(
+                classifier.calls().is_empty(),
+                "row8: C3 guard skips every NLI call"
+            );
+        }
+    }
 }
