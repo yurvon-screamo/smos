@@ -716,3 +716,176 @@ mod tests {
         assert!(prefilter(Vec::new(), &cfg, &heat, now).is_empty());
     }
 }
+
+// ===========================================================================
+// execute — orchestrator-level unit tests (the pipeline end-to-end through
+// the public entry point). The helper-level tests above cover the pure
+// pieces; these three pin the fail-open / fail-closed CONTRACT of
+// `EnrichRequest::execute`, which until now was only exercised by the
+// adapter-layer e2e suite.
+// ===========================================================================
+#[cfg(test)]
+mod execute_tests {
+    use super::*;
+    use crate::ports::{EmbeddingProvider, RerankProvider};
+    use crate::testkit::{ConstantEmbedder, FixedClock, InMemoryFacts, InMemorySessions};
+    use crate::types::{RerankResult, SearchHit, SearchHitMetadata};
+    use serde_json::json;
+
+    // ---- Local doubles for the two ports the testkit does not cover ----
+    //
+    // The testkit ships no None-returning embedder and no reranker at all
+    // (finalize / extract / import use neither), so these minimal fakes fill
+    // exactly the two gaps the execute contract needs.
+
+    /// Always returns `Ok(None)` — drives the fail-open embedder path (step 3).
+    struct NoneEmbedder;
+    impl EmbeddingProvider for NoneEmbedder {
+        async fn embed(&self, _text: &str) -> Result<Option<Vec<f32>>, ProviderError> {
+            Ok(None)
+        }
+    }
+
+    /// Always returns an empty rerank result — drives the fail-closed path
+    /// (step 8): an empty response must surface as `UseCaseError::Provider`.
+    struct EmptyReranker;
+    impl RerankProvider for EmptyReranker {
+        async fn rerank(
+            &self,
+            _query: &str,
+            _documents: &[String],
+            _top_k: usize,
+        ) -> Result<Vec<RerankResult>, ProviderError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn now_ts() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
+    fn key() -> MemoryKey {
+        MemoryKey::from_raw("origa").unwrap()
+    }
+    fn sid() -> SessionId {
+        SessionId::from_raw("sess_0123456789ab").unwrap()
+    }
+
+    /// A SearchHit that clears the retrieval pre-filter + heat post-filter
+    /// (accepted, no tombstone, confidence above the 0.7 floor, max heat with
+    /// `last_access_at == now` so there is no decay). Scripting this hit into
+    /// `InMemoryFacts::search_similar` pushes `EnrichRequest` past step 7 so
+    /// the reranker stage actually runs.
+    fn survivable_hit() -> SearchHit {
+        SearchHit {
+            id: FactId::from_content("an accepted fact about rust ownership"),
+            document: "an accepted fact about rust ownership".to_string(),
+            memory_key: key(),
+            metadata: SearchHitMetadata {
+                status: "accepted".into(),
+                confidence: 0.85,
+                valid_until: None,
+                heat_base: 1.0,
+                last_access_at: 1_700_000_000.0,
+                distance: Some(0.1),
+            },
+        }
+    }
+
+    /// 1. topic below `min_topic_chars` (default 3) short-circuits before the
+    ///    embedder is even consulted, returning the original messages verbatim.
+    #[tokio::test]
+    async fn enrich_skips_when_topic_below_min_chars() {
+        let facts = InMemoryFacts::default();
+        let sessions = InMemorySessions::default();
+        let embedder = ConstantEmbedder(vec![0.1, 0.2, 0.3]);
+        let reranker = EmptyReranker;
+        let clock = FixedClock(now_ts());
+        let retrieval = RetrievalConfig::default();
+        let heat = HeatConfig::default();
+        let uc = EnrichRequest {
+            facts: &facts,
+            sessions: &sessions,
+            embedder: &embedder,
+            reranker: &reranker,
+            clock: &clock,
+            retrieval_cfg: &retrieval,
+            heat_cfg: &heat,
+        };
+        // "ok" is 2 chars < min_topic_chars (3) -> step-2 short-circuit.
+        let original = vec![json!({"role": "user", "content": "ok"})];
+        let out = uc
+            .execute(original.clone(), &key(), &sid())
+            .await
+            .expect("ok");
+        assert_eq!(
+            out, original,
+            "topic below min_topic_chars returns the messages unchanged (fail-open)"
+        );
+    }
+
+    /// 2. embedder `None` is fail-open (step 3): the pipeline returns the
+    ///    original messages rather than erroring or injecting an empty block.
+    #[tokio::test]
+    async fn enrich_fail_opens_when_embedder_returns_none() {
+        let facts = InMemoryFacts::default();
+        let sessions = InMemorySessions::default();
+        let embedder = NoneEmbedder;
+        let reranker = EmptyReranker;
+        let clock = FixedClock(now_ts());
+        let retrieval = RetrievalConfig::default();
+        let heat = HeatConfig::default();
+        let uc = EnrichRequest {
+            facts: &facts,
+            sessions: &sessions,
+            embedder: &embedder,
+            reranker: &reranker,
+            clock: &clock,
+            retrieval_cfg: &retrieval,
+            heat_cfg: &heat,
+        };
+        let original =
+            vec![json!({"role": "user", "content": "explain rust ownership and borrowing"})];
+        let out = uc
+            .execute(original.clone(), &key(), &sid())
+            .await
+            .expect("ok");
+        assert_eq!(
+            out, original,
+            "embedder None must fail-open to the original messages (no <smos-memory> block)"
+        );
+    }
+
+    /// 3. an empty rerank result is fail-closed (step 8): once survivors reach
+    ///    the reranker, a provider that returns nothing propagates as
+    ///    `Err(UseCaseError::Provider(_))` so the HTTP handler maps it to 503
+    ///    rather than silently shipping vector-order-only ranking.
+    #[tokio::test]
+    async fn enrich_fail_closes_with_provider_err_when_reranker_returns_empty() {
+        let facts = InMemoryFacts::default();
+        // Script a survivor so the pipeline reaches step 8 instead of
+        // short-circuiting at "no vector hits".
+        facts.script_search_hits(vec![survivable_hit()]);
+        let sessions = InMemorySessions::default();
+        let embedder = ConstantEmbedder(vec![0.1, 0.2, 0.3]);
+        let reranker = EmptyReranker;
+        let clock = FixedClock(now_ts());
+        let retrieval = RetrievalConfig::default();
+        let heat = HeatConfig::default();
+        let uc = EnrichRequest {
+            facts: &facts,
+            sessions: &sessions,
+            embedder: &embedder,
+            reranker: &reranker,
+            clock: &clock,
+            retrieval_cfg: &retrieval,
+            heat_cfg: &heat,
+        };
+        let original =
+            vec![json!({"role": "user", "content": "explain rust ownership and borrowing"})];
+        let result = uc.execute(original, &key(), &sid()).await;
+        assert!(
+            matches!(result, Err(UseCaseError::Provider(_))),
+            "an empty rerank result must fail-closed as UseCaseError::Provider (HTTP 503)"
+        );
+    }
+}

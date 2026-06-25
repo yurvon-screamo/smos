@@ -12,11 +12,13 @@
 //! so the finalize-driving real implementation preserves every observable
 //! behavior while letting one type back all three suites.
 //!
-//! `search_similar` intentionally returns an empty `Vec`: none of the three
-//! use cases exercise it (they go through `search_for_dedup`), and mirroring
-//! the production accepted-only contract here keeps the fake honest. Tests
-//! that need to drive Layer 2 dedup script the response via
-//! [`InMemoryFacts::script_dedup_hits`].
+//! `search_similar` returns an empty `Vec` by default: the finalize / extract
+//! / import use cases never call it (they go through `search_for_dedup`).
+//! `EnrichRequest::execute` DOES call it, so its unit tests script the
+//! response via [`InMemoryFacts::script_search_hits`]; the default empty
+//! value keeps the fake honest for every other caller and mirrors the
+//! production accepted-only contract. Layer 2 dedup tests script the dedup
+//! response via [`InMemoryFacts::script_dedup_hits`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -34,6 +36,9 @@ pub struct InMemoryFacts {
     /// only). Empty by default so Layer 2 stays inert for exact-match and
     /// new-fact tests.
     dedup_hits: Arc<Mutex<Vec<SearchHit>>>,
+    /// Optional scripted `search_similar` response (`EnrichRequest` tests).
+    /// Empty by default so callers that do not script it see no vector hits.
+    search_hits: Arc<Mutex<Vec<SearchHit>>>,
 }
 
 impl InMemoryFacts {
@@ -54,6 +59,13 @@ impl InMemoryFacts {
     /// Program the response returned by `search_for_dedup`.
     pub fn script_dedup_hits(&self, hits: Vec<SearchHit>) {
         *self.dedup_hits.lock().unwrap() = hits;
+    }
+
+    /// Program the response returned by `search_similar`. Used by
+    /// `EnrichRequest::execute` unit tests to push vector-search survivors
+    /// into the rerank stage.
+    pub fn script_search_hits(&self, hits: Vec<SearchHit>) {
+        *self.search_hits.lock().unwrap() = hits;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -136,7 +148,7 @@ impl FactRepository for InMemoryFacts {
         _memory_key: &MemoryKey,
         _limit: usize,
     ) -> Result<Vec<SearchHit>, RepoError> {
-        Ok(Vec::new())
+        Ok(self.search_hits.lock().unwrap().clone())
     }
 
     async fn search_for_dedup(
