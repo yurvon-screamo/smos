@@ -30,32 +30,17 @@ pub(crate) fn parse_fact_status(s: &str) -> Result<FactStatus, RepoError> {
     }
 }
 
-pub(crate) fn format_iso(ts: OffsetDateTime) -> String {
-    // `time`'s `Rfc3339` format is widely compatible and accepted by
-    // SurrealDB's `datetime` parser. Formatting a `Rfc3339`-compatible
-    // `OffsetDateTime` should never fail in practice, but the previous
-    // silent fallback to `"1970-01-01T00:00:00Z"` would corrupt the
-    // timestamp-dependent heat decay if it ever did. Surface the error at
-    // ERROR level and fall back to the debug representation instead of
-    // silently emitting the epoch.
-    //
-    // Caveat: the `time` crate's `Debug` for `OffsetDateTime` is NOT a
-    // valid Rfc3339 string, so `parse_iso` will likely fail on a
-    // round-trip. The branch is "should be unreachable" — the goal is to
-    // avoid the silent epoch-corruption of heat decay timestamps and to
-    // leave a forensic trail in the ERROR log + stored row, not to keep
-    // the row readable.
-    match ts.format(&time::format_description::well_known::Rfc3339) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                timestamp = ?ts,
-                "Rfc3339 formatting failed; this should be unreachable — please report"
-            );
-            format!("{:?}", ts)
-        }
-    }
+// Formats a timestamp as an Rfc3339 string for storage. Formatting is fail-
+// closed: a timestamp whose Rfc3339 representation cannot be produced (e.g.
+// a negative year, which the `time` crate rejects with
+// `InvalidComponent("year")`) surfaces as `RepoError::SerializationFailed`
+// rather than falling back to a `Debug` string. The previous `Debug`
+// fallback was NOT a valid Rfc3339 datetime, so `parse_iso` could not
+// round-trip it — corrupting the heat-decay timestamps that depend on the
+// stored value.
+pub(crate) fn format_iso(ts: OffsetDateTime) -> Result<String, RepoError> {
+    ts.format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| RepoError::SerializationFailed(format!("Rfc3339 formatting failed: {e}")))
 }
 
 pub(crate) fn parse_iso(s: &str) -> Result<Timestamp, RepoError> {
@@ -65,4 +50,36 @@ pub(crate) fn parse_iso(s: &str) -> Result<Timestamp, RepoError> {
             Timestamp::from_unix_secs(odt.unix_timestamp())
                 .map_err(|e| RepoError::SerializationFailed(format!("unix out of range: {e}")))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::{Date, Month, PrimitiveDateTime, Time};
+
+    // Regression (B1): a constructible `OffsetDateTime` whose Rfc3339 format
+    // is rejected must fail-closed with `RepoError::SerializationFailed`
+    // instead of returning a `Debug` fallback that breaks the
+    // `parse_iso` round-trip and corrupts heat-decay timestamps.
+    // A negative year (`time` rejects it as `InvalidComponent("year")`) is
+    // such a value: `Date::from_calendar_date(-1, ..)` succeeds but Rfc3339
+    // formatting does not.
+    #[test]
+    fn format_iso_returns_err_on_invalid_offsetdatetime() {
+        let date =
+            Date::from_calendar_date(-1, Month::January, 1).expect("year -1 is a valid Date");
+        let time = Time::from_hms(0, 0, 0).unwrap();
+        let ts = PrimitiveDateTime::new(date, time).assume_utc();
+
+        let result = format_iso(ts);
+
+        assert!(
+            result.is_err(),
+            "format_iso must fail-closed on an OffsetDateTime Rfc3339 rejects"
+        );
+        match result {
+            Err(RepoError::SerializationFailed(_)) => {}
+            other => panic!("expected SerializationFailed, got {other:?}"),
+        }
+    }
 }

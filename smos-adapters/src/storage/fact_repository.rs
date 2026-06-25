@@ -220,7 +220,7 @@ impl FactRepository for SurrealStore {
         // be rewarmed by accident. The SurrealDB Rust SDK does not cleanly
         // accept a record-id array binding (C4); revisit once it does to turn
         // this into a single round-trip.
-        let last_access_iso = format_iso(last_access.as_offset_date_time());
+        let last_access_iso = format_iso(last_access.as_offset_date_time())?;
         let heat_value = heat_base.value();
         let memory_key_str = memory_key.as_str().to_string();
         for id in ids {

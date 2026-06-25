@@ -39,7 +39,8 @@ impl FactRow {
     pub(crate) fn from_fact(fact: &Fact) -> Result<Self, RepoError> {
         let valid_until = fact
             .valid_until()
-            .map(|ts| format_iso(ts.as_offset_date_time()));
+            .map(|ts| format_iso(ts.as_offset_date_time()))
+            .transpose()?;
         let embedding = fact.embedding().map(|e| e.as_slice().to_vec());
         let source_sessions = fact
             .source_sessions()
@@ -58,13 +59,13 @@ impl FactRow {
             fact_type: fact.fact_type().as_str().to_string(),
             confidence: fact.confidence().value(),
             status: fact.status().as_str().to_string(),
-            valid_from: format_iso(fact.valid_from().as_offset_date_time()),
+            valid_from: format_iso(fact.valid_from().as_offset_date_time())?,
             valid_until,
-            extracted_at: format_iso(fact.extracted_at().as_offset_date_time()),
+            extracted_at: format_iso(fact.extracted_at().as_offset_date_time())?,
             source_sessions,
             conflicts_with,
             heat_base: fact.heat_base().value(),
-            last_access_at: format_iso(fact.last_access_at().as_offset_date_time()),
+            last_access_at: format_iso(fact.last_access_at().as_offset_date_time())?,
             embedding,
         })
     }

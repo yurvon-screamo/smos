@@ -292,8 +292,8 @@ impl SessionRepository for SurrealStore {
             .iter()
             .map(|f| f.as_str().to_string())
             .collect();
-        let created_iso = format_iso(state.created_at().as_offset_date_time());
-        let last_active_iso = format_iso(state.last_active().as_offset_date_time());
+        let created_iso = format_iso(state.created_at().as_offset_date_time())?;
+        let last_active_iso = format_iso(state.last_active().as_offset_date_time())?;
 
         let mut res = self
             .db
