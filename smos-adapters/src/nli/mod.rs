@@ -12,7 +12,7 @@
 //!
 //! Pure verdict aggregation (`NliResult` thresholds) lives in
 //! `smos-domain::value_objects::nli`; this module only owns the IO side of
-//! (premise, hypothesis) → [`NliResult`].
+//! (premise, hypothesis) → `NliResult`.
 
 pub mod device;
 pub mod model_cache;

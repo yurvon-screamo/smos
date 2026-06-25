@@ -1,4 +1,4 @@
-//! `TokioDelay` — production [`Delay`](smos_application::ports::Delay) impl.
+//! `TokioDelay` — production [`Delay`] impl.
 //!
 //! A thin wrapper over `tokio::time::sleep`. Lives in the adapter layer so the
 //! application core stays runtime-agnostic; the extraction retry loop decides

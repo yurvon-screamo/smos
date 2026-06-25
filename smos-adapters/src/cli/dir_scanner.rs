@@ -55,7 +55,7 @@ fn is_visible(entry: &DirEntry) -> bool {
             .unwrap_or(true)
 }
 
-/// Match a path's extension against [`SUPPORTED_EXTENSIONS`]
+/// Match a path's extension against `SUPPORTED_EXTENSIONS`
 /// (case-insensitive). Files without an extension return `false`.
 pub fn is_supported_file(path: &Path) -> bool {
     path.extension()

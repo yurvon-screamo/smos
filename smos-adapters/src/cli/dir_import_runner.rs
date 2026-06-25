@@ -3,10 +3,10 @@
 //! Recursively scans `path` for supported documents (`*.md`, `*.txt`,
 //! `*.json`, `*.jsonl`, `*.yaml`, `*.yml`, `*.toml`), lifts the textual
 //! content of each file (raw for prose formats; JSON-string extraction for
-//! JSON / JSONL), and re-runs the same [`ExtractFactsFromResponse`]
+//! JSON / JSONL), and re-runs the same `ExtractFactsFromResponse`
 //! pipeline the live proxy runs after each chat completion. After every
 //! file has been processed, the runner optionally triggers a single
-//! [`FinalizeSession`] drain via [`run_finalize`] so the operator does
+//! `FinalizeSession` drain via [`run_finalize`] so the operator does
 //! not have to invoke it manually.
 //!
 //! Re-using the live extraction path keeps this command DRY with

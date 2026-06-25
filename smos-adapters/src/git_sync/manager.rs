@@ -3,18 +3,18 @@
 //! The manager owns a local clone of the configured git repo and surfaces
 //! the four operations SMOS needs:
 //!
-//! - [`Self::open_or_clone`] — attach to (or create) the local clone.
-//! - [`Self::export_facts`] — write every fact in a slice to its markdown
+//! - `Self::open_or_clone` — attach to (or create) the local clone.
+//! - `Self::export_facts` — write every fact in a slice to its markdown
 //!   file under the clone (does NOT commit).
-//! - [`Self::commit_and_push`] — `git add -A && git commit -m <msg>` and,
+//! - `Self::commit_and_push` — `git add -A && git commit -m <msg>` and,
 //!   when `auto_push` is set, `git push`.
-//! - [`Self::import_from_repo`] — read every markdown fact back into
+//! - `Self::import_from_repo` — read every markdown fact back into
 //!   `(FactFrontmatter, body)` tuples for re-hydration via
-//!   [`crate::git_sync::format::FactFrontmatter::to_fact`].
+//!   `crate::git_sync::format::FactFrontmatter::to_fact`.
 //!
 //! `git` is invoked via `std::process::Command`; the manager does not embed
 //! a git library, so the operator MUST have `git` on `PATH`. Each `git`
-//! invocation runs through [`run_git`], which surfaces non-zero exit codes
+//! invocation runs through `run_git`, which surfaces non-zero exit codes
 //! as `Err(anyhow!(…))` with the captured stderr.
 
 use std::path::{Path, PathBuf};
@@ -92,8 +92,7 @@ impl GitSyncManager {
     }
 
     /// Read every markdown fact back into `(frontmatter, body)` pairs.
-    /// Callers reconstruct domain [`Fact`]s via
-    /// [`FactFrontmatter::to_fact`].
+    /// Callers reconstruct domain [`Fact`]s via `FactFrontmatter::to_fact`.
     pub fn import_from_repo(&self) -> Result<ImportReport> {
         Ok(read_fact_files(&self.repo_path))
     }

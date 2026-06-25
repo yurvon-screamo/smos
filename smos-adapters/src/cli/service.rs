@@ -87,7 +87,7 @@ pub enum ServiceAction {
 /// Dispatch a parsed [`ServiceAction`] to the platform-specific backend.
 ///
 /// Only `Install` resolves paths (it needs the binary + config locations);
-/// the other actions key off the hardcoded [`SERVICE_NAME`] constant
+/// the other actions key off the hardcoded `SERVICE_NAME` constant
 /// because the platform CLI (`sc.exe`/`systemctl`/`launchctl`) finds the
 /// service by name. `config_path` is the global `--config` value (the
 /// single source of truth — the per-action `--config` flag was removed to

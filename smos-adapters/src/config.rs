@@ -30,7 +30,7 @@
 //! | `[extraction]`      | [`ExtractionConfig`]       | Re-exported from `smos-domain`.|
 //! | `[session]`         | [`SessionConfig`]          |                                |
 //! | `[audit]`           | [`AuditConfig`]            | Dreaming agent (LLM audit).    |
-//! | `[llama_cpp]`       | [`LlamaCppConfig`]         | Auto-launch `llama-server`     |
+//! | `[llama_cpp]`       | `LlamaCppConfig`           | Auto-launch `llama-server`     |
 //! |                     |                            | processes on `smos serve`.     |
 //! | `[git]`             | [`GitConfig`]              | Git-backed memory sync.        |
 //!

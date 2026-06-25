@@ -39,7 +39,7 @@ pub fn detect_in_text(text: &str) -> Option<SessionId> {
     SessionId::from_raw(captured).ok()
 }
 
-/// Scan the trailing [`WINDOW`] string messages for the freshest marker.
+/// Scan the trailing `WINDOW` (20) string messages for the freshest marker.
 ///
 /// Iteration runs newest-to-oldest so the first hit wins; an older marker
 /// buried further back in history is never returned when a newer one exists.
@@ -59,7 +59,7 @@ pub fn detect(messages: &[String]) -> Option<SessionId> {
 /// `content` may be a plain string or a multipart list of `{"type":"text",
 /// "text": ...}` parts; both shapes are flattened into text before scanning
 /// via the shared [`flatten_text`] helper. Iteration runs newest-to-oldest over
-/// the trailing [`WINDOW`] messages so the first hit wins — identical semantics
+/// the trailing `WINDOW` (20) messages so the first hit wins — identical semantics
 /// to [`detect`]. This is the Rust port's entry point for the request pipeline
 /// (§3 step 2): the proxy hands in the raw `serde_json::Value` messages array
 /// straight off the wire.
@@ -79,7 +79,7 @@ pub fn detect_from_messages(messages: &[Value]) -> Option<SessionId> {
 ///
 /// Operates on the [`EnrichmentMessages`] array the request pipeline uses
 /// internally (built via `enrichment_messages_from_json`); same trailing
-/// [`WINDOW`] scan, same newest-to-oldest iteration, same first-hit-wins
+/// `WINDOW` (20) scan, same newest-to-oldest iteration, same first-hit-wins
 /// semantics. The typed path avoids a per-message `serde_json::Value`
 /// lookup, which matters because the marker scan runs on every request.
 pub fn detect_from_typed_messages(messages: &EnrichmentMessages) -> Option<SessionId> {

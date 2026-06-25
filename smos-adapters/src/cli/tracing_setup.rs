@@ -15,7 +15,7 @@ use crate::config::ServerConfig;
 const DEFAULT_FILTER: &str = "info,smos=debug";
 
 /// Install the tracing subscriber with the default (human-readable) format.
-/// `RUST_LOG` overrides [`DEFAULT_FILTER`].
+/// `RUST_LOG` overrides `DEFAULT_FILTER`.
 pub fn init_tracing_default() {
     use tracing_subscriber::EnvFilter;
 
@@ -25,7 +25,7 @@ pub fn init_tracing_default() {
 }
 
 /// Install the tracing subscriber picking JSON vs. pretty from
-/// `server_config.log_format`. `RUST_LOG` overrides [`DEFAULT_FILTER`].
+/// `server_config.log_format`. `RUST_LOG` overrides `DEFAULT_FILTER`.
 ///
 /// `log_format = "json"` emits structured JSON logs (production / log
 /// shipping); any other value emits human-readable colourised output for

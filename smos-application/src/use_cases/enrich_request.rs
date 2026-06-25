@@ -98,9 +98,9 @@ where
     ///
     /// # Return paths (R7 decomposition)
     ///
-    /// The body delegates the fail-open stages (steps 1–7) to
-    /// [`retrieve_survivors`] and the fail-closed + dedup stages (8–11) to
-    /// [`rerank_and_dedup`]. Every return path of the previous monolithic
+    /// The body delegates the fail-open stages (steps 1–7) to the private
+    /// `retrieve_survivors` method and the fail-closed + dedup stages (8–11)
+    /// to the private `rerank_and_dedup` method. Every return path of the previous monolithic
     /// `execute` is preserved verbatim:
     ///
     /// 1. topic below `min_topic_chars` → `Ok(messages)`

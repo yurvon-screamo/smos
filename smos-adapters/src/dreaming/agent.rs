@@ -49,7 +49,7 @@ pub fn resolve_env_var(value: &str) -> String {
 /// Dispatches on [`AuditConfig::llm_provider`] and constructs the matching
 /// rig completion model. The two provider branches produce the same
 /// concrete `CompletionModel` type, so the actual agent building + prompt
-/// loop is delegated to the generic [`run_audit_with_model`].
+/// loop is delegated to the generic `run_audit_with_model`.
 pub async fn run_audit(
     config: &AuditConfig,
     store: SurrealStore,

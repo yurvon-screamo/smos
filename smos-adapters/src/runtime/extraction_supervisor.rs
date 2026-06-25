@@ -39,7 +39,7 @@ impl ExtractionSupervisor {
     /// supervisor — the in-flight counter is decremented on completion so
     /// [`drain`](Self::drain) can wait for it.
     ///
-    /// The decrement runs inside an [`InFlightGuard`]'s `Drop`, which
+    /// The decrement runs inside an `InFlightGuard`'s `Drop`, which
     /// fires on normal completion, error propagation, AND panic-unwind —
     /// so a panicking extraction task can never leak its slot. Without
     /// this guard, a panic mid-task would leave the counter at +1 and

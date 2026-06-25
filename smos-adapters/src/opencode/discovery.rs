@@ -24,7 +24,7 @@ use crate::opencode::cli::run_opencode_cli;
 /// Common opencode server ports, tried in parallel during the HTTP probe.
 ///
 /// 11434 is Ollama — kept LAST as a sentinel because its JSON error body is
-/// rejected by [`looks_alive`], so the probe never mistakes Ollama for
+/// rejected by `looks_alive`, so the probe never mistakes Ollama for
 /// opencode.
 pub const DEFAULT_PORTS: &[u16] = &[4096, 3000, 8080, 4097, 8888, 11434];
 

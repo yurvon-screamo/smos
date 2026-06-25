@@ -37,7 +37,7 @@ use smos_domain::chat::{ToolArguments, ToolCall};
 /// logged at `debug` level with the reason, so bulk imports that drop
 /// malformed messages surface in operator logs without aborting the whole
 /// import. The `turns_processed` vs `turns_skipped` counters in
-/// [`ImportStats`] then distinguish "filtered by user policy" from "dropped
+/// `ImportStats` then distinguish "filtered by user policy" from "dropped
 /// by the parser" by comparing the parsed turn count to the import stats.
 pub fn parse_transcript(transcript: &Value) -> Vec<AssistantTurn> {
     let Some(messages) = transcript.get("messages").and_then(Value::as_array) else {

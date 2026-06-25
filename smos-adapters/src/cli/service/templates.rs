@@ -97,7 +97,7 @@ pub fn launchd_label(service_name: &str) -> String {
 
 /// Resolve the launchd log path for the running service.
 ///
-/// Public wrapper around [`launchd_log_path_with`] that reads `HOME`
+/// Public wrapper around `launchd_log_path_with` that reads `HOME`
 /// from the process environment. Reused by both `render_launchd_plist`
 /// and the macOS backend's `print_install_summary` so the path the
 /// plist points at and the path the install summary advertises never

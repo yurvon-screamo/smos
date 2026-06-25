@@ -52,7 +52,7 @@ pub struct AppState {
     pub confidence_cfg: Arc<ConfidenceConfig>,
     /// Semantic-dedup safety net for the background extractor
     /// (`persist_facts` step 2). Owned by the shared state so every
-    /// [`ResponseExtractionSpawner`] clone hands the same snapshot to the
+    /// `ResponseExtractionSpawner` clone hands the same snapshot to the
     /// background task.
     pub extraction_cfg: Arc<ExtractionConfig>,
     /// Tracks background extraction tasks so `serve` can drain them on

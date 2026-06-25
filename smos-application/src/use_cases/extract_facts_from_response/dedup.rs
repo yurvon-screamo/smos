@@ -1,6 +1,6 @@
 //! 3-layer dedup pipeline for newly-extracted facts.
 //!
-//! [`ExtractFactsFromResponse::persist_one_fact`] routes each (raw, embedding)
+//! `ExtractFactsFromResponse::persist_one_fact` routes each (raw, embedding)
 //! pair through three layers, in order, stopping at the first hit:
 //!
 //! 1. **Exact `FactId` match** — cross-session confirmation (the only path

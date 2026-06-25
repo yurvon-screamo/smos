@@ -24,7 +24,7 @@ use ort::session::builder::GraphOptimizationLevel;
 /// operator can verify which EP ort actually committed.
 ///
 /// Variant order is **not** significant — the runtime priority lives in
-/// [`auto_detect`] (CUDA on Windows/Linux > DirectML on Windows >
+/// `auto_detect` (CUDA on Windows/Linux > DirectML on Windows >
 /// Metal on macOS > CPU), not in the enum declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -55,7 +55,7 @@ impl DeviceKind {
 /// Any explicit value (`"cpu"`, `"directml"`, `"cuda"`, `"metal"`)
 /// bypasses runtime probing and forces that device — useful for
 /// debugging a flaky GPU EP. `"auto"` and any unrecognised string run
-/// [`auto_detect`], which probes the host for the best available EP.
+/// `auto_detect`, which probes the host for the best available EP.
 pub fn detect_device(config_device: &str) -> DeviceKind {
     match config_device {
         "cpu" => DeviceKind::Cpu,

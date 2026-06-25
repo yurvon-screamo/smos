@@ -22,7 +22,7 @@
 //! multi-thread runtime, and the SMOS codebase keeps every runtime operation
 //! (spawn, serve, signal handling) inside `smos`. The adapter wraps
 //! the response stream with a `StreamingBuffer`, and after `[DONE]` spawns the
-//! [`ExtractFactsFromResponse`] use case. This use case hands the adapter the
+//! `ExtractFactsFromResponse` use case. This use case hands the adapter the
 //! `MemoryKey` it needs for that wiring.
 //!
 //! Returns `(ChatResponse, SessionId, MemoryKey)` so the HTTP handler injects

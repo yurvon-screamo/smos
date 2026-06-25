@@ -1,6 +1,6 @@
 //! Fail-open logging helper.
 //!
-//! The [`log_nonfatal!`] macro unifies the `if let Err(e) = … { tracing::warn!(…) }`
+//! The `log_nonfatal!` macro unifies the `if let Err(e) = … { tracing::warn!(…) }`
 //! swallow pattern that recurs across the finalize / merge / save paths.
 //! Semantics are identical to the inlined form: the error is logged at WARN
 //! and execution continues. Structured fields are passed through verbatim —

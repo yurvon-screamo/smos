@@ -1,7 +1,7 @@
-//! `llama-server` auto-launch helper extracted out of [`server_runner`].
+//! `llama-server` auto-launch helper extracted out of `server_runner`.
 //!
 //! Owning the spawn-or-skip decision in its own module keeps
-//! [`server_runner`] under the file-size budget and gives the spawn path a
+//! `server_runner` under the file-size budget and gives the spawn path a
 //! single, well-tested entry point.
 
 use crate::llama_server::{LlamaCppConfig, LlamaCppManager};

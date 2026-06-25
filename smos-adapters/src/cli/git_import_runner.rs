@@ -1,7 +1,7 @@
 //! `smos import git <url>` — read fact markdown files from a git repo and
 //! re-hydrate them into SurrealDB.
 //!
-//! Builds an ad-hoc [`GitConfig`](crate::config::GitConfig) from the
+//! Builds an ad-hoc [`GitConfig`] from the
 //! supplied URL plus the SMOS home (so the clone lands under `~/.smos/git`
 //! instead of polluting CWD), opens the clone via
 //! [`GitSyncManager::open_or_clone`], reads every `facts/<key>/<id>.md`,

@@ -21,7 +21,7 @@
 //!    zero prose still carries extractable signal.
 //!
 //! `min_chars` is wired from the SAME const as the live extraction pipeline
-//! ([`extract_facts_from_response::MIN_INPUT_CHARS`]) by the CLI binary, so
+//! (`extract_facts_from_response::MIN_INPUT_CHARS`) by the CLI binary, so
 //! the import path and the live response path cannot drift apart. The use
 //! case keeps the field as a runtime knob (not a const) so future callers
 //! can override it explicitly when they have a stronger reason than "match
@@ -97,7 +97,7 @@ pub struct ImportOpencodeSession<FR, SR, EP, LE, C, D> {
     pub enable_response_extraction: bool,
     /// Pre-extraction content floor. Turns below this length AND without tool
     /// calls are skipped. Wired from
-    /// [`extract_facts_from_response::MIN_INPUT_CHARS`] by the CLI binary so
+    /// `extract_facts_from_response::MIN_INPUT_CHARS` by the CLI binary so
     /// the import path and the live response path share one source of truth.
     pub min_chars: usize,
 }

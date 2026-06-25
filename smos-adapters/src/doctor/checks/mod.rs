@@ -7,7 +7,7 @@
 //! - [`persons`] — `[persons.*]` provider + persona reference checks
 //! - [`surreal`] — SurrealDB connect + migrations + stats snapshot
 //!
-//! All checks return [`CheckResult`] rows; the orchestrator in [`mod`]
+//! All checks return [`CheckResult`] rows; the orchestrator in this module
 //! concatenates them into a [`DoctorReport`]. Tests live in
 //! `tests/doctor_unit.rs` and cover only the pure helpers (formatting,
 //! aggregation); IO paths are exercised manually during the smoke test.

@@ -1,6 +1,6 @@
 //! Map `UpstreamError` to HTTP responses (§12 error matrix).
 //!
-//! A single [`ErrorClass`] classification drives both the status code and the
+//! A single `ErrorClass` classification drives both the status code and the
 //! body shape, so the "which status" and "how to render" decisions stay in one
 //! place (no duplicated range checks). Classes:
 //! - `Verbatim(status)` — upstream 4xx: forward the upstream's own body so

@@ -16,7 +16,7 @@ use super::ToolError;
 /// Parse a `MemoryKey` from a tool-input string.
 ///
 /// Returns [`ToolError::InvalidInput`] with a clear prefix so the LLM sees
-/// "memory_key: <reason>" in the tool error and can self-correct.
+/// "memory_key: \<reason\>" in the tool error and can self-correct.
 pub fn parse_memory_key(s: &str) -> Result<MemoryKey, ToolError> {
     MemoryKey::from_raw(s).map_err(|e| ToolError::InvalidInput(format!("memory_key: {e}")))
 }

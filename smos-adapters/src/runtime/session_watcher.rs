@@ -39,7 +39,7 @@
 //! keeps the ports runtime-agnostic but means a generic `spawn` method on
 //! the watcher cannot satisfy `tokio::spawn`'s `F: Future + Send + 'static`
 //! bound for abstract `FR`/`SR`/`NC`. The watcher therefore returns its loop
-//! as `impl Future<Output = ()>` from [`into_loop`]; the caller (production
+//! as `impl Future<Output = ()>` from `into_loop`; the caller (production
 //! `smos serve` or an integration test) invokes `tokio::spawn` at a
 //! concrete-type call site where the `Send` proof is trivially discharged
 //! (`SurrealStore` + `NativeNliClassifier` / mock classifier all return

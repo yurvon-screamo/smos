@@ -1,6 +1,6 @@
 //! `ScanState` - encapsulates the four mutable accumulators of the
 //! drift-priority candidate walk performed by
-//! [`super::FinalizeSession::resolve_one`].
+//! `super::FinalizeSession::resolve_one`.
 //!
 //! Split out of `finalize_session.rs` (R8); behaviour-preserving. The state
 //! transitions exposed below are 1:1 with the pre-R8 inline locals
