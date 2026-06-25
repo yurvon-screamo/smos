@@ -397,6 +397,13 @@ pub struct AuditConfig {
     /// so this MUST be > 0; 10 is the canonical headroom for a full
     /// list → search → merge → flag → report sweep.
     pub max_tool_rounds: usize,
+    /// Wall-clock budget per audit run, in seconds. Protects the scheduler
+    /// against a hung LLM upstream (rig's tool loop has no built-in
+    /// timeout): on expiry the audit returns an empty report and emits a
+    /// WARN, so a stuck `agent.prompt(...)` never wedges the cron tick.
+    /// Default 300 s — well above a healthy audit's wall-clock but short
+    /// enough that the next scheduled tick still fires on time.
+    pub audit_timeout_secs: u64,
     /// Filesystem directory where `write_report` drops the markdown audit
     /// report. Created on first write if missing.
     pub report_dir: String,

@@ -6,9 +6,11 @@
 //! executes the actual fact queries and mutations; the per-tool atomic
 //! counters record exactly how many deletions and merges happened.
 
+use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use rig::agent::AgentBuilder;
@@ -239,11 +241,30 @@ where
     // a non-zero multi-turn depth is load-bearing for the audit workflow
     // because every fact query, mutation, and report write happens through a
     // `rig::tool::Tool` impl.
-    let response = agent
+    let budget = Duration::from_secs(config.audit_timeout_secs);
+    let prompt_future = agent
         .prompt(AUDIT_TRIGGER_PROMPT)
         .multi_turn(config.max_tool_rounds)
-        .await
-        .context("audit agent prompt failed")?;
+        .into_future();
+    let response = match prompt_with_budget(prompt_future, budget).await {
+        Ok(result) => result.context("audit agent prompt failed")?,
+        Err(AuditTimeout { budget }) => {
+            // A hung LLM upstream would otherwise block the scheduler's next
+            // tick. Return whatever the shared mutation counters have recorded
+            // so far (in the hang scenario nothing has run yet → both 0) and
+            // surface an empty response so the report file still lands.
+            tracing::warn!(
+                budget_secs = budget.as_secs(),
+                "audit exceeded wall-clock budget; returning empty report"
+            );
+            return Ok(AuditReport {
+                deletions: deletion_counter.load(Ordering::Relaxed),
+                merges: merge_counter.load(Ordering::Relaxed),
+                response: String::new(),
+                timestamp: clock.now(),
+            });
+        }
+    };
     let deletions = deletion_counter.load(Ordering::Relaxed);
     let merges = merge_counter.load(Ordering::Relaxed);
     let timestamp = clock.now();
@@ -254,6 +275,33 @@ where
         response,
         timestamp,
     })
+}
+
+/// Signals that [`prompt_with_budget`] hit its wall-clock cap.
+///
+/// Carries the `budget` so the caller can include it in log/output without
+/// re-deriving the value.
+#[derive(Debug)]
+struct AuditTimeout {
+    budget: Duration,
+}
+
+/// Drive `prompt_future` to completion under a wall-clock `budget`.
+///
+/// Extracted from [`run_audit_with_model`] so the timeout contract is unit-
+/// testable in isolation against a never-resolving future (`std::future::
+/// pending`), without standing up the full rig + SurrealDB + ONNX audit
+/// stack. On timeout returns `Err(AuditTimeout)` — the caller decides
+/// whether to surface a hard error or synthesise an empty report (the audit
+/// path does the latter, see B5).
+async fn prompt_with_budget<F, T>(prompt_future: F, budget: Duration) -> Result<T, AuditTimeout>
+where
+    F: std::future::Future<Output = T>,
+{
+    match tokio::time::timeout(budget, prompt_future).await {
+        Ok(value) => Ok(value),
+        Err(_elapsed) => Err(AuditTimeout { budget }),
+    }
 }
 
 #[cfg(test)]

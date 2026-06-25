@@ -100,6 +100,7 @@ impl Default for AuditConfig {
             max_deletions_per_run: 50,
             max_merges_per_run: 100,
             max_tool_rounds: 10,
+            audit_timeout_secs: 300,
             report_dir: paths.reports.to_string_lossy().into_owned(),
         }
     }
