@@ -1,8 +1,8 @@
 {
-  "artifact": "README.md, CONTRIBUTING.md, docs/ARCHITECTURE.md, LICENSE, .github/*",
-  "product": "smos-rust",
-  "checked_at": "2026-06-22T00:00:00+03:00",
-  "overall_confidence": 0.95,
+  "artifact": "README.md (rewritten 2026-06-25), CONTRIBUTING.md, docs/ARCHITECTURE.md, LICENSE, .github/*",
+  "product": "smos",
+  "checked_at": "2026-06-25T00:00:00+03:00",
+  "overall_confidence": 0.92,
   "claims": [
     {
       "claim": "Rust 1.96 required (badge + toolchain).",
@@ -20,10 +20,73 @@
     },
     {
       "claim": "665+ tests under default cargo t; 5 ignored.",
+      "confidence": 0.8,
+      "status": "verified_with_caveat",
+      "sources": ["PERFORMANCE.md:29-31 (665 + 5 ignored)", "PERFORMANCE.md:59-61 (5 native_nli_tests ignored)"],
+      "note": "Conservative baseline as of 2026-06-20. README rewrite (2026-06-25) does not cite a specific test count — the count lives in PERFORMANCE.md. Re-count needed if test surface changed during v0.1.7."
+    },
+    {
+      "claim": "README states version 0.1.7 in the health-check curl example.",
       "confidence": 1.0,
       "status": "verified",
-      "sources": ["PERFORMANCE.md:29-31 (665 + 5 ignored)", "PERFORMANCE.md:59-61 (5 native_nli_tests ignored)"],
-      "note": "Conservative baseline as of 2026-06-20. Memory context mentions 683 from the 06-21 second-audit session; not promoted to README without a fresh PERFORMANCE.md update."
+      "sources": ["README.md:186 (curl example shows version 0.1.7)", "Cargo.toml (workspace.package version = 0.1.7 via smos-domain/application/adapters 0.1.7)"],
+      "note": "Updated from 0.1.6 during README rewrite 2026-06-25."
+    },
+    {
+      "claim": "Three tiny local models (4 GB total) handle extraction, embeddings, and reranking.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["README.md:158-161 (nemotron-3-nano-4b.gguf + jina-embeddings-v5.gguf + qwen3-reranker.gguf, ~4 GB total)", "smos.toml:209-262 ([llama_cpp] model paths)"],
+      "note": ""
+    },
+    {
+      "claim": "The largest local model is 4B parameters (Nemotron-3-Nano-4B).",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["README.md:159 (nemotron-3-nano-4b.gguf — extraction + chat LLM)", "smos.toml:259 (model_path = ~/.smos/models/nemotron-3-nano-4b.gguf)"],
+      "note": ""
+    },
+    {
+      "claim": "SMOS runs on a laptop CPU with integrated Intel graphics — no GPU required.",
+      "confidence": 0.75,
+      "status": "verified_with_caveat",
+      "sources": ["README.md:93-96 ('Tested on a laptop with integrated Intel graphics')", "User claim (turbin_y, 2026-06-25: 'мой ноутбук с intel видеокартой встроенной на проц это вытягивает без проблем')"],
+      "note": "User-reported; not independently benchmarked. The 4B extraction model at Q4/Q8 quantization on modern laptop CPU (e.g. Intel i7/i9 with integrated graphics) is feasible but actual throughput depends on CPU generation and RAM. Confidence 0.75 because no formal benchmark data cited."
+    },
+    {
+      "claim": "SMOS works with cloud providers (OpenAI, OpenRouter, vLLM) — not local-only.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["README.md:46-48 ('Works with local llama.cpp, OpenAI, OpenRouter, vLLM — any OpenAI-compatible upstream')", "smos.toml:35-48 ([[providers]] section with cloud example commented)", "smos.toml:206-209 (Setup Step 1 blockquote: cloud escape hatch with auto_launch = false)"],
+      "note": ""
+    },
+    {
+      "claim": "No external database required — embedded SurrealDB only.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["README.md:81-83 ('Embedded SurrealDB (RocksDB + HNSW). No Postgres, no Neo4j, no Qdrant, no Docker.')", "README.md:135-136 ('No Postgres. No Neo4j. No Docker. No cloud account.')", "Cargo.toml:26 (surrealdb features = [kv-rocksdb])"],
+      "note": ""
+    },
+    {
+      "claim": "No API key required for default local setup.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["README.md:135-136 ('No API key (unless you choose to use a cloud provider as your upstream)')", "smos.toml:38 (api_key_env = empty string for llama-local provider)"],
+      "note": ""
+    },
+    {
+      "claim": "llama-server is available as prebuilt binaries from llama.cpp releases.",
+      "confidence": 0.7,
+      "status": "verified_with_caveat",
+      "sources": ["README.md:195-197 ('Download a prebuilt binary from llama.cpp releases')"],
+      "note": "llama.cpp GitHub releases page does publish some prebuilt binaries, but availability varies by platform and release. Not all platforms have prebuilt llama-server binaries. The link points to the correct releases page. Confidence 0.7 because prebuilt availability is not guaranteed for all platforms at all times."
+    },
+    {
+      "claim": "Pipeline is simplified to 4 steps in README (ENRICH, FORWARD, EXTRACT, FINALIZE) with AUDIT as optional 5th.",
+      "confidence": 1.0,
+      "status": "verified",
+      "sources": ["README.md:54-62 (How it works diagram)", "docs/ARCHITECTURE.md:118-198 (full 6-stage pipeline — README simplifies for readability)"],
+      "note": "README collapses ARCHITECTURE.md stages 1-2 (PARSE + ENRICH) into ENRICH and presents EXTRACT + FINALIZE + AUDIT as the off-path stages. Semantically accurate."
     },
     {
       "claim": "Rust edition 2024.",

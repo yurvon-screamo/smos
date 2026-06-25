@@ -2,33 +2,138 @@
 
 # SMOS — Semantic Memory Operating System
 
-**An operating system for AI agent memory. Swap the model, keep the assistant.**
+**An OpenAI-compatible memory proxy that gives any AI coding agent persistent long-term memory — without code changes, without an MCP server, without a framework.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.96%20edition%202024-orange.svg)](https://www.rust-lang.org)
+[![crates.io](https://img.shields.io/crates/v/smos.svg)](https://crates.io/crates/smos)
 [![npm](https://img.shields.io/npm/v/@yurvon_screamo/smos.svg)](https://www.npmjs.com/package/@yurvon_screamo/smos)
+[![Release](https://github.com/yurvon-screamo/smos/actions/workflows/release.yml/badge.svg)](https://github.com/yurvon-screamo/smos/actions/workflows/release.yml)
 
 </div>
 
+## Quick start
+
+```bash
+npm install -g @yurvon_screamo/smos   # or: cargo binstall smos
+smos init                              # one-time: downloads ~4 GB of local models
+smos serve                             # starts on http://localhost:8888
+```
+
+Point Cursor (or Claude Code, opencode, Cline, Aider, Continue.dev) at
+`http://localhost:8888/v1` and use `bob` as the model name. That assistant
+now remembers across sessions.
+
+**One prerequisite:** [`llama-server`](https://github.com/ggerganov/llama.cpp)
+on your `PATH`. SMOS uses it to run three tiny models locally — extraction,
+embeddings, reranking. The largest is 4B parameters. These run on a laptop
+CPU with integrated graphics — no GPU, no API keys, no cloud bills, no data
+leaving your machine. Prefer cloud providers instead? SMOS supports that
+too — see [Configure](#configure).
+
+---
+
 Open a new chat in Cursor and your assistant starts from scratch. Switch to
-Claude or opencode and you re-explain why the cache TTL is 10 seconds, not 60.
-The model is stateless. The tool is replaceable. The memory should not be.
-**Bob** is a Rust development assistant that remembers: he knows why you
-picked that TTL, and he carries that context into every new chat — not pasted
-into the prompt, but living in his memory.
+Claude Code or opencode and you re-explain why the cache TTL is 10 seconds,
+not 60 — your architecture, your conventions, every decision you already
+made. The model is stateless. The tool is replaceable. The memory should
+not be.
 
-SMOS is a *memory operating system*. Treat the agent as an *application*, the
-model as a *CPU*, and SMOS as the *OS* that manages memory between them. You
-do not swap a CPU to keep your files. You do not lose programs on reboot.
-Swap GPT-4o for a local model and Bob stays Bob. Cursor, Claude, opencode, a
-curl one-liner — each is a window you talk to Bob through.
+SMOS fixes this. It is a transparent proxy that sits between your AI client
+and the upstream LLM. Every response is mined for facts automatically — the
+agent does nothing, the agent forgets nothing. Point any OpenAI-compatible
+client at SMOS and your assistant remembers across sessions, across tools,
+across model swaps. Works with local llama.cpp, OpenAI, OpenRouter, vLLM —
+any OpenAI-compatible upstream. Run fully local for privacy, or point it
+at your existing cloud provider.
 
-Configuring an agent is not writing routing rules. It is handing a teammate
-their toolkit: a name, a role, and a brain to think with. Tomorrow you create
-**Alice** for ML engineering and **Charlie** for DevOps, each with its own
-knowledge — Alice never mixes your Rust types with your Python pipelines.
-Wherever you run the model, it is still your assistant. Identity and history
-live at the OS layer, not in a chat log you rebuild by hand.
+---
+
+## How it works
+
+```
+Client ──▶ SMOS ──▶ upstream LLM (GPT-4o, Claude, local, …)
+              │
+              ├── 1. ENRICH    inject relevant facts into the request
+              ├── 2. FORWARD   stream response back at full LLM speed
+              ├── 3. EXTRACT   mine the response for facts (after delivery)
+              └── 4. FINALIZE  DeBERTa NLI resolves merges and conflicts
+                                (after delivery)
+```
+
+Steps 3 and 4 run **off the request path** — the client receives the
+response as soon as the upstream LLM finishes. Extraction and consolidation
+never add latency. If any step fails, the system degrades gracefully: the
+request forwards unenriched, facts stay pending for the next cycle, HTTP
+keeps serving.
+
+For the full pipeline, memory lifecycle, and NLI internals, see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
+## Why SMOS
+
+- **Memory is part of the API, not a tool.** Every response is mined for
+  facts automatically. The agent cannot forget to save, because the agent
+  is not involved in saving. Extraction runs off the request path — zero
+  added latency.
+- **No external database.** Embedded SurrealDB (RocksDB + HNSW vector
+  index). No Postgres, no Neo4j, no Qdrant, no Docker. One binary, one
+  directory.
+- **Contradictions are detected, not overwritten.** A DeBERTa-v3 NLI model
+  evaluates each merge candidate. Both sides of a contradiction are
+  preserved and surfaced to the LLM — not silently overwritten. The
+  theoretical basis: ["The Price of Meaning"](https://arxiv.org/abs/2603.27116)
+  (2026) proves vector-only retrieval degrades through semantic
+  interference; external verification is necessary.
+- **Multi-persona isolation.** Bob for Rust, Alice for ML, Charlie for
+  DevOps — each a separate memory namespace. One SMOS instance, N isolated
+  assistants.
+- **Runs on any laptop.** Three tiny local models (4 GB total) handle
+  extraction, embeddings, and reranking on CPU. Tested on a laptop with
+  integrated Intel graphics — no GPU, no API keys, no cloud bills. Your
+  conversations never leave your machine.
+
+---
+
+## Persons: name your assistant
+
+Every AI client sends a `model` field in the request. SMOS uses that field
+as a **person name** — and each person is a memory namespace, a routing
+target, and an optional persona.
+
+When Cursor sends `{"model": "bob", ...}`, SMOS:
+
+1. Uses `"bob"` as the memory isolation key
+2. Rewrites `model` to the upstream model declared for Bob
+3. Routes the request to Bob's provider
+4. Injects Bob's persona as a system message
+5. Enriches the request with facts from Bob's memory namespace
+
+Create **Alice** for ML engineering and **Charlie** for DevOps — each with
+its own memory, provider, and persona. Alice never mixes your Rust types
+with your Python pipelines. Swap GPT-4o for a local model and Bob stays
+Bob — identity lives at the OS layer, not in a chat log you rebuild by
+hand.
+
+See [Configure → Agents (persons)](#agents-persons) for the TOML.
+
+---
+
+## What you need
+
+- **~5 GB disk** for local models (one-time download: 4 GB GGUF + 643 MB
+  DeBERTa NLI).
+- **`llama-server`** on your `PATH` — get it from
+  [llama.cpp releases](https://github.com/ggerganov/llama.cpp/releases)
+  or build from source. Runs on any modern laptop; GPU is optional, not
+  required.
+- **Any OpenAI-compatible AI client** — Cursor, Claude Code, opencode,
+  Cline, Continue.dev, Aider, Windsurf, or plain `curl`.
+
+No Postgres. No Neo4j. No Docker. No cloud account. No API key (unless you
+choose to use a cloud provider as your upstream).
 
 ---
 
@@ -78,12 +183,30 @@ smos --version
 
 ## Setup
 
-### Step 1 — Install llama.cpp
+### Step 1 — Get llama-server
 
-SMOS uses [llama.cpp](https://github.com/ggerganov/llama.cpp) for all model
-inference. Build it and ensure the `llama-server` binary is on your `PATH`. The
-GGUF weights for the three roles SMOS uses are downloaded automatically in the
-next step — you do not need to fetch them by hand.
+SMOS uses [llama.cpp](https://github.com/ggerganov/llama.cpp) to run three
+tiny models locally — a 4B extraction LLM, an embedding model, and a
+reranker. These are small enough to run on a laptop CPU with integrated
+graphics. No GPU required.
+
+**Quickest path:**
+
+- Download a prebuilt binary from
+  [llama.cpp releases](https://github.com/ggerganov/llama.cpp/releases)
+  (look for `llama-server` in the assets for your platform).
+- Or build from source:
+  `git clone https://github.com/ggerganov/llama.cpp && cd llama.cpp && cmake -B build && cmake --build build --config Release`
+- Ensure `llama-server` is on your `PATH` (`llama-server --help` should
+  work from any directory).
+
+The GGUF model weights for the three roles are downloaded automatically in
+the next step — you do not need to fetch them by hand.
+
+> **Prefer cloud?** Skip llama-server entirely. Set `[llama_cpp].auto_launch
+> = false` in `~/.smos/config.toml` and point `[llm_extraction]`,
+> `[embedding]`, and `[reranker]` at any OpenAI-compatible cloud provider.
+> See [Configure](#configure).
 
 ### Step 2 — Initialize
 
@@ -125,7 +248,7 @@ Verify it works:
 
 ```bash
 curl http://localhost:8888/health
-# → {"status":"ok","version":"0.1.6"}
+# → {"status":"ok","version":"0.1.7"}
 ```
 
 ### Step 4 — Install as a service (optional)
@@ -290,8 +413,10 @@ See [`smos.toml`](smos.toml) for the canonical, fully-commented example.
 
 ## Connect your AI client
 
-Any client that speaks the OpenAI Chat Completions API works. Point it at SMOS
-and use the **person name** as the model.
+Any client that speaks the OpenAI Chat Completions API works — Cursor,
+Claude Code, opencode, Cline, Continue.dev, Aider, Windsurf, and anything
+else that lets you set a custom base URL. Point it at SMOS and use the
+**person name** as the model.
 
 ### opencode
 
@@ -313,6 +438,10 @@ curl http://localhost:8888/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"bob","messages":[{"role":"user","content":"hello"}]}'
 ```
+
+For other OpenAI-compatible clients, the pattern is the same: set the
+base URL to `http://localhost:8888/v1`, set any API key (SMOS does not
+validate it by default), and use the person name as the model.
 
 ---
 
@@ -343,19 +472,44 @@ Global flag: `--config <path>` to point at a non-default config file.
 
 ---
 
+## Known limitations
+
+Honest scope, not marketing hedging:
+
+- **643 MB DeBERTa-v3 ONNX download on first start.** Subsequent starts
+  are instant. The model is cached under `~/.smos/models/`.
+- **`llama-server` on `PATH` for local inference.** SMOS auto-launches
+  the three `llama-server` processes (extraction, embedding, reranker)
+  when `auto_launch = true`. The models are tiny (4 GB total) and run on
+  CPU. To use cloud providers instead, set `auto_launch = false` and
+  point the extraction / embedding / reranker URLs at your provider.
+- **Extraction model is English-optimized.** Nemotron-3-Nano-4B is
+  multilingual, but accuracy is highest on English. The DeBERTa NLI model
+  is English-only.
+- **Single-process SurrealDB lock.** One SMOS instance per database path.
+  No built-in horizontal scaling. Multi-machine sync via the git backend.
+- **Not benchmarked on LOCOMO.** The NLI contradiction detection is the
+  architectural choice, not a benchmark number.
+
+---
+
 ## Inspiration
 
 SMOS builds on academic research in AI agent memory:
 
 - **[MemoryOS: Memory OS of AI Agent](https://arxiv.org/abs/2506.06326)**
-  (Kang et al., 2025) — hierarchical memory management for AI agents. SMOS
-  adopts a similar lifecycle (`pending → accepted → conflict-flagged`) driven
-  by natural-language inference rather than hand-tuned heuristics.
-- **[The Price of Meaning: Why Every Semantic Memory System Forgets](https://arxiv.org/html/2603.27116v1)**
-  (2026) — interference is fundamental in semantic memory: every store that
-  decides what to keep also decides what to lose. SMOS sidesteps this by
-  preserving both sides of a contradiction and flagging them, instead of
-  picking a winner.
+  (Kang et al., 2025, EMNLP 2025 Oral) — hierarchical memory management
+  for AI agents. SMOS adopts a similar lifecycle
+  (`pending → accepted → conflict-flagged`) driven by natural-language
+  inference rather than hand-tuned heuristics.
+- **[The Price of Meaning: Why Every Semantic Memory System Forgets](https://arxiv.org/abs/2603.27116)**
+  (Ray Barman et al., 2026) — interference is fundamental in semantic
+  memory: every store that decides what to keep also decides what to
+  lose, and pure vector retrieval is mathematically proven to degrade.
+  SMOS sidesteps this by preserving both sides of a contradiction and
+  flagging them, instead of picking a winner — and by layering DeBERTa
+  NLI on top of cosine retrieval as the external verification the paper
+  calls necessary.
 
 ---
 
