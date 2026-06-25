@@ -214,70 +214,59 @@ impl SessionRepository for SurrealStore {
             .map(|f| f.as_str().to_string())
             .collect();
 
-        // SurrealDB uses optimistic concurrency: two transactions that touch
-        // the same row may conflict at COMMIT time. We retry up to 5 times
-        // with linear backoff — the second attempt almost always succeeds
-        // because the first commit has resolved the conflict.
-        //
-        // Error tracking: a transaction-conflict error is the expected
-        // "retry me" signal. Any OTHER error is also recorded into
-        // `last_err` (and the loop still retries) because a transient
-        // transport / connection error deserves the same retry budget as a
-        // conflict — the alternative (return immediately on the first
-        // non-conflict error) would surface an intermittent blip as a hard
-        // failure even though the second attempt would have succeeded.
-        let mut last_err: Option<RepoError> = None;
-        for attempt in 0..5u32 {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(5 * attempt as u64)).await;
-            }
-            let mut res = match self
-                .db
-                .query(DEDUP_AND_MARK_TX)
-                .bind(("id", id.as_str().to_string()))
-                .bind(("candidates", candidates.clone()))
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    if Self::is_transaction_conflict(&e) {
-                        last_err = Some(RepoError::TransactionConflict);
-                    } else {
-                        // Save the underlying error so the final return is
-                        // informative; keep retrying in case the failure is
-                        // transient (connection blip, leader handoff, …).
-                        last_err = Some(Self::map_db_error(e));
-                    }
-                    continue;
-                }
-            };
-            if let Err(e) = Self::check_errors(&mut res, "dedup_and_mark") {
-                // `check_errors` returns a `RepoError::QueryFailed` whose
-                // message embeds the original SurrealDB conflict text.
-                // Surface it as the more specific `TransactionConflict`
-                // variant so callers (and tests) can match structurally.
-                if Self::is_transaction_conflict_message(&e.to_string()) {
-                    last_err = Some(RepoError::TransactionConflict);
-                } else {
-                    last_err = Some(e);
-                }
-                continue;
-            }
-            let new_strings: Vec<String> = res.take(0).map_err(Self::map_db_error)?;
-            let mut out = Vec::with_capacity(new_strings.len());
-            for s in new_strings {
-                match FactId::from_raw(&s) {
-                    Ok(fid) => out.push(fid),
+        // SurrealDB uses optimistic concurrency: two transactions touching the
+        // same row may conflict at COMMIT time. We retry ONLY on
+        // `RepoError::TransactionConflict` (up to 5 attempts with linear
+        // backoff); every other error propagates immediately. The previous
+        // behaviour retried on ANY error, which masked genuine failures
+        // (malformed query, schema drift, transport fault) behind five
+        // redundant attempts and a ~50 ms backoff. The retry policy lives in
+        // [`retry_on_conflict`] so it is unit-testable in isolation.
+        let id_str = id.as_str().to_string();
+        let new_strings: Vec<String> = retry_on_conflict(move || {
+            let id_str = id_str.clone();
+            let candidates = candidates.clone();
+            async move {
+                let mut res = match self
+                    .db
+                    .query(DEDUP_AND_MARK_TX)
+                    .bind(("id", id_str))
+                    .bind(("candidates", candidates))
+                    .await
+                {
+                    Ok(r) => r,
                     Err(e) => {
-                        return Err(RepoError::SerializationFailed(format!(
-                            "dedup returned invalid FactId {s:?}: {e}"
-                        )));
+                        return if Self::is_transaction_conflict(&e) {
+                            Err(RepoError::TransactionConflict)
+                        } else {
+                            Err(Self::map_db_error(e))
+                        };
                     }
+                };
+                if let Err(e) = Self::check_errors(&mut res, "dedup_and_mark") {
+                    return if Self::is_transaction_conflict_message(&e.to_string()) {
+                        Err(RepoError::TransactionConflict)
+                    } else {
+                        Err(e)
+                    };
+                }
+                res.take::<Vec<String>>(0).map_err(Self::map_db_error)
+            }
+        })
+        .await?;
+
+        let mut out = Vec::with_capacity(new_strings.len());
+        for s in new_strings {
+            match FactId::from_raw(&s) {
+                Ok(fid) => out.push(fid),
+                Err(e) => {
+                    return Err(RepoError::SerializationFailed(format!(
+                        "dedup returned invalid FactId {s:?}: {e}"
+                    )));
                 }
             }
-            return Ok(out);
         }
-        Err(last_err.unwrap_or(RepoError::TransactionConflict))
+        Ok(out)
     }
 
     async fn save(&self, id: &SessionId, state: &SessionState) -> Result<(), RepoError> {
@@ -315,5 +304,135 @@ impl SessionRepository for SurrealStore {
             .map_err(Self::map_db_error)?;
         Self::check_errors(&mut res, "query")?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retry policy for `dedup_and_mark`
+// ---------------------------------------------------------------------------
+
+/// Run `attempt` with a bounded retry budget, retrying ONLY on
+/// [`RepoError::TransactionConflict`].
+///
+/// Up to 5 attempts with linear backoff (5 ms, 10 ms, 15 ms, 20 ms between
+/// retries). Any non-conflict error propagates immediately — retrying a
+/// malformed query or a schema error five times only delays the inevitable
+/// failure and hides the real cause behind redundant round-trips. Conflict
+/// is the SurrealDB "optimistic concurrency lost the race, try again"
+/// signal and is the only error worth burning a retry on.
+///
+/// Extracted as a free function so the retry policy is unit-testable with a
+/// counting fake attempt closure (deterministic, no embedded DB, no real
+/// backoff on the happy path).
+async fn retry_on_conflict<F, Fut, T>(mut attempt: F) -> Result<T, RepoError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, RepoError>>,
+{
+    for attempt_index in 0..5u32 {
+        if attempt_index > 0 {
+            tokio::time::sleep(Duration::from_millis(5 * attempt_index as u64)).await;
+        }
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(RepoError::TransactionConflict) => continue,
+            Err(other) => return Err(other),
+        }
+    }
+    // Every attempt returned `TransactionConflict`: surface it so callers
+    // can branch on the conflict variant rather than a generic query error.
+    Err(RepoError::TransactionConflict)
+}
+
+#[cfg(test)]
+mod retry_policy_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Regression (B4): a non-conflict error must propagate on the FIRST
+    // attempt. The pre-B4 loop retried ANY error up to 5×, so against that
+    // logic this fake would be invoked 5 times. The assertion pins the new
+    // fail-fast-on-non-conflict contract.
+    #[tokio::test]
+    async fn dedup_propagates_non_conflict_error_without_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let result: Result<u32, RepoError> = retry_on_conflict(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(RepoError::QueryFailed("not a conflict".into()))
+            }
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(RepoError::QueryFailed(_))),
+            "non-conflict error must propagate unchanged"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a non-conflict error must NOT be retried"
+        );
+    }
+
+    // Regression (B4): a conflict is retried, and the successful second
+    // attempt is returned. Pins the preserved retry-on-conflict behaviour
+    // alongside the new fail-fast-on-non-conflict contract.
+    #[tokio::test]
+    async fn dedup_retries_on_conflict_then_succeeds() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let result: Result<u32, RepoError> = retry_on_conflict(move || {
+            let counter = counter.clone();
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(RepoError::TransactionConflict)
+                } else {
+                    Ok(42)
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(
+            result.unwrap(),
+            42,
+            "the retried attempt's value is returned"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "conflict is retried exactly once before success"
+        );
+    }
+
+    // Regression (B4): a conflict that never resolves still terminates after
+    // the 5-attempt cap and surfaces `TransactionConflict` (no infinite loop).
+    #[tokio::test]
+    async fn dedup_caps_conflict_retries_at_five_attempts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let result: Result<u32, RepoError> = retry_on_conflict(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(RepoError::TransactionConflict)
+            }
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(RepoError::TransactionConflict)),
+            "exhausted retries surface the conflict variant"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "the retry budget is capped at 5 attempts"
+        );
     }
 }
