@@ -58,6 +58,7 @@ use smos_domain::enums::FactStatus;
 use smos_domain::{Fact, FactContent, FactId, MemoryKey, NliResult, SessionId};
 
 use crate::errors::{ProviderError, UseCaseError};
+use crate::log_nonfatal;
 use crate::ports::{FactRepository, NliClassifier, SessionRepository};
 
 /// Aggregate outcome counters for one finalize run.
@@ -207,13 +208,12 @@ where
         // its bookkeeping cleared so the watcher does not re-schedule an
         // idle session. A failure here is non-fatal — the session just
         // re-drains on the next finalize, which is idempotent.
-        if let Err(e) = self
-            .sessions
-            .remove_pending_owned(session_id, &owned_ids)
-            .await
-        {
-            tracing::warn!(error = %e, "session cleanup failed (non-fatal)");
-        }
+        log_nonfatal!(
+            self.sessions
+                .remove_pending_owned(session_id, &owned_ids)
+                .await,
+            "session cleanup failed (non-fatal)"
+        );
 
         tracing::info!(
             session = %session_id,
@@ -389,17 +389,17 @@ where
         // link" in one call. The bidirectional helper short-circuits on the
         // first failure; in this path `flag_conflict` cannot fail because
         // `find_merge_candidates` already excluded self-matches.
-        if let Err(e) = existing_mut.flag_conflict_bidirectional(&mut pending_mut) {
-            tracing::warn!(
-                existing = %existing_mut.id(),
-                pending = %pending_mut.id(),
-                error = %e,
-                "flag_conflict_bidirectional failed"
-            );
-        }
-        if let Err(e) = self.facts.save(&existing_mut).await {
-            tracing::warn!(fact = %existing_mut.id(), error = %e, "save existing after flag failed");
-        }
+        log_nonfatal!(
+            existing_mut.flag_conflict_bidirectional(&mut pending_mut),
+            existing = %existing_mut.id(),
+            pending = %pending_mut.id(),
+            "flag_conflict_bidirectional failed"
+        );
+        log_nonfatal!(
+            self.facts.save(&existing_mut).await,
+            fact = %existing_mut.id(),
+            "save existing after flag failed"
+        );
         if let Err(e) = self.facts.save(&pending_mut).await {
             tracing::warn!(fact = %pending_mut.id(), error = %e, "save pending after flag failed");
             // Pending twin failed to persist its flag — leave it pending so
@@ -425,12 +425,16 @@ where
         pool: &mut Vec<Fact>,
     ) -> FactOutcome {
         let mut existing_mut = existing.clone();
-        if let Err(e) = existing_mut.merge_into(pending) {
-            tracing::warn!(fact = %existing_mut.id(), error = %e, "merge_into failed");
-        }
-        if let Err(e) = existing_mut.reclassify(Some(nli), self.confidence_cfg) {
-            tracing::warn!(fact = %existing_mut.id(), error = %e, "reclassify(existing) failed");
-        }
+        log_nonfatal!(
+            existing_mut.merge_into(pending),
+            fact = %existing_mut.id(),
+            "merge_into failed"
+        );
+        log_nonfatal!(
+            existing_mut.reclassify(Some(nli), self.confidence_cfg),
+            fact = %existing_mut.id(),
+            "reclassify(existing) failed"
+        );
         if let Err(e) = self.facts.save(&existing_mut).await {
             tracing::warn!(fact = %existing_mut.id(), error = %e, "save merged existing failed");
             return FactOutcome::Skipped;
@@ -468,9 +472,11 @@ where
         pool: &mut Vec<Fact>,
     ) -> FactOutcome {
         let mut fact = pending.clone();
-        if let Err(e) = fact.reclassify(nli, self.confidence_cfg) {
-            tracing::warn!(fact = %fact.id(), error = %e, "reclassify(standalone) failed");
-        }
+        log_nonfatal!(
+            fact.reclassify(nli, self.confidence_cfg),
+            fact = %fact.id(),
+            "reclassify(standalone) failed"
+        );
         if let Err(e) = self.facts.save(&fact).await {
             tracing::warn!(fact = %fact.id(), error = %e, "save standalone failed");
             return FactOutcome::Skipped;

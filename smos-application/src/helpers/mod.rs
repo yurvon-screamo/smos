@@ -9,6 +9,7 @@
 //! Migrated out of `smos-domain::services` to enforce the strict DDD rule:
 //! the domain layer contains only entities and value objects.
 
+pub mod logging;
 pub mod memory_block;
 pub mod noise_filter;
 pub mod openai_content;
