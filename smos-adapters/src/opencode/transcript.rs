@@ -46,14 +46,12 @@ pub fn parse_transcript(transcript: &Value) -> Vec<AssistantTurn> {
     let mut turns = Vec::with_capacity(messages.len());
     for (idx, message) in messages.iter().enumerate() {
         match parse_message(message) {
-            Some(turn) => turns.push(turn),
-            None => {
-                // Log a short reason so bulk imports (where dozens of
-                // malformed messages would otherwise vanish silently) stay
-                // observable. The reason is the FIRST structural field that
-                // failed the parser — enough to diagnose without dumping the
-                // whole message.
-                let reason = classify_skip(message);
+            Ok(turn) => turns.push(turn),
+            // The reason is the FIRST structural predicate that rejected the
+            // message — enough to diagnose without dumping the whole message,
+            // and the single source of truth now that the parse and
+            // skip-classification paths share one function.
+            Err(reason) => {
                 tracing::debug!(
                     message_index = idx,
                     reason = %reason,
@@ -65,42 +63,51 @@ pub fn parse_transcript(transcript: &Value) -> Vec<AssistantTurn> {
     turns
 }
 
-/// Classify why a message was dropped by the parser — for observability only.
+/// Why a transcript message was dropped by [`parse_message`].
 ///
-/// Mirrors the structural checks [`parse_message`] performs. The two functions
-/// are NOT auto-synced: a new skip condition added to `parse_message` must be
-/// reflected here by hand, otherwise the logged reason will be silently wrong.
-/// Kept inline (not shared) because `parse_message` returns `Option<AssistantTurn>`
-/// while this function returns a reason label — factoring the common predicates
-/// out would force a third shape that does not fit either caller.
-fn classify_skip(message: &Value) -> &'static str {
-    if message.get("info").is_none() {
-        return "missing info";
-    }
-    let role = message
-        .get("info")
-        .and_then(|i| i.get("role"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if !role.eq_ignore_ascii_case("assistant") {
-        return "non-assistant role";
-    }
-    if message.get("parts").and_then(Value::as_array).is_none() {
-        return "missing parts array";
-    }
-    "empty turn (no text and no tool calls)"
+/// The variants mirror the structural predicates [`parse_message`] performs,
+/// in the order they are checked — the first failing predicate wins, so the
+/// logged reason is always the most specific failure. The [`std::fmt::Display`]
+/// impl emits the same human-readable labels the previous standalone
+/// skip-classification helper returned, so operator logs are byte-identical.
+enum SkipReason {
+    MissingInfo,
+    NonAssistantRole,
+    MissingPartsArray,
+    EmptyTurn,
 }
 
-/// Flatten one opencode message into a turn, or `None` if the message is not a
-/// usable assistant turn.
-fn parse_message(message: &Value) -> Option<AssistantTurn> {
-    let info = message.get("info")?;
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            SkipReason::MissingInfo => "missing info",
+            SkipReason::NonAssistantRole => "non-assistant role",
+            SkipReason::MissingPartsArray => "missing parts array",
+            SkipReason::EmptyTurn => "empty turn (no text and no tool calls)",
+        };
+        f.write_str(label)
+    }
+}
+
+/// Flatten one opencode message into a turn, or `Err(reason)` explaining which
+/// structural predicate rejected it.
+///
+/// The reason is computed as a side effect of the parse itself — the parse
+/// path and the skip-classification path used to be duplicated across two
+/// functions that silently drifted if a new skip condition was added to one
+/// but not the other. Folding both into a single function makes this the
+/// single source of truth.
+fn parse_message(message: &Value) -> Result<AssistantTurn, SkipReason> {
+    let info = message.get("info").ok_or(SkipReason::MissingInfo)?;
     let role = info.get("role").and_then(Value::as_str).unwrap_or("");
     if !role.eq_ignore_ascii_case("assistant") {
-        return None;
+        return Err(SkipReason::NonAssistantRole);
     }
 
-    let parts = message.get("parts").and_then(Value::as_array)?;
+    let parts = message
+        .get("parts")
+        .and_then(Value::as_array)
+        .ok_or(SkipReason::MissingPartsArray)?;
     let (mut text_chunks, mut tool_calls) = (Vec::new(), Vec::new());
     for part in parts {
         let ptype = part.get("type").and_then(Value::as_str).unwrap_or("");
@@ -128,10 +135,10 @@ fn parse_message(message: &Value) -> Option<AssistantTurn> {
 
     let content = text_chunks.join("\n\n");
     if content.is_empty() && tool_calls.is_empty() {
-        return None;
+        return Err(SkipReason::EmptyTurn);
     }
 
-    Some(AssistantTurn {
+    Ok(AssistantTurn {
         message_id: info
             .get("id")
             .and_then(Value::as_str)
