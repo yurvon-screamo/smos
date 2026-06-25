@@ -37,6 +37,7 @@
 //! CDN-tamper / corporate-MITM vector that bare HTTPS leaves open. Not
 //! implemented in this revision to keep the module inside review size.
 
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -76,7 +77,7 @@ const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300
 /// Archive container the upstream artifact ships in. Drives the extractor
 /// dispatch in [`extract_archive`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArchiveFormat {
+pub(crate) enum ArchiveFormat {
     Zip,
     Tgz,
 }
@@ -189,16 +190,103 @@ fn artifact_for(device: DeviceKind) -> Result<OrtArtifact> {
 /// no silent fallback — so an operator shipping a wrong `ORT_VERSION`
 /// sees the underlying HTTP status instead of a confusing ort load
 /// failure.
+///
+/// # Concurrency
+///
+/// Two concurrent first-use callers (e.g. the watcher + the HTTP
+/// extractor racing on a cold cache) coordinate through a sentinel file
+/// `<cache_dir>/.<subdir>-download`: the winner (whose `O_CREAT | O_EXCL`
+/// succeeds) downloads + extracts; the loser polls for the
+/// `.<dll>-complete` marker. Mirrors `crate::nli::model_cache::PartClaim`
+/// but for the directory-shaped ORT cache. Without this gate, both
+/// callers would download the multi-hundred-MB archive and the loser's
+/// staging-rename would clobber the winner's, racing on extraction
+/// integrity.
 pub async fn ensure_ort_binary(device: DeviceKind, cache_dir: &Path) -> Result<PathBuf> {
     let artifact = artifact_for(device)?;
-    let dll_dir = cache_dir.join(artifact.cache_subdir);
-    let dll_path = dll_dir.join(artifact.dll_name);
-    let complete_marker = dll_dir.join(format!(".{}-complete", artifact.dll_name));
+    install_from_url(
+        &artifact.url,
+        artifact.dll_name,
+        artifact.format,
+        artifact.cache_subdir,
+        cache_dir,
+    )
+    .await
+}
+
+/// Same as [`ensure_ort_binary`] but takes the archive URL explicitly.
+///
+/// Public-by-convention (still `pub(crate)`) so an integration test can
+/// point at a wiremock fixture instead of `github.com`. The single-flight
+/// claim + poll logic lives here so the test exercises the real race
+/// protection end-to-end (count downloads via the mock server).
+pub(crate) async fn install_from_url(
+    url: &str,
+    dll_name: &'static str,
+    format: ArchiveFormat,
+    cache_subdir: &'static str,
+    cache_dir: &Path,
+) -> Result<PathBuf> {
+    let dll_dir = cache_dir.join(cache_subdir);
+    let dll_path = dll_dir.join(dll_name);
+    let complete_marker = dll_dir.join(format!(".{dll_name}-complete"));
 
     if dll_path.exists() && complete_marker.exists() {
         tracing::debug!(path = %dll_path.display(), "ORT DLL already cached");
         return Ok(dll_path);
     }
+
+    std::fs::create_dir_all(cache_dir)?;
+    let claim_path = cache_dir.join(format!(".{cache_subdir}-download"));
+
+    match DownloadClaim::try_claim(claim_path.clone()) {
+        Ok(claim) => {
+            // Sole downloader. The claim is held until the function
+            // returns so the sentinel stays alive across the (slow)
+            // download + extraction; its `Drop` cleans up on either
+            // success (so a later cache invalidation can re-claim) or
+            // failure (so the next caller wins a fresh claim).
+            let install_result = install_winner(
+                url,
+                dll_name,
+                format,
+                &dll_dir,
+                &dll_path,
+                &complete_marker,
+            )
+            .await;
+            // Drop `claim` explicitly before returning so the sentinel
+            // disappears the moment the install finishes — the loser's
+            // poll loop keys off `complete_marker`, not the sentinel,
+            // but freeing the sentinel eagerly lets a concurrent
+            // re-invocation on a *different* device proceed.
+            drop(claim);
+            install_result
+        }
+        Err(ClaimError::AlreadyInProgress) => {
+            tracing::info!(
+                cache_subdir,
+                "another caller is downloading ORT; polling cache for completion"
+            );
+            poll_for_completion(&dll_path, &complete_marker).await
+        }
+        Err(ClaimError::Io(e)) => Err(anyhow::Error::from(e)),
+    }
+}
+
+/// Winner path: download → extract → atomic rename → completion marker.
+///
+/// Extracted so the claim branch reads as a single delegating call; the
+/// function owns every filesystem mutation that must happen strictly
+/// after winning the claim and strictly before the marker is written.
+async fn install_winner(
+    url: &str,
+    dll_name: &'static str,
+    format: ArchiveFormat,
+    dll_dir: &Path,
+    dll_path: &Path,
+    complete_marker: &Path,
+) -> Result<PathBuf> {
     // A partial prior extraction (DLL present but marker absent) is
     // treated as a cache miss and re-downloaded. Cheap because the next
     // start after a successful extraction always has the marker.
@@ -207,21 +295,19 @@ pub async fn ensure_ort_binary(device: DeviceKind, cache_dir: &Path) -> Result<P
             dir = %dll_dir.display(),
             "removing partial ORT extraction left by a previous crashed run"
         );
-        let _ = std::fs::remove_dir_all(&dll_dir);
+        let _ = std::fs::remove_dir_all(dll_dir);
     }
 
-    tracing::info!(url = %artifact.url, device = ?device, "downloading ONNX Runtime");
-    let bytes = download_archive(&artifact.url).await?;
+    tracing::info!(url = %url, "downloading ONNX Runtime");
+    let bytes = download_archive(url).await?;
 
-    std::fs::create_dir_all(&dll_dir)?;
-    let staging_dir = unique_staging_dir(&dll_dir);
+    std::fs::create_dir_all(dll_dir)?;
+    let staging_dir = unique_staging_dir(dll_dir);
     std::fs::create_dir_all(&staging_dir)?;
 
     let staging_dir_owned = staging_dir.clone();
-    let dll_name_owned = artifact.dll_name;
-    let format = artifact.format;
-    let extracted = tokio::task::spawn_blocking(move || {
-        extract_archive(&bytes, format, dll_name_owned, &staging_dir_owned)
+    let _extracted = tokio::task::spawn_blocking(move || {
+        extract_archive(&bytes, format, dll_name, &staging_dir_owned)
     })
     .await
     .map_err(|e| anyhow::anyhow!("extraction worker join error: {e}"))??;
@@ -231,15 +317,83 @@ pub async fn ensure_ort_binary(device: DeviceKind, cache_dir: &Path) -> Result<P
     // existing dir fails, but we already removed a partial `dll_dir`
     // above so the target is absent.
     if dll_dir.exists() {
-        let _ = std::fs::remove_dir_all(&dll_dir);
+        let _ = std::fs::remove_dir_all(dll_dir);
     }
-    std::fs::rename(&staging_dir, &dll_dir)?;
+    std::fs::rename(&staging_dir, dll_dir)?;
 
     // Marker is the very last write so its presence is proof the
     // directory reached its final, fully-populated state.
-    std::fs::write(&complete_marker, [])?;
-    tracing::info!(path = %extracted.display(), "ONNX Runtime ready");
-    Ok(extracted)
+    std::fs::write(complete_marker, [])?;
+    tracing::info!(path = %dll_path.display(), "ONNX Runtime ready");
+    // Return the canonical post-rename path, NOT the staging path: the
+    // staging directory was just renamed into `dll_dir`, so any path
+    // computed before the rename points at a location that no longer
+    // exists. The pre-B6 code returned the stale staging path, which
+    // happened to work only because the caller (ort session init) opens
+    // the canonical name itself.
+    Ok(dll_path.to_path_buf())
+}
+
+/// Loser path: wait for the winner's `complete_marker` to appear.
+///
+/// Bounded — the loser must not block forever if the winner crashed
+/// before writing the marker. The budget mirrors the per-request
+/// download timeout ([`DOWNLOAD_TIMEOUT`]) plus generous slack for
+/// extraction; on expiry the caller surfaces an error rather than
+/// wedging the audit startup.
+async fn poll_for_completion(dll_path: &Path, complete_marker: &Path) -> Result<PathBuf> {
+    const RETRIES: u32 = 600;
+    const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+    for _ in 0..RETRIES {
+        if dll_path.exists() && complete_marker.exists() {
+            return Ok(dll_path.to_path_buf());
+        }
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+    anyhow::bail!(
+        "ORT cache did not materialize after {} retries (another caller holds the download claim): {}",
+        RETRIES,
+        dll_path.display()
+    )
+}
+
+/// Single-flight claim on a sentinel file next to the ORT cache subdir.
+///
+/// Mirrors [`crate::nli::model_cache::PartClaim`] but guards the
+/// directory-shaped ORT extraction (the model_cache version guards a
+/// single-file copy). The claim is the `O_CREAT | O_EXCL` race on
+/// `claim_path`: exactly one concurrent caller wins, the rest fall
+/// through to the loser-poll branch.
+struct DownloadClaim {
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+enum ClaimError {
+    /// Another caller won the `create_new` race and is mid-download.
+    AlreadyInProgress,
+    /// A real IO error (permission denied, read-only filesystem, …).
+    Io(std::io::Error),
+}
+
+impl DownloadClaim {
+    fn try_claim(path: PathBuf) -> Result<Self, ClaimError> {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => Ok(Self { path }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ClaimError::AlreadyInProgress)
+            }
+            Err(e) => Err(ClaimError::Io(e)),
+        }
+    }
+}
+
+impl Drop for DownloadClaim {
+    fn drop(&mut self) {
+        // Best-effort cleanup so a later cold-cache miss can re-claim.
+        // Errors are swallowed — nothing useful to do at drop time.
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Download an archive with a bounded timeout and a hard size cap.
@@ -500,6 +654,158 @@ mod tests {
         assert!(
             msg.contains("1.23"),
             "error must mention the pin workaround: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // B6: single-flight download claim — exactly one download per cold cache
+    // -----------------------------------------------------------------------
+    //
+    // The pre-B6 path raced two concurrent `ensure_ort_binary` callers on a
+    // cold cache: both missed the existence check, both downloaded, and the
+    // loser's staging-rename clobbered the winner's extraction. The B6 fix
+    // gates the download behind a sentinel file (`O_CREAT | O_EXCL`); the
+    // loser polls the completion marker instead of re-downloading. The two
+    // tests below pin the contract via the extracted `install_from_url`
+    // seam so they can point at a wiremock fixture instead of `github.com`.
+
+    /// Build an in-memory zip archive containing a single fake `onnxruntime
+    /// .dll` entry. Mirrors the layout Microsoft ships so `extract_archive`
+    /// finds the canonical DLL name and the install path succeeds.
+    fn fake_ort_zip() -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("onnxruntime.dll", opts).unwrap();
+            zip.write_all(b"fake-ort-bytes").unwrap();
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    // Regression (B6): two concurrent installs against the same cold cache
+    // MUST trigger exactly one HTTP download. The wiremock `MockServer`
+    // records every received request; the assertion reads the server's
+    // request log so the count is exact (not just "at least one"). The
+    // loser wins the marker poll and returns the SAME canonical path the
+    // winner installed, proving no double-extraction clobbered the result.
+    #[tokio::test]
+    async fn concurrent_installs_trigger_exactly_one_download() {
+        use tempfile::TempDir;
+
+        let body = fake_ort_zip();
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/ort.zip"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let _cache_keepalive = TempDir::new().expect("tempdir");
+        let cache_dir = _cache_keepalive.path().to_path_buf();
+        let url = format!("{}/ort.zip", server.uri());
+
+        // Race two concurrent installs against the same cache_dir. The
+        // claim sentinel (`.<subdir>-download`) serializes them: one wins
+        // `O_CREAT | O_EXCL`, the other polls the completion marker.
+        let url_a = url.clone();
+        let url_b = url.clone();
+        let cache_a = cache_dir.clone();
+        let cache_b = cache_dir.clone();
+        let (res_a, res_b) = tokio::join!(
+            async move {
+                install_from_url(
+                    &url_a,
+                    "onnxruntime.dll",
+                    ArchiveFormat::Zip,
+                    "test-device",
+                    &cache_a,
+                )
+                .await
+            },
+            async move {
+                install_from_url(
+                    &url_b,
+                    "onnxruntime.dll",
+                    ArchiveFormat::Zip,
+                    "test-device",
+                    &cache_b,
+                )
+                .await
+            },
+        );
+
+        let path_a = res_a.expect("winner install succeeded");
+        let path_b = res_b.expect("loser install succeeded (via poll)");
+        assert_eq!(
+            path_a, path_b,
+            "both concurrent callers must resolve to the SAME canonical path"
+        );
+        assert!(path_a.exists(), "canonical DLL must land on disk");
+        assert!(
+            path_a.ends_with("onnxruntime.dll"),
+            "unexpected path: {}",
+            path_a.display()
+        );
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "exactly one HTTP download must fire (got {}); the second caller must poll, not re-download",
+            received.len()
+        );
+    }
+
+    // Regression (B6): a serial second install after the first has finished
+    // must NOT re-download — the cache hit short-circuits before the claim.
+    // Pins the fast-path so the claim + poll machinery is not invoked on a
+    // warm cache (which would otherwise add a pointless 500 ms poll cycle).
+    #[tokio::test]
+    async fn warm_cache_hit_skips_download_entirely() {
+        use tempfile::TempDir;
+
+        let body = fake_ort_zip();
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/ort.zip"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let _cache_keepalive = TempDir::new().expect("tempdir");
+        let cache_dir = _cache_keepalive.path().to_path_buf();
+        let url = format!("{}/ort.zip", server.uri());
+
+        let first = install_from_url(
+            &url,
+            "onnxruntime.dll",
+            ArchiveFormat::Zip,
+            "test-device-warm",
+            &cache_dir,
+        )
+        .await
+        .expect("first install");
+        let second = install_from_url(
+            &url,
+            "onnxruntime.dll",
+            ArchiveFormat::Zip,
+            "test-device-warm",
+            &cache_dir,
+        )
+        .await
+        .expect("warm cache hit");
+        assert_eq!(first, second);
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "warm-cache hit must NOT re-download (got {} requests)",
+            received.len()
         );
     }
 }
