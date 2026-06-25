@@ -155,11 +155,17 @@ pub async fn serve(
 ) -> Result<(), std::io::Error> {
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     tracing::info!(host, port, "SMOS HTTP server listening");
+    // B3: derive the shared deadline from the grace window so the extraction
+    // drain and (when composed in `server_runner`) the watcher drain compete
+    // for ONE budget. `serve` is the standalone entry point; the watcher-
+    // aware `server_runner` captures the deadline once and threads it
+    // through both drains.
+    let shutdown_deadline = tokio::time::Instant::now() + extraction_grace;
     serve_with_shutdown(
         listener,
         router,
         extraction_supervisor,
-        extraction_grace,
+        shutdown_deadline,
         shutdown_signal(),
     )
     .await
@@ -173,11 +179,24 @@ pub async fn serve(
 /// `SessionWatcher` drain — the HTTP module still does not know the watcher
 /// type, the main binary just calls `serve_with_shutdown` first and then
 /// drives the watcher shutdown channel + join handle.
+///
+/// # Drain budget (B3)
+///
+/// `shutdown_deadline` is the SINGLE wall-clock deadline shared with the
+/// subsequent watcher drain (see `server_runner::run_server`). After the
+/// axum graceful-shutdown phase completes, the extraction drain receives
+/// `remaining = deadline - now`, NOT a fresh full budget — so the
+/// SMOS-controlled drains (extraction + watcher) together consume at most
+/// `extraction_grace` wall-clock. The axum graceful-shutdown phase itself
+/// is bounded by connection keep-alive (not SMOS-configurable) and runs
+/// BEFORE the deadline is consulted; an operator setting K8s
+/// `terminationGracePeriodSeconds` should budget for
+/// `keepalive_window + extraction_grace`, not `extraction_grace` alone.
 pub async fn serve_with_shutdown<F>(
     listener: tokio::net::TcpListener,
     router: Router,
     extraction_supervisor: ExtractionSupervisor,
-    extraction_grace: Duration,
+    shutdown_deadline: tokio::time::Instant,
     shutdown: F,
 ) -> Result<(), std::io::Error>
 where
@@ -186,11 +205,16 @@ where
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await?;
+    // B3: the extraction drain competes for the SAME single deadline as the
+    // watcher drain. Computing `remaining` here (after axum's phase) means a
+    // slow axum graceful-shutdown eats into the shared budget instead of
+    // pushing the total past `extraction_grace`.
+    let remaining = shutdown_deadline.saturating_duration_since(tokio::time::Instant::now());
     tracing::info!(
-        ?extraction_grace,
+        ?remaining,
         "draining background extraction tasks before shutdown"
     );
-    extraction_supervisor.drain(extraction_grace).await;
+    extraction_supervisor.drain(remaining).await;
     Ok(())
 }
 
@@ -217,11 +241,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let router = Router::new();
         // Shutdown resolves immediately → axum stops accepting → drain runs.
+        // Deadline is set generously in the future so the 20 ms tracked task
+        // completes well within `remaining`.
         serve_with_shutdown(
             listener,
             router,
             supervisor,
-            Duration::from_secs(2),
+            tokio::time::Instant::now() + Duration::from_secs(2),
             async {},
         )
         .await

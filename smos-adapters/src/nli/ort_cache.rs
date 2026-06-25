@@ -239,27 +239,18 @@ pub(crate) async fn install_from_url(
     std::fs::create_dir_all(cache_dir)?;
     let claim_path = cache_dir.join(format!(".{cache_subdir}-download"));
 
-    match DownloadClaim::try_claim(claim_path.clone()) {
+    match DownloadClaim::try_claim(claim_path) {
         Ok(claim) => {
-            // Sole downloader. The claim is held until the function
-            // returns so the sentinel stays alive across the (slow)
-            // download + extraction; its `Drop` cleans up on either
-            // success (so a later cache invalidation can re-claim) or
-            // failure (so the next caller wins a fresh claim).
-            let install_result = install_winner(
-                url,
-                dll_name,
-                format,
-                &dll_dir,
-                &dll_path,
-                &complete_marker,
-            )
-            .await;
-            // Drop `claim` explicitly before returning so the sentinel
-            // disappears the moment the install finishes — the loser's
-            // poll loop keys off `complete_marker`, not the sentinel,
-            // but freeing the sentinel eagerly lets a concurrent
-            // re-invocation on a *different* device proceed.
+            // Sole downloader. The claim is held until the function returns
+            // so the sentinel stays alive across the (slow) download +
+            // extraction; its `Drop` cleans up on success (so a later cache
+            // invalidation can re-claim) or failure (so the next caller wins
+            // a fresh claim).
+            let install_result =
+                install_winner(url, dll_name, format, &dll_dir, &dll_path, &complete_marker).await;
+            // Explicit drop frees the sentinel eagerly so a concurrent
+            // re-invocation for a different device (different sentinel path)
+            // does not wait on this function's return frame.
             drop(claim);
             install_result
         }
@@ -337,22 +328,34 @@ async fn install_winner(
 /// Loser path: wait for the winner's `complete_marker` to appear.
 ///
 /// Bounded — the loser must not block forever if the winner crashed
-/// before writing the marker. The budget mirrors the per-request
-/// download timeout ([`DOWNLOAD_TIMEOUT`]) plus generous slack for
-/// extraction; on expiry the caller surfaces an error rather than
-/// wedging the audit startup.
+/// before writing the marker. The budget is `DOWNLOAD_TIMEOUT` (worst-case
+/// archive fetch, e.g. ~280 MB CUDA bundle on a slow link) PLUS an explicit
+/// extraction slack window: the largest archive extracts in tens of seconds
+/// even on a slow disk, so `EXTRACTION_SLACK` covers the rename + marker
+/// write that follows the download. On expiry the caller surfaces an error
+/// rather than wedging the audit startup. A wedged winner's sentinel is
+/// reclaimed on the NEXT process start via the stale-sentinel check in
+/// [`DownloadClaim::try_claim`].
 async fn poll_for_completion(dll_path: &Path, complete_marker: &Path) -> Result<PathBuf> {
-    const RETRIES: u32 = 600;
+    // EXTRACTION_SLACK covers archive extraction (zip/tgz of a multi-hundred-MB
+    // payload) + the atomic rename + marker write that follow the download.
+    // 180 s is generous for the largest artifact (CUDA ~280 MB) on a cold
+    // disk; if extraction ever exceeds this, the loser surfaces a clear
+    // error and the next start reclaims the stale sentinel.
+    const EXTRACTION_SLACK: std::time::Duration = std::time::Duration::from_secs(180);
+    let total_budget = DOWNLOAD_TIMEOUT + EXTRACTION_SLACK;
     const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-    for _ in 0..RETRIES {
+    let retries = (total_budget.as_millis() / RETRY_INTERVAL.as_millis()) as u64;
+    for _ in 0..retries {
         if dll_path.exists() && complete_marker.exists() {
             return Ok(dll_path.to_path_buf());
         }
         tokio::time::sleep(RETRY_INTERVAL).await;
     }
     anyhow::bail!(
-        "ORT cache did not materialize after {} retries (another caller holds the download claim): {}",
-        RETRIES,
+        "ORT cache did not materialize after {} of polling (another caller holds the download \
+         claim; if it crashed, the sentinel will be reclaimed on the next start): {}",
+        total_budget.as_secs(),
         dll_path.display()
     )
 }
@@ -364,9 +367,19 @@ async fn poll_for_completion(dll_path: &Path, complete_marker: &Path) -> Result<
 /// single-file copy). The claim is the `O_CREAT | O_EXCL` race on
 /// `claim_path`: exactly one concurrent caller wins, the rest fall
 /// through to the loser-poll branch.
+///
+/// Self-heals against a hard-killed prior winner (`kill -9`, OOM, power
+/// loss): a sentinel older than [`STALE_CLAIM_TTL`] is unlinked before the
+/// `create_new` retry so a crashed download does not wedge the cache
+/// forever. Matches the `PartClaim` stale-`.part` policy.
 struct DownloadClaim {
     path: PathBuf,
 }
+
+/// How long a sentinel may sit untouched before it is considered abandoned.
+/// Generous: a slow link downloading the CUDA archive (~280 MB) can take
+/// the full [`DOWNLOAD_TIMEOUT`] (300 s), so the TTL is measured in hours.
+const STALE_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 
 #[derive(Debug)]
 enum ClaimError {
@@ -381,10 +394,48 @@ impl DownloadClaim {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(_) => Ok(Self { path }),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if Self::is_stale(&path).map_err(ClaimError::Io)? {
+                    tracing::warn!(
+                        sentinel = %path.display(),
+                        "removing stale download sentinel left by a previous crashed winner"
+                    );
+                    // `remove_file` races with a concurrent winner; if the
+                    // remove wins, our second `create_new` claims the path.
+                    // If a concurrent winner already recreated it, we fall
+                    // through to AlreadyInProgress.
+                    let _ = std::fs::remove_file(&path);
+                    return OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .map(|_| Self { path })
+                        .map_err(|e| match e.kind() {
+                            std::io::ErrorKind::AlreadyExists => ClaimError::AlreadyInProgress,
+                            other => ClaimError::Io(std::io::Error::from(other)),
+                        });
+                }
                 Err(ClaimError::AlreadyInProgress)
             }
             Err(e) => Err(ClaimError::Io(e)),
         }
+    }
+
+    /// `true` if `path`'s mtime is older than [`STALE_CLAIM_TTL`], or if the
+    /// path does not exist (treated as "nothing to reclaim"). Other metadata
+    /// failures propagate so a real IO problem surfaces instead of wedging.
+    fn is_stale(path: &Path) -> Result<bool, std::io::Error> {
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(e) => return Err(e),
+        };
+        let mtime = metadata
+            .modified()
+            .map_err(|_| std::io::Error::other("mtime not available"))?;
+        let age = std::time::SystemTime::now()
+            .duration_since(mtime)
+            .unwrap_or(std::time::Duration::ZERO);
+        Ok(age > STALE_CLAIM_TTL)
     }
 }
 

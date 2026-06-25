@@ -139,9 +139,13 @@ pub struct WatcherConfig {
     ///
     /// Populated by `server_runner` right before the watcher shutdown signal
     /// is sent; read by `drain_all` so the watcher drain competes for the
-    /// SAME remaining budget the extraction drain already consumed. If
-    /// unset (e.g. in tests that drive `drain_all` directly without going
-    /// through `server_runner`), `drain_all` falls back to a fresh
+    /// SAME remaining budget the extraction drain already consumed. The
+    /// SMOS-controlled drains (extraction + watcher) together consume at most
+    /// `shutdown_extraction_grace_seconds` wall-clock; the axum graceful-
+    /// shutdown phase that precedes them is separate (bounded by HTTP
+    /// keep-alive, not SMOS-configurable). If unset (e.g. in tests that
+    /// drive `drain_all` directly without going through `server_runner`),
+    /// `drain_all` falls back to a fresh
     /// `now + shutdown_extraction_grace_seconds` budget — preserving the
     /// pre-B3 behaviour for those callers.
     pub shutdown_deadline: Arc<OnceLock<tokio::time::Instant>>,

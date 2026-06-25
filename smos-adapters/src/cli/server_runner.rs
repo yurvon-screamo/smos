@@ -130,14 +130,18 @@ pub async fn run_server(config_path: &str) -> Result<()> {
     let extraction_grace =
         std::time::Duration::from_secs(config.server.shutdown_extraction_grace_seconds);
     // B3 unified deadline: captured ONCE before the HTTP + extraction drain
-    // starts, then shared with the watcher drain via the `Arc<OnceLock>` in
-    // the `WatcherHandle`. The extraction drain (inside `serve_with_shutdown`)
-    // consumes up to the full `extraction_grace`; the subsequent watcher
-    // drain reads `remaining = deadline - now`, so the TOTAL §12 drain
-    // wall-clock is bounded by `extraction_grace` (not 2×). Pre-B3, each
-    // drain started a fresh full budget and the worst-case total was 2×
-    // grace, which exceeds a K8s `terminationGracePeriodSeconds` set to
-    // exactly `extraction_grace` and gets SIGKILLed mid-finalize.
+    // starts, then shared with BOTH the extraction drain (inside
+    // `serve_with_shutdown`, which computes `remaining = deadline - now` after
+    // the axum graceful-shutdown phase) and the watcher drain (via the
+    // `Arc<OnceLock>` in the `WatcherHandle`). The SMOS-controlled drains
+    // (extraction + watcher) therefore together consume at most
+    // `extraction_grace` wall-clock. The axum graceful-shutdown phase that
+    // precedes them is bounded by HTTP connection keep-alive (not
+    // SMOS-configurable), so operators setting K8s
+    // `terminationGracePeriodSeconds` / systemd `TimeoutStopSec` should budget
+    // for `keepalive_window + extraction_grace`, not `extraction_grace` alone.
+    // Pre-B3, each drain started a fresh full budget and the worst-case
+    // SMOS-controlled total was 2× grace.
     let shutdown_deadline = tokio::time::Instant::now() + extraction_grace;
     if let Some((_, _, ref deadline_slot)) = watcher_handle {
         // Best-effort: if the OnceLock was already set (shouldn't happen on
@@ -154,7 +158,7 @@ pub async fn run_server(config_path: &str) -> Result<()> {
         listener,
         router,
         extraction_supervisor,
-        extraction_grace,
+        shutdown_deadline,
         shutdown_signal(),
     )
     .await?;
