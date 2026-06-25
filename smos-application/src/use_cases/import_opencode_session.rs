@@ -203,121 +203,14 @@ mod tests {
     //! `tests/e2e_import.rs` integration suite.
 
     use super::*;
-    use crate::types::SearchHit;
-    use smos_domain::{Fact, FactId, Heat, NewPendingRequest, SessionState, Timestamp};
-    use std::collections::HashMap;
+    use crate::testkit::{
+        ConstantEmbedder, FixedClock, InMemoryFacts, NoOpDelay, ScriptedExtractor,
+    };
+    use smos_domain::{Fact, FactId, NewPendingRequest, SessionState, Timestamp};
     use std::sync::Mutex;
     use std::time::Duration;
 
-    // ---- Fakes mirroring the `extract_facts_from_response` test kit ----
-
-    #[derive(Clone)]
-    struct FixedClock(Timestamp);
-    impl Clock for FixedClock {
-        fn now(&self) -> Timestamp {
-            self.0
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    struct NoOpDelay;
-    impl Delay for NoOpDelay {
-        async fn delay(&self, _duration: Duration) {}
-    }
-
-    struct ScriptedExtractor {
-        results: Mutex<Vec<Vec<String>>>,
-    }
-    impl ScriptedExtractor {
-        fn new(results: Vec<Vec<String>>) -> Self {
-            Self {
-                results: Mutex::new(results),
-            }
-        }
-    }
-    impl LlmExtractor for ScriptedExtractor {
-        async fn extract_facts(
-            &self,
-            _content: &str,
-            _tool_calls: &[ToolCall],
-        ) -> Result<Vec<String>, crate::errors::ProviderError> {
-            let mut guard = self.results.lock().unwrap();
-            if guard.is_empty() {
-                Ok(Vec::new())
-            } else {
-                Ok(guard.remove(0))
-            }
-        }
-    }
-
-    struct ConstantEmbedder(Vec<f32>);
-    impl EmbeddingProvider for ConstantEmbedder {
-        async fn embed(
-            &self,
-            _text: &str,
-        ) -> Result<Option<Vec<f32>>, crate::errors::ProviderError> {
-            Ok(Some(self.0.clone()))
-        }
-    }
-
-    #[derive(Default, Clone)]
-    struct InMemoryFacts {
-        store: std::sync::Arc<Mutex<HashMap<String, Fact>>>,
-    }
-    impl FactRepository for InMemoryFacts {
-        async fn save(&self, fact: &Fact) -> Result<(), crate::errors::RepoError> {
-            self.store
-                .lock()
-                .unwrap()
-                .insert(fact.id().as_str().to_string(), fact.clone());
-            Ok(())
-        }
-        async fn get(
-            &self,
-            id: &FactId,
-            _mk: &MemoryKey,
-        ) -> Result<Option<Fact>, crate::errors::RepoError> {
-            Ok(self.store.lock().unwrap().get(id.as_str()).cloned())
-        }
-        async fn list_accepted(
-            &self,
-            _mk: &MemoryKey,
-        ) -> Result<Vec<Fact>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn list_pending(
-            &self,
-            _mk: &MemoryKey,
-        ) -> Result<Vec<Fact>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn list_memory_keys_for_session(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<Vec<MemoryKey>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn list_memory_keys(&self) -> Result<Vec<MemoryKey>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn search_similar(
-            &self,
-            _e: Vec<f32>,
-            _mk: &MemoryKey,
-            _l: usize,
-        ) -> Result<Vec<SearchHit>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn update_heat_batch(
-            &self,
-            _ids: &[FactId],
-            _mk: &MemoryKey,
-            _h: Heat,
-            _t: Timestamp,
-        ) -> Result<(), crate::errors::RepoError> {
-            Ok(())
-        }
-    }
+    // ---- `RecordingSessions` is local; the other fakes live in `crate::testkit`. ----
 
     #[derive(Default, Clone)]
     struct RecordingSessions {
@@ -447,8 +340,8 @@ mod tests {
     async fn execute_imports_each_turn_and_counts_new_facts() {
         let fix = Fix::new();
         let extractor = ScriptedExtractor::new(vec![
-            vec!["fact one".to_string()],
-            vec!["fact two".to_string()],
+            Ok(vec!["fact one".to_string()]),
+            Ok(vec!["fact two".to_string()]),
         ]);
         let import = fix.build(extractor, 15);
 
@@ -468,7 +361,7 @@ mod tests {
         let fix = Fix::new();
         // Only one extraction result is scripted; the short turn must be
         // skipped so the second turn does not consume a result.
-        let extractor = ScriptedExtractor::new(vec![vec!["real fact".to_string()]]);
+        let extractor = ScriptedExtractor::new(vec![Ok(vec!["real fact".to_string()])]);
         let import = fix.build(extractor, 15);
 
         let turns = vec![
@@ -485,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn execute_keeps_short_turn_when_it_has_tool_calls() {
         let fix = Fix::new();
-        let extractor = ScriptedExtractor::new(vec![vec!["from tool".to_string()]]);
+        let extractor = ScriptedExtractor::new(vec![Ok(vec!["from tool".to_string()])]);
         let import = fix.build(extractor, 15);
 
         let mut short_with_tool = turn("a", "ok");
@@ -507,8 +400,8 @@ mod tests {
     async fn execute_applies_agent_filter() {
         let fix = Fix::new();
         let extractor = ScriptedExtractor::new(vec![
-            vec!["hod fact".to_string()],
-            vec!["hod fact 2".to_string()],
+            Ok(vec!["hod fact".to_string()]),
+            Ok(vec!["hod fact 2".to_string()]),
         ]);
         let import = fix.build(extractor, 15);
 
@@ -545,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn execute_with_extraction_disabled_returns_zero_facts() {
         let fix = Fix::new();
-        let extractor = ScriptedExtractor::new(vec![vec!["should not be stored".to_string()]]);
+        let extractor = ScriptedExtractor::new(vec![Ok(vec!["should not be stored".to_string()])]);
         let mut import = fix.build(extractor, 15);
         import.enable_response_extraction = false;
 
@@ -561,7 +454,7 @@ mod tests {
 
         assert_eq!(stats.turns_processed, 1);
         assert_eq!(stats.facts_extracted, 0);
-        assert!(fix.facts.store.lock().unwrap().is_empty());
+        assert!(fix.facts.is_empty());
     }
 
     #[tokio::test]
@@ -580,13 +473,9 @@ mod tests {
         })
         .unwrap();
         let fid = first.id().clone();
-        fix.facts
-            .store
-            .lock()
-            .unwrap()
-            .insert(fid.as_str().to_string(), first);
+        fix.facts.seed(first);
 
-        let extractor = ScriptedExtractor::new(vec![vec![seeded_content.to_string()]]);
+        let extractor = ScriptedExtractor::new(vec![Ok(vec![seeded_content.to_string()])]);
         let import = fix.build(extractor, 15);
 
         let stats = import
@@ -595,14 +484,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(stats.facts_extracted, 0, "confirmation is not a new fact");
-        let confirmed = fix
-            .facts
-            .store
-            .lock()
-            .unwrap()
-            .get(fid.as_str())
-            .cloned()
-            .expect("fact present");
+        let confirmed = fix.facts.get_clone(&fid).expect("fact present");
         // Cross-session confirmation promotes the fact through the validation
         // gate (multi-source bonus + no-contradiction bonus clears accept
         // threshold). The exact status depends on the confidence formula; we

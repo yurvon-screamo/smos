@@ -22,6 +22,7 @@
 pub mod errors;
 pub mod helpers;
 pub mod ports;
+pub mod testkit;
 pub mod types;
 pub mod use_cases;
 

@@ -333,193 +333,16 @@ pub fn format_tool_calls(tool_calls: &[ToolCall]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::{
+        ConstantEmbedder, FixedClock, InMemoryFacts, NoOpDelay, RecordingEmbedder,
+        ScriptedExtractor,
+    };
     use crate::types::{SearchHit, SearchHitMetadata};
-    use smos_domain::{FactStatus, Heat, Timestamp};
-    use std::collections::HashMap;
+    use smos_domain::{FactStatus, Timestamp};
     use std::sync::Mutex;
 
-    // ---- Fakes (classicist style: in-memory repos, scripted providers) ----
-
-    #[derive(Clone)]
-    struct FixedClock(Timestamp);
-    impl Clock for FixedClock {
-        fn now(&self) -> Timestamp {
-            self.0
-        }
-    }
-
-    /// No-op delay: retry backoff runs instantaneously in unit tests so the
-    /// suite never pays the real 1 s + 2 s sleeps. Timing is verified
-    /// end-to-end via the E2E suite against the real `TokioDelay` adapter.
-    #[derive(Clone, Copy)]
-    struct NoOpDelay;
-    impl Delay for NoOpDelay {
-        async fn delay(&self, _duration: Duration) {}
-    }
-
-    struct ScriptedExtractor {
-        results: Mutex<Vec<Result<Vec<String>, ProviderError>>>,
-        calls: Mutex<u32>,
-    }
-    impl ScriptedExtractor {
-        fn new(results: Vec<Result<Vec<String>, ProviderError>>) -> Self {
-            Self {
-                results: Mutex::new(results),
-                calls: Mutex::new(0),
-            }
-        }
-        /// Number of times `extract_facts` was invoked.
-        fn call_count(&self) -> u32 {
-            *self.calls.lock().unwrap()
-        }
-    }
-    impl LlmExtractor for ScriptedExtractor {
-        async fn extract_facts(
-            &self,
-            _content: &str,
-            _tool_calls: &[ToolCall],
-        ) -> Result<Vec<String>, ProviderError> {
-            *self.calls.lock().unwrap() += 1;
-            let mut guard = self.results.lock().unwrap();
-            if guard.is_empty() {
-                Ok(Vec::new())
-            } else {
-                guard.remove(0)
-            }
-        }
-    }
-
-    struct ConstantEmbedder(Vec<f32>);
-    impl EmbeddingProvider for ConstantEmbedder {
-        async fn embed(&self, _text: &str) -> Result<Option<Vec<f32>>, ProviderError> {
-            Ok(Some(self.0.clone()))
-        }
-    }
-
-    /// Embedding provider that records every `embed` call and returns a
-    /// deterministic 1024-dim vector unique to the input text. Used to
-    /// verify the extraction pipeline hands distinct embeddings to
-    /// distinct facts (so Layer 2 dedup makes the right call). The
-    /// default `embed_batch` implementation loops `embed`, so every call
-    /// is recorded without an extra override.
-    struct RecordingEmbedder {
-        calls: std::sync::Arc<Mutex<Vec<String>>>,
-    }
-    impl RecordingEmbedder {
-        fn new() -> (Self, std::sync::Arc<Mutex<Vec<String>>>) {
-            let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    calls: calls.clone(),
-                },
-                calls,
-            )
-        }
-        fn vector_for(text: &str) -> Vec<f32> {
-            // Stable, content-derived 1024-dim one-hot-ish vector: hash
-            // the text into a single u64, use it as the index of a
-            // single non-zero dimension. Different inputs ⇒ different
-            // indices ⇒ cosine similarity 0 across distinct hashes.
-            let hash = text
-                .bytes()
-                .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-            let mut vec = vec![0.0; 1024];
-            vec[(hash as usize) % 1024] = 1.0;
-            vec
-        }
-    }
-    impl EmbeddingProvider for RecordingEmbedder {
-        async fn embed(&self, text: &str) -> Result<Option<Vec<f32>>, ProviderError> {
-            self.calls.lock().unwrap().push(text.to_string());
-            Ok(Some(Self::vector_for(text)))
-        }
-    }
-
-    #[derive(Default, Clone)]
-    struct InMemoryFacts {
-        store: std::sync::Arc<Mutex<HashMap<String, Fact>>>,
-        /// Optional scripted `search_for_dedup` response (semantic-dedup
-        /// tests only). Empty by default so Layer 2 stays inert for
-        /// exact-match + new-fact tests.
-        ///
-        /// `search_similar` (accepted-only) is intentionally left returning
-        /// an empty Vec so the fake mirrors the production
-        /// `SurrealStore` contract — Layer 2 MUST go through
-        /// `search_for_dedup`, never `search_similar`, otherwise tests pass
-        /// against the fake but fail against the real store (circular
-        /// deadlock on pending facts).
-        dedup_hits: std::sync::Arc<Mutex<Vec<SearchHit>>>,
-    }
-    impl InMemoryFacts {
-        fn script_dedup_hits(&self, hits: Vec<SearchHit>) {
-            *self.dedup_hits.lock().unwrap() = hits;
-        }
-    }
-    impl FactRepository for InMemoryFacts {
-        async fn save(&self, fact: &Fact) -> Result<(), crate::errors::RepoError> {
-            self.store
-                .lock()
-                .unwrap()
-                .insert(fact.id().as_str().to_string(), fact.clone());
-            Ok(())
-        }
-        async fn get(
-            &self,
-            id: &FactId,
-            _mk: &MemoryKey,
-        ) -> Result<Option<Fact>, crate::errors::RepoError> {
-            Ok(self.store.lock().unwrap().get(id.as_str()).cloned())
-        }
-        async fn list_accepted(
-            &self,
-            _mk: &MemoryKey,
-        ) -> Result<Vec<Fact>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn list_pending(
-            &self,
-            _mk: &MemoryKey,
-        ) -> Result<Vec<Fact>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn list_memory_keys_for_session(
-            &self,
-            _session_id: &SessionId,
-        ) -> Result<Vec<MemoryKey>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn list_memory_keys(&self) -> Result<Vec<MemoryKey>, crate::errors::RepoError> {
-            Ok(Vec::new())
-        }
-        async fn search_similar(
-            &self,
-            _e: Vec<f32>,
-            _mk: &MemoryKey,
-            _l: usize,
-        ) -> Result<Vec<SearchHit>, crate::errors::RepoError> {
-            // Mirrors the SurrealStore contract: search_similar is
-            // accepted-only. Tests that exercise Layer 2 go through
-            // `search_for_dedup` below.
-            Ok(Vec::new())
-        }
-        async fn search_for_dedup(
-            &self,
-            _e: Vec<f32>,
-            _mk: &MemoryKey,
-            _l: usize,
-        ) -> Result<Vec<SearchHit>, crate::errors::RepoError> {
-            Ok(self.dedup_hits.lock().unwrap().clone())
-        }
-        async fn update_heat_batch(
-            &self,
-            _ids: &[FactId],
-            _mk: &MemoryKey,
-            _h: Heat,
-            _t: Timestamp,
-        ) -> Result<(), crate::errors::RepoError> {
-            Ok(())
-        }
-    }
+    // ---- Fakes live in `crate::testkit`; `RecordingSessions` is local
+    //      because extraction asserts on its `pending` drain order. ----
 
     #[derive(Default, Clone)]
     struct RecordingSessions {
@@ -743,11 +566,9 @@ mod tests {
 
         assert_eq!(n, 1);
         let fact = facts
-            .store
-            .lock()
-            .unwrap()
-            .get(FactId::from_content("TTL=10 prevents the token refresh loop").as_str())
-            .cloned()
+            .get_clone(&FactId::from_content(
+                "TTL=10 prevents the token refresh loop",
+            ))
             .expect("fact saved");
         assert_eq!(fact.status(), FactStatus::Pending);
         assert_eq!(
@@ -788,10 +609,7 @@ mod tests {
             1,
             "Unavailable must skip retries — extractor called exactly once"
         );
-        assert!(
-            facts.store.lock().unwrap().is_empty(),
-            "no fact persisted on graceful skip"
-        );
+        assert!(facts.is_empty(), "no fact persisted on graceful skip");
     }
 
     #[tokio::test]
@@ -845,7 +663,7 @@ mod tests {
             .execute("content long enough to pass gate", &[], &mk(), &sid(1))
             .await;
         assert!(result.is_err(), "final failure propagates as Err");
-        assert!(facts.store.lock().unwrap().is_empty());
+        assert!(facts.is_empty());
     }
 
     #[tokio::test]
@@ -885,11 +703,7 @@ mod tests {
         })
         .unwrap();
         let fid = first.id().clone();
-        facts
-            .store
-            .lock()
-            .unwrap()
-            .insert(fid.as_str().to_string(), first);
+        facts.seed(first);
 
         let extractor =
             ScriptedExtractor::new(vec![Ok(vec!["shared fact content here".to_string()])]);
@@ -911,13 +725,7 @@ mod tests {
             .unwrap();
         assert_eq!(n, 0, "confirmation does not count as a new fact");
 
-        let confirmed = facts
-            .store
-            .lock()
-            .unwrap()
-            .get(fid.as_str())
-            .cloned()
-            .expect("fact still present");
+        let confirmed = facts.get_clone(&fid).expect("fact still present");
         assert_eq!(
             confirmed.source_sessions().distinct_count(),
             2,
@@ -970,24 +778,14 @@ mod tests {
         })
         .unwrap();
         let stored_id = stored.id().clone();
-        facts
-            .store
-            .lock()
-            .unwrap()
-            .insert(stored_id.as_str().to_string(), stored);
+        facts.seed(stored);
 
         // The extractor rephrased the same concept differently → its FactId
         // will differ, so Layer 1 (exact match) misses. Layer 2 must catch
         // it because the scripted `search_similar` returns the stored fact
         // with similarity 0.98 (above the 0.95 threshold).
         facts.script_dedup_hits(vec![hit_for(
-            &facts
-                .store
-                .lock()
-                .unwrap()
-                .get(stored_id.as_str())
-                .cloned()
-                .expect("seeded fact"),
+            &facts.get_clone(&stored_id).expect("seeded fact"),
             0.98,
             mk(),
         )]);
@@ -1012,11 +810,7 @@ mod tests {
             "semantic duplicate must confirm, not create a new fact"
         );
         let confirmed = facts
-            .store
-            .lock()
-            .unwrap()
-            .get(stored_id.as_str())
-            .cloned()
+            .get_clone(&stored_id)
             .expect("seeded fact still present");
         assert_eq!(
             confirmed.source_sessions().distinct_count(),
@@ -1024,12 +818,7 @@ mod tests {
             "semantic match grows provenance to two sessions"
         );
         assert!(
-            facts
-                .store
-                .lock()
-                .unwrap()
-                .get(FactId::from_content(rephrased).as_str())
-                .is_none(),
+            facts.get_clone(&FactId::from_content(rephrased)).is_none(),
             "no new fact id created for the rephrased variant"
         );
         assert!(
@@ -1056,21 +845,11 @@ mod tests {
         })
         .unwrap();
         let stored_id = stored.id().clone();
-        facts
-            .store
-            .lock()
-            .unwrap()
-            .insert(stored_id.as_str().to_string(), stored);
+        facts.seed(stored);
 
         // Similarity 0.80 < 0.95 threshold → Layer 2 must NOT fire.
         facts.script_dedup_hits(vec![hit_for(
-            &facts
-                .store
-                .lock()
-                .unwrap()
-                .get(stored_id.as_str())
-                .cloned()
-                .expect("seeded fact"),
+            &facts.get_clone(&stored_id).expect("seeded fact"),
             0.80,
             mk(),
         )]);
@@ -1093,7 +872,7 @@ mod tests {
         assert_eq!(n, 1, "below-threshold similarity must create a new fact");
         let new_id = FactId::from_content(new_content);
         assert!(
-            facts.store.lock().unwrap().contains_key(new_id.as_str()),
+            facts.contains(&new_id),
             "new fact persisted under its own FactId"
         );
         assert_eq!(
@@ -1123,20 +902,10 @@ mod tests {
         })
         .unwrap();
         let stored_id = stored.id().clone();
-        facts
-            .store
-            .lock()
-            .unwrap()
-            .insert(stored_id.as_str().to_string(), stored);
+        facts.seed(stored);
 
         let mut hit = hit_for(
-            &facts
-                .store
-                .lock()
-                .unwrap()
-                .get(stored_id.as_str())
-                .cloned()
-                .expect("seeded fact"),
+            &facts.get_clone(&stored_id).expect("seeded fact"),
             1.0,
             mk(),
         );
@@ -1183,21 +952,11 @@ mod tests {
         })
         .unwrap();
         let stored_id = stored.id().clone();
-        facts
-            .store
-            .lock()
-            .unwrap()
-            .insert(stored_id.as_str().to_string(), stored);
+        facts.seed(stored);
 
         // Similarity 0.85 — above the operator-lowered 0.80 threshold.
         facts.script_dedup_hits(vec![hit_for(
-            &facts
-                .store
-                .lock()
-                .unwrap()
-                .get(stored_id.as_str())
-                .cloned()
-                .expect("seeded fact"),
+            &facts.get_clone(&stored_id).expect("seeded fact"),
             0.85,
             mk(),
         )]);
@@ -1225,11 +984,7 @@ mod tests {
             "lowered threshold collapses the 0.85 pair via semantic match"
         );
         let confirmed = facts
-            .store
-            .lock()
-            .unwrap()
-            .get(stored_id.as_str())
-            .cloned()
+            .get_clone(&stored_id)
             .expect("seeded fact still present");
         assert_eq!(
             confirmed.source_sessions().distinct_count(),
@@ -1318,8 +1073,8 @@ mod tests {
         // Two distinct FactIds in the store → no collapse happened.
         let id_a = FactId::from_content("alpha configuration directive");
         let id_b = FactId::from_content("beta configuration directive");
-        assert!(facts.store.lock().unwrap().contains_key(id_a.as_str()));
-        assert!(facts.store.lock().unwrap().contains_key(id_b.as_str()));
+        assert!(facts.contains(&id_a));
+        assert!(facts.contains(&id_b));
     }
 
     // -----------------------------------------------------------------------
