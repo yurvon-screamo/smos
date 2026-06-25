@@ -61,7 +61,7 @@ use crate::helpers::request_enricher;
 use crate::helpers::retrieval_planner::{self, RetrievalHit};
 use crate::helpers::topic_extractor;
 use crate::ports::{Clock, EmbeddingProvider, FactRepository, RerankProvider, SessionRepository};
-use crate::types::{SearchHit, enrichment_messages_from_json};
+use crate::types::{EnrichmentMessages, SearchHit, enrichment_messages_from_json};
 
 /// Borrow-style bundle of every dependency the enrichment pipeline needs.
 ///
@@ -96,6 +96,24 @@ where
     /// propagates as [`UseCaseError::Provider`] so the HTTP handler maps it
     /// to 503.
     ///
+    /// # Return paths (R7 decomposition)
+    ///
+    /// The body delegates the fail-open stages (steps 1–7) to
+    /// [`retrieve_survivors`] and the fail-closed + dedup stages (8–11) to
+    /// [`rerank_and_dedup`]. Every return path of the previous monolithic
+    /// `execute` is preserved verbatim:
+    ///
+    /// 1. topic below `min_topic_chars` → `Ok(messages)`
+    /// 2. embedder returned `None` → `Ok(messages)`
+    /// 3. embedder returned `Err` → `Ok(messages)`
+    /// 4. vector search returned `Err` → `Ok(messages)`
+    /// 5. vector search returned zero hits → `Ok(messages)`
+    /// 6. prefilter left zero survivors → `Ok(messages)`
+    /// 7. reranker provider error → `Err(UseCaseError::Provider(_))`
+    /// 8. reranker returned zero usable results → `Err(UseCaseError::Provider(_))`
+    /// 9. dedup left zero new facts → `Ok(messages)`
+    /// 10. happy path → `Ok(enriched_array)`
+    ///
     /// # H-5 wire-shape preservation
     ///
     /// The function operates on `Vec<serde_json::Value>` **end-to-end**: the
@@ -125,92 +143,25 @@ where
         // mutation + return path.
         let typed_projection = enrichment_messages_from_json(&messages);
 
-        // Step 1 + 2 — short-circuit on empty / too-short topic. POC parity:
-        // `if len(topic.strip()) < min_topic_chars`. Trimming prevents
-        // whitespace-only topics (e.g. `"   "`) from passing the gate and
-        // producing a garbage embedding downstream.
-        let topic = topic_extractor::extract_from_messages(&typed_projection);
-        let trimmed_len = topic.trim().chars().count();
-        if trimmed_len < self.retrieval_cfg.min_topic_chars {
-            tracing::debug!(
-                chars = trimmed_len,
-                "enrichment skipped: topic below min_topic_chars"
-            );
+        // Steps 1–7: topic gate, embed, vector search, prefilter+heat,
+        // heat boost. Any fail-open short-circuit returns `Ok(None)`.
+        let Some((topic, survivors)) = self
+            .retrieve_survivors(&typed_projection, memory_key)
+            .await?
+        else {
             return Ok(messages);
-        }
-
-        // Step 3 — embed. None and errors are both fail-open.
-        let embedding = match self.embedder.embed(&topic).await {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                tracing::warn!("embedder returned None; skipping enrichment (fail-open)");
-                return Ok(messages);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "embedder error; skipping enrichment (fail-open)");
-                return Ok(messages);
-            }
         };
 
-        // Step 4 — vector search. The repo owns the search algorithm
-        // (HNSW + brute-force fallback); we just hand over the embedding.
-        let hits = match self
-            .facts
-            .search_similar(embedding, memory_key, self.retrieval_cfg.top_k_initial)
-            .await
-        {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(error = %e, "vector search failed; skipping enrichment (fail-open)");
-                return Ok(messages);
-            }
-        };
-        if hits.is_empty() {
-            tracing::info!(memory_key = %memory_key, "no vector hits; skipping enrichment");
-            return Ok(messages);
-        }
-
-        // Step 5 — pre-filter + heat post-filter (pure domain).
-        let now = self.clock.now();
-        let survivors = prefilter(hits, self.retrieval_cfg, self.heat_cfg, now);
-
-        // Step 6 — short-circuit when no survivors remain.
-        if survivors.is_empty() {
-            return Ok(messages);
-        }
-
-        // Step 7 — heat boost. Best-effort: a failure here is logged but does
-        // not abort enrichment (the rerank/dedup still works on stale heat).
-        self.boost_heat(&survivors, memory_key, now).await;
-
-        // Step 8 — rerank. Fail-closed: a provider error or an empty result
-        // propagates as `UseCaseError::Provider(_)` so the HTTP handler
-        // returns 503. See the module docs for rationale.
-        let ranked_facts = self.rerank_survivors(&topic, &survivors).await?;
-
-        // Step 9 — defensive guard: `rerank_survivors` already returns Err
-        // when the provider responds with zero results OR when none of the
-        // returned indices map back to survivors. The guard exists only so
-        // a future port implementation that produces an empty `Vec` through
-        // a different code path STILL honours the fail-closed contract
-        // rather than silently building an empty `<smos-memory>` block.
-        if ranked_facts.is_empty() {
-            return Err(UseCaseError::Provider(ProviderError::InvalidResponse(
-                "reranker returned no usable results".to_string(),
-            )));
-        }
-
-        // Step 10 — session dedup (atomic via SessionRepository::dedup_and_mark).
+        // Steps 8–10: rerank (fail-closed) + defensive guard + session dedup.
+        // An empty `new_facts` after dedup is fail-open (return original).
         let new_facts = self
-            .dedup_against_session(&ranked_facts, session_id, memory_key)
-            .await;
-
-        // Step 11 — short-circuit when no new facts survived dedup.
+            .rerank_and_dedup(&topic, &survivors, session_id, memory_key)
+            .await?;
         if new_facts.is_empty() {
             return Ok(messages);
         }
 
-        // Step 12 — build memory block + inject via the JSON-path entry
+        // Step 11–12 — build memory block + inject via the JSON-path entry
         // point. `inject_value` operates on the raw `Value` and mutates
         // only `messages[0].content`, preserving every other per-message
         // field the typed DTO does not model (name, tool_call_id,
@@ -226,6 +177,124 @@ where
             // a domain bug.
             other => Ok(vec![other]),
         }
+    }
+
+    /// Steps 1–7 of the pipeline: topic gate, embed, vector search,
+    /// prefilter+heat, heat boost.
+    ///
+    /// Returns:
+    /// - `Ok(None)` — fail-open short-circuit (paths 1–6): the caller MUST
+    ///   return the original messages verbatim.
+    /// - `Ok(Some(survivors))` — at least one survivor reached step 7;
+    ///   rerank+dryheat will run next.
+    /// - `Err(_)` — never returned today (every port in this stage is
+    ///   fail-open), kept `Result`-shaped for symmetry with `rerank_and_dedup`
+    ///   and to leave room for a future fail-closed check without churning
+    ///   the caller's `?` chain.
+    async fn retrieve_survivors(
+        &self,
+        typed_projection: &EnrichmentMessages,
+        memory_key: &MemoryKey,
+    ) -> Result<Option<(String, Vec<RetrievalHit>)>, UseCaseError> {
+        // Step 1 + 2 — short-circuit on empty / too-short topic. POC parity:
+        // `if len(topic.strip()) < min_topic_chars`. Trimming prevents
+        // whitespace-only topics (e.g. `"   "`) from passing the gate and
+        // producing a garbage embedding downstream.
+        let topic = topic_extractor::extract_from_messages(typed_projection);
+        let trimmed_len = topic.trim().chars().count();
+        if trimmed_len < self.retrieval_cfg.min_topic_chars {
+            tracing::debug!(
+                chars = trimmed_len,
+                "enrichment skipped: topic below min_topic_chars"
+            );
+            return Ok(None);
+        }
+
+        // Step 3 — embed. None and errors are both fail-open.
+        let embedding = match self.embedder.embed(&topic).await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                tracing::warn!("embedder returned None; skipping enrichment (fail-open)");
+                return Ok(None);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "embedder error; skipping enrichment (fail-open)");
+                return Ok(None);
+            }
+        };
+
+        // Step 4 — vector search. The repo owns the search algorithm
+        // (HNSW + brute-force fallback); we just hand over the embedding.
+        let hits = match self
+            .facts
+            .search_similar(embedding, memory_key, self.retrieval_cfg.top_k_initial)
+            .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(error = %e, "vector search failed; skipping enrichment (fail-open)");
+                return Ok(None);
+            }
+        };
+        if hits.is_empty() {
+            tracing::info!(memory_key = %memory_key, "no vector hits; skipping enrichment");
+            return Ok(None);
+        }
+
+        // Step 5 — pre-filter + heat post-filter (pure domain).
+        let now = self.clock.now();
+        let survivors = prefilter(hits, self.retrieval_cfg, self.heat_cfg, now);
+
+        // Step 6 — short-circuit when no survivors remain.
+        if survivors.is_empty() {
+            return Ok(None);
+        }
+
+        // Step 7 — heat boost. Best-effort: a failure here is logged but does
+        // not abort enrichment (the rerank/dedup still works on stale heat).
+        self.boost_heat(&survivors, memory_key, now).await;
+
+        Ok(Some((topic, survivors)))
+    }
+
+    /// Steps 8–10 of the pipeline: rerank (fail-closed), defensive guard,
+    /// session dedup.
+    ///
+    /// Returns:
+    /// - `Ok(new_facts)` — possibly empty; the caller decides whether to
+    ///   short-circuit (empty) or build the memory block (non-empty).
+    /// - `Err(UseCaseError::Provider(_))` — reranker provider error or an
+    ///   empty/zero-result rerank response (paths 7–8). Propagates to the
+    ///   HTTP handler as 503.
+    async fn rerank_and_dedup(
+        &self,
+        topic: &str,
+        survivors: &[RetrievalHit],
+        session_id: &SessionId,
+        memory_key: &MemoryKey,
+    ) -> Result<Vec<RetrievalHit>, UseCaseError> {
+        // Step 8 — rerank. Fail-closed: a provider error or an empty result
+        // propagates as `UseCaseError::Provider(_)` so the HTTP handler
+        // returns 503. See the module docs for rationale.
+        let ranked_facts = self.rerank_survivors(topic, survivors).await?;
+
+        // Step 8b — defensive guard: `rerank_survivors` already returns Err
+        // when the provider responds with zero results OR when none of the
+        // returned indices map back to survivors. The guard exists only so
+        // a future port implementation that produces an empty `Vec` through
+        // a different code path STILL honours the fail-closed contract
+        // rather than silently building an empty `<smos-memory>` block.
+        if ranked_facts.is_empty() {
+            return Err(UseCaseError::Provider(ProviderError::InvalidResponse(
+                "reranker returned no usable results".to_string(),
+            )));
+        }
+
+        // Step 9–10 — session dedup (atomic via SessionRepository::dedup_and_mark).
+        // Fail-open: on error, no new facts are surfaced (empty Vec).
+        Ok(self
+            .dedup_against_session(&ranked_facts, session_id, memory_key)
+            .await)
     }
 
     /// Heat boost: every survivor gets `heat_base = 1.0`, `last_access_at = now`.
