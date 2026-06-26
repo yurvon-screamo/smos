@@ -55,10 +55,12 @@ pub fn init_tracing_for_server(server_config: &ServerConfig) {
 }
 
 /// Default daily log file name under `<smos_home>/logs/` for the service
-/// entry point. Kept as a constant so the install-time hint and the
-/// appender agree on the operator-facing path.
+/// entry point. `pub` so the `windows_log` diagnostic module
+/// (`smos service status` tail) matches files against the SAME basename
+/// the appender writes — a third copy of the literal would silently
+/// drift if the appender is ever switched (e.g. `rolling::never`).
 #[cfg(windows)]
-const SERVICE_LOG_BASENAME: &str = "smos-service.log";
+pub const SERVICE_LOG_BASENAME: &str = "smos-service.log";
 
 /// Install a file tracing subscriber for the Windows service process. A
 /// service has no console, so the regular `fmt()` subscriber (stdout /

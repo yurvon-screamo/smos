@@ -15,11 +15,17 @@
 //!    HuggingFace into `~/.smos/models/`. Already-present files are skipped,
 //!    so re-running init only retries the failed downloads. See
 //!    [`init_models`].
-//! 4. **llama-server services** — probes `/health` on each configured port
+//! 4. **NLI model** — downloads the quantised DeBERTa-v3 ONNX graph
+//!    (~643 MB) and its tokenizer into `~/.smos/models/` so the first
+//!    `smos serve` / Windows service start does not pay the HF Hub fetch
+//!    on the hot path (and, on Windows, does not attempt it from Session 0
+//!    where the service account has no interactive download path). See
+//!    [`init_nli`].
+//! 5. **llama-server services** — probes `/health` on each configured port
 //!    (28081 embedding, 28082 extraction, 28181 reranker). An already-running
 //!    service is reported as ✓ so the operator sees what `auto_launch` will
 //!    reuse vs. spawn.
-//! 5. **Database** — connects to SurrealDB and applies migrations.
+//! 6. **Database** — connects to SurrealDB and applies migrations.
 //!
 //! This module owns the orchestration + filesystem bootstrap only; the
 //! network probes live in [`crate::cli::init_checks`], the GGUF download in
@@ -38,6 +44,7 @@ use anyhow::Result;
 use crate::cli::init_checks;
 use crate::cli::init_defaults::{DEFAULT_CONFIG_TOML, DEFAULT_PERSONA_BOB_MD};
 use crate::cli::init_models;
+use crate::cli::init_nli;
 use crate::config::SmosConfig;
 use crate::paths::{SMOS_HOME_SUBDIRS, SmosPaths, ensure_smos_home};
 
@@ -72,19 +79,22 @@ pub async fn run_init(no_launch: bool) -> Result<()> {
     println!("SMOS Setup");
     println!("==========");
 
-    println!("\n[1/5] Creating ~/.smos/ directory structure...");
+    println!("\n[1/6] Creating ~/.smos/ directory structure...");
     let fs = bootstrap_filesystem()?;
     print_filesystem_details(&fs);
 
     let config = load_config(&fs.paths.config);
 
-    println!("\n[2/5] Checking llama-server on PATH...");
+    println!("\n[2/6] Checking llama-server on PATH...");
     init_checks::check_llama_server();
 
-    println!("\n[3/5] Downloading GGUF models...");
+    println!("\n[3/6] Downloading GGUF models...");
     init_models::download_gguf_models(&fs.paths);
 
-    println!("\n[4/5] Verifying llama-server...");
+    println!("\n[4/6] Downloading NLI (DeBERTa-v3) model...");
+    init_nli::download_nli_model(&config);
+
+    println!("\n[5/6] Verifying llama-server...");
     if no_launch {
         println!("  ⚠ --no-launch: skipping live launch verification");
         println!("    Readiness probe only — services will be spawned by `smos serve`.");
@@ -107,7 +117,7 @@ pub async fn run_init(no_launch: bool) -> Result<()> {
         init_checks::check_llama_servers().await;
     }
 
-    println!("\n[5/5] Initializing database...");
+    println!("\n[6/6] Initializing database...");
     init_checks::init_database(&config.surreal).await;
 
     print_footer(&fs.paths);

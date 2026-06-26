@@ -28,6 +28,8 @@ use helpers::{
     service_exists, set_description, set_failure_flag, set_failure_recovery,
 };
 
+use super::windows_log::print_recent_service_log;
+
 const DISPLAY_NAME: &str = "SMOS Semantic Memory OS";
 const DESCRIPTION: &str = "SMOS Semantic Memory OS proxy";
 /// Reset the failure counter 24h after the last failure.
@@ -112,6 +114,8 @@ pub async fn status_service() -> Result<()> {
     println!();
     println!("Raw output:");
     println!("{stdout}");
+    println!();
+    print_recent_service_log();
     Ok(())
 }
 
