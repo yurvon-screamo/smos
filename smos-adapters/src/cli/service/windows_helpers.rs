@@ -59,7 +59,8 @@ pub(super) fn validate_windows_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build the logical `binPath` value SCM stores for `smos serve --config <cfg>`.
+/// Build the logical `binPath` value SCM stores for
+/// `smos --run-as-service --config <cfg>`.
 ///
 /// This is the string SCM persists and later hands verbatim to
 /// `CreateProcessW`, so it must already be a valid `CommandLineToArgvW`
@@ -70,6 +71,12 @@ pub(super) fn validate_windows_path(path: &Path) -> Result<()> {
 /// [`validate_windows_path`] already rejects paths ending in `\` (which
 /// would escape the closing quote).
 ///
+/// `--run-as-service` is the hidden flag [`crate::cli::service_runner`]
+/// matches in `main()` to route the SCM-launched process into the SCM
+/// dispatcher instead of the clap CLI: SCM owns the main thread for the
+/// process lifetime, so a tokio runtime created by `#[tokio::main]`
+/// would collide with the runtime built inside `ServiceMain`.
+///
 /// This is NOT the form passed to `sc.exe` on the command line: that form
 /// needs an extra layer of outer quoting plus inner-quote escaping handled
 /// by [`quote_for_argv`].
@@ -78,7 +85,9 @@ pub(super) fn format_bin_path(binary: &Path, config: &Path) -> Result<String> {
     validate_windows_path(config)?;
     let bin_str = binary.to_string_lossy();
     let cfg_str = config.to_string_lossy();
-    Ok(format!("\"{bin_str}\" serve --config \"{cfg_str}\""))
+    Ok(format!(
+        "\"{bin_str}\" --run-as-service --config \"{cfg_str}\""
+    ))
 }
 
 /// Quote `s` as a single argv token using the canonical `CommandLineToArgvW`
@@ -182,6 +191,20 @@ pub(super) fn set_failure_recovery(paths: &ServicePaths) {
     }
 }
 
+/// `sc failureflag <svc> 1` enables recovery actions for graceful stops
+/// with a non-zero exit code, not only for process crashes. SMOS reports
+/// `SERVICE_STOPPED` with `ServiceExitCode::ServiceSpecific(1)` on a
+/// startup error (bad config, unreachable SurrealDB, ORT load failure).
+/// Without this flag SCM treats that as a clean stop and never fires the
+/// restart backoff configured by [`set_failure_recovery`], so the
+/// operator's `failure actions=restart/...` is silently dead. See
+/// SERVICE_CONFIG_FAILURE_ACTIONS_FLAG in the Win32 docs.
+pub(super) fn set_failure_flag(paths: &ServicePaths) {
+    if let Err(e) = run_sc(&["failureflag", &paths.service_name, "1"]) {
+        tracing::warn!("failed to enable failureflag (restart-on-error): {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,7 +227,7 @@ mod tests {
             bin_path.contains("\"C:\\Program Files\\smos\\smos.toml\""),
             "config segment must be quoted so the value survives argv splitting: {bin_path}"
         );
-        assert!(bin_path.contains(" serve --config "));
+        assert!(bin_path.contains(" --run-as-service --config "));
     }
 
     #[test]
@@ -218,7 +241,7 @@ mod tests {
         let bin_path = format_bin_path(&binary, &config).expect("format_bin_path");
         assert_eq!(
             bin_path,
-            "\"C:\\smos\\smos.exe\" serve --config \"C:\\smos\\smos.toml\""
+            "\"C:\\smos\\smos.exe\" --run-as-service --config \"C:\\smos\\smos.toml\""
         );
     }
 
@@ -248,11 +271,11 @@ mod tests {
         // yielding a token sc.exe could not parse — `sc create failed:`
         // with no further detail. `quote_for_argv` produces the canonical
         // single-argv form that `raw_arg` forwards verbatim.
-        let bin_path = "\"C:\\Program Files\\smos\\smos.exe\" serve --config \"C:\\Program Files\\smos\\smos.toml\"";
+        let bin_path = "\"C:\\Program Files\\smos\\smos.exe\" --run-as-service --config \"C:\\Program Files\\smos\\smos.toml\"";
         let argv = quote_for_argv(bin_path);
         assert_eq!(
             argv,
-            "\"\\\"C:\\Program Files\\smos\\smos.exe\\\" serve --config \\\"C:\\Program Files\\smos\\smos.toml\\\"\""
+            "\"\\\"C:\\Program Files\\smos\\smos.exe\\\" --run-as-service --config \\\"C:\\Program Files\\smos\\smos.toml\\\"\""
         );
         // Round-trips through CommandLineToArgvW back to the original.
         assert_eq!(parse_argv(&argv), bin_path);

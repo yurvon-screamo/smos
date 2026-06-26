@@ -7,6 +7,11 @@
 //! - [`init_tracing_for_server`] — picks JSON vs. pretty from
 //!   `ServerConfig::log_format` so the proxy's structured logs match the
 //!   operator's deployment choice.
+//! - [`init_tracing_for_service`] — Windows-only rolling-file appender; a
+//!   service runs with no attached console, so `fmt()` (which targets
+//!   stdout / stderr) would silently drop every log line.
+
+use anyhow::{Context, Result};
 
 use crate::config::ServerConfig;
 
@@ -47,4 +52,50 @@ pub fn init_tracing_for_server(server_config: &ServerConfig) {
                 .init();
         }
     }
+}
+
+/// Default daily log file name under `<smos_home>/logs/` for the service
+/// entry point. Kept as a constant so the install-time hint and the
+/// appender agree on the operator-facing path.
+#[cfg(windows)]
+const SERVICE_LOG_BASENAME: &str = "smos-service.log";
+
+/// Install a file tracing subscriber for the Windows service process. A
+/// service has no console, so the regular `fmt()` subscriber (stdout /
+/// stderr) would lose every log line; this wires a daily rolling file
+/// under `<smos_home>/logs/` instead.
+///
+/// Uses a SYNCHRONOUS appender (not `tracing_appender::non_blocking`):
+/// the service has no throughput pressure, and a non-blocking worker
+/// would drop the last buffered lines on process exit — including the
+/// terminal `error!` that explains why the service failed to start.
+/// Synchronous writes guarantee every log line reaches disk before the
+/// process is allowed to proceed.
+///
+/// Never fatal: if `<smos_home>/logs/` cannot be created or the
+/// subscriber is already installed, the error is propagated but the
+/// caller treats it as non-fatal so the service can still report
+/// `RUNNING` to SCM.
+#[cfg(windows)]
+pub fn init_tracing_for_service() -> Result<()> {
+    use tracing_appender::rolling;
+    use tracing_subscriber::EnvFilter;
+
+    let log_dir = crate::paths::smos_home().join("logs");
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("failed to create service log dir {}", log_dir.display()))?;
+
+    let file_appender = rolling::daily(&log_dir, SERVICE_LOG_BASENAME);
+
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(file_appender)
+        .with_ansi(false)
+        .json()
+        .try_init()
+        .map_err(|e| anyhow::anyhow!("tracing subscriber already installed: {e}"))?;
+    tracing::info!(log_dir = %log_dir.display(), "smos service tracing initialised");
+    Ok(())
 }

@@ -25,7 +25,7 @@ use super::paths::ServicePaths;
 mod helpers;
 use helpers::{
     extract_state, format_bin_path, is_admin, quote_for_argv, run_sc, sc_failure_detail,
-    service_exists, set_description, set_failure_recovery,
+    service_exists, set_description, set_failure_flag, set_failure_recovery,
 };
 
 const DISPLAY_NAME: &str = "SMOS Semantic Memory OS";
@@ -48,6 +48,7 @@ pub async fn install_service(paths: &ServicePaths, user: bool) -> Result<()> {
     create_service(paths)?;
     set_description(paths);
     set_failure_recovery(paths);
+    set_failure_flag(paths);
     // Propagate the start failure so the operator sees a real error
     // instead of a misleading "installed and started" summary. Linux and
     // macOS already propagate via `?` in their installers; Windows used
@@ -172,5 +173,16 @@ fn print_install_summary(paths: &ServicePaths) {
     println!("✓ Service '{}' installed and started", paths.service_name);
     println!("  Binary: {}", paths.binary.display());
     println!("  Config: {}", paths.config.display());
-    println!("  Logs:   Windows Event Viewer > Windows Logs > Application");
+    println!();
+    println!("  IMPORTANT — Windows service gotchas:");
+    println!("    1. Run `smos init` so model files already exist on disk when");
+    println!("       the service starts (avoids a 643 MB DeBERTa / GGUF download");
+    println!("       from inside Session 0, where the service runs).");
+    println!("    2. The service runs as LocalSystem, whose profile is NOT yours:");
+    println!("       `~/.smos` (config, db, models, logs) resolves to");
+    println!("         C:\\Windows\\System32\\config\\systemprofile\\.smos");
+    println!("       Set the per-service env var to redirect it elsewhere:");
+    println!("         sc config smos env=SMOS_HOME=<path>");
+    println!("    3. The service has no console; tracing writes to the rolling");
+    println!("       file `<that path>\\logs\\smos-service.log`, NOT stdout/stderr.");
 }

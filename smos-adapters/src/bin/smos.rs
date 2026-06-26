@@ -35,7 +35,6 @@ use smos::cli::{
     RawImportArgs, ServiceAction, run_audit_cli, run_config, run_dir_import, run_doctor,
     run_finalize, run_import, run_import_git, run_init, run_raw_import, run_server, run_service,
 };
-
 #[derive(Parser, Debug)]
 #[command(
     name = "smos",
@@ -266,8 +265,46 @@ struct OpencodeArgs {
     list: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<ExitCode> {
+fn main() -> anyhow::Result<ExitCode> {
+    // Service short-circuit: when the SCM launches `smos.exe` with
+    // `--run-as-service` (the binPath injected at install time), hand
+    // control to the SCM dispatcher BEFORE the tokio runtime is built.
+    // `service_dispatcher::start` blocks the calling thread for the whole
+    // service lifetime, so the runtime has to be created INSIDE
+    // `ServiceMain` on the SCM worker thread — a tokio runtime already
+    // living on the main thread (e.g. from `#[tokio::main]`) would
+    // collide with that nested runtime, hence the fully synchronous
+    // `main` and the early service return.
+    #[cfg(target_os = "windows")]
+    if is_service_launch() {
+        return run_service_process();
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run_cli())
+}
+
+#[cfg(target_os = "windows")]
+fn is_service_launch() -> bool {
+    std::env::args()
+        .nth(1)
+        .as_deref()
+        .map(|a| a == smos::cli::service_runner::SERVICE_RUN_FLAG)
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn run_service_process() -> anyhow::Result<ExitCode> {
+    smos::cli::service_runner::run_as_service()?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Build the tokio runtime for the CLI path and drive the clap dispatch.
+/// Kept separate from [`main`] so the service branch can avoid paying
+/// for a runtime it cannot use (the dispatcher owns the main thread).
+async fn run_cli() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
 
     // Resolve the effective config path once. `resolve_config_path` already

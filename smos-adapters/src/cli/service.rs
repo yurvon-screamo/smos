@@ -39,7 +39,7 @@ compile_error!("`smos service` only supports Windows, Linux, and macOS");
 pub use paths::{ServicePaths, resolve_paths};
 
 /// Default service identifier across all three platforms.
-const SERVICE_NAME: &str = "smos";
+pub(crate) const SERVICE_NAME: &str = "smos";
 
 /// Concrete control operation to perform on an already-installed service.
 ///

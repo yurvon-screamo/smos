@@ -41,6 +41,8 @@ pub mod llama_runner;
 pub mod raw_import_runner;
 pub mod server_runner;
 pub mod service;
+#[cfg(target_os = "windows")]
+pub mod service_runner;
 pub mod shutdown;
 pub mod tracing_setup;
 

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use smos_application::helpers::person_router::{PersonEntry, ProviderEntry};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::cli::llama_runner::spawn_llama_cpp;
 use crate::cli::shutdown::shutdown_signal;
@@ -50,7 +51,46 @@ type WatcherHandle = Option<(
 type AuditHandle = Option<tokio_cron_scheduler::JobScheduler>;
 
 /// Start the SMOS proxy (default `smos serve` mode).
+///
+/// This is the CLI entry point: it wires Ctrl+C / SIGTERM into a
+/// [`CancellationToken`] and forwards the pair to
+/// [`run_server_with_shutdown`] with no readiness callback. The Windows
+/// service entry point calls [`run_server_with_shutdown`] directly with
+/// a token that is cancelled by the SCM `Stop` control and a callback
+/// that flips the SCM status to `RUNNING` once the HTTP listener is
+/// bound, so the §12 drain ordering is identical regardless of how the
+/// process was launched.
 pub async fn run_server(config_path: &str) -> Result<()> {
+    let shutdown = CancellationToken::new();
+    let cli_token = shutdown.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        cli_token.cancel();
+    });
+    run_server_with_shutdown(config_path, shutdown, None).await
+}
+
+/// Start the SMOS proxy driven by an external shutdown trigger and an
+/// optional readiness hook.
+///
+/// `shutdown` is cancelled by the caller — either from Ctrl+C / SIGTERM
+/// (CLI mode) or from the SCM `Stop` control (Windows service mode). The
+/// rest of the §12 drain sequence (HTTP → extraction → watcher) is
+/// launched off `shutdown.cancelled()`, so a single cancellation point
+/// drives both the axum graceful phase and the SMOS-controlled drains.
+///
+/// `on_ready` fires once after the HTTP listener is bound and before
+/// `serve_with_shutdown` enters its accept loop — the exact moment the
+/// process begins serving traffic. The Windows service mode uses it to
+/// report `SERVICE_RUNNING` to SCM only after the port is live, so SCM
+/// (and any `DependOnService` consumers) do not see "started" while the
+/// server is still mid-init (model load, migrations, llama auto-launch).
+/// CLI mode passes `None`.
+pub async fn run_server_with_shutdown(
+    config_path: &str,
+    shutdown: CancellationToken,
+    on_ready: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<()> {
     // Auto-materialise ~/.smos (or $SMOS_HOME) on boot so the operator can
     // drop a binary on a fresh box and `smos serve` immediately — no
     // mandatory `smos init` step. A failure here is logged but never fatal:
@@ -127,6 +167,10 @@ pub async fn run_server(config_path: &str) -> Result<()> {
         "SMOS HTTP server listening"
     );
 
+    if let Some(notify_ready) = on_ready {
+        notify_ready();
+    }
+
     let extraction_grace =
         std::time::Duration::from_secs(config.server.shutdown_extraction_grace_seconds);
     // B3 unified deadline: captured ONCE before the HTTP + extraction drain
@@ -159,7 +203,7 @@ pub async fn run_server(config_path: &str) -> Result<()> {
         router,
         extraction_supervisor,
         shutdown_deadline,
-        shutdown_signal(),
+        async move { shutdown.cancelled().await },
     )
     .await?;
 
