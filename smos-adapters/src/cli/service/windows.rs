@@ -28,7 +28,9 @@ use helpers::{
     service_exists, set_description, set_failure_flag, set_failure_recovery,
 };
 
+use super::windows_env::set_service_environment;
 use super::windows_log::print_recent_service_log;
+use super::windows_summary::print_install_summary;
 
 const DISPLAY_NAME: &str = "SMOS Semantic Memory OS";
 const DESCRIPTION: &str = "SMOS Semantic Memory OS proxy";
@@ -51,12 +53,26 @@ pub async fn install_service(paths: &ServicePaths, user: bool) -> Result<()> {
     set_description(paths);
     set_failure_recovery(paths);
     set_failure_flag(paths);
+    // Hard error: without the operator-profile env, the LocalSystem
+    // service resolves `~/.smos` to its own systemprofile (empty config,
+    // no models, no db) and crashes on every start with
+    // "providers must not be empty". Reporting "installed and started"
+    // next to that failure is worse than refusing the install.
+    let injected_env = set_service_environment(paths).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to inject operator profile into service env: {e}; \
+             the service would start under LocalSystem with an empty config \
+             and crash-loop. Set SMOS_HOME manually via \
+             `sc config {svc} env=SMOS_HOME=<your path>` and re-run install.",
+            svc = paths.service_name
+        )
+    })?;
     // Propagate the start failure so the operator sees a real error
     // instead of a misleading "installed and started" summary. Linux and
     // macOS already propagate via `?` in their installers; Windows used
     // to silently warn (and warn was a no-op before tracing was wired up).
     run_sc(&["start", &paths.service_name])?;
-    print_install_summary(paths);
+    print_install_summary(paths, injected_env);
     Ok(())
 }
 
@@ -127,22 +143,20 @@ fn create_service(paths: &ServicePaths) -> Result<()> {
         );
     }
     // `format_bin_path` returns the canonical binPath value SCM will store
-    // (each path segment quoted, no outer wrapping). To forward it as a
-    // single argv token to sc.exe we wrap it via `quote_for_argv` (outer
-    // quotes + inner `"` escaped as `\"`) and pass it through `raw_arg`.
+    // (binary quoted, no outer wrapping). To forward it as a single argv
+    // token to sc.exe we wrap it via `quote_for_argv` (outer quotes +
+    // inner `"` escaped as `\"`) and pass it through `raw_arg`.
     //
     // `raw_arg` is critical: `Command::arg` would re-wrap the value in an
     // extra quote layer and double-escape the inner `\"` sequences, so
     // sc.exe receives a token it cannot parse back. That produced
-    // `sc create failed:` with no further detail — sc.exe aborts before
-    // reaching CreateService because the inner quotes split the binPath
-    // value at the first segment boundary and the trailing
-    // `serve --config "..."` no longer matches any known parameter.
+    // `sc create failed:` with no further detail.
     //
-    // sc.exe syntax is `binPath= "<value>"` — a space AFTER `binPath=`, then
-    // the value in quotes. We emit `binPath=` and the value as separate
-    // argv tokens so sc.exe's parameter scanner matches `binPath=`.
-    let bin_path_value = format_bin_path(&paths.binary, &paths.config)?;
+    // sc.exe syntax is `binPath= "<value>"` — a space AFTER `binPath=`,
+    // then the value in quotes. We emit `binPath=` and the value as
+    // separate argv tokens so sc.exe's parameter scanner matches
+    // `binPath=`.
+    let bin_path_value = format_bin_path(&paths.binary)?;
     let output = Command::new("sc")
         .arg("create")
         .arg(&paths.service_name)
@@ -164,29 +178,10 @@ fn create_service(paths: &ServicePaths) -> Result<()> {
         eprintln!("smos version: {}", env!("CARGO_PKG_VERSION"));
         eprintln!("generated binPath: {}", bin_path_value);
         eprintln!("binary path: {}", paths.binary.display());
-        eprintln!("config path: {}", paths.config.display());
         eprintln!("sc detail: {}", detail);
         eprintln!("------------------------------");
 
         bail!("sc create failed: {}", detail);
     }
     Ok(())
-}
-
-fn print_install_summary(paths: &ServicePaths) {
-    println!("✓ Service '{}' installed and started", paths.service_name);
-    println!("  Binary: {}", paths.binary.display());
-    println!("  Config: {}", paths.config.display());
-    println!();
-    println!("  IMPORTANT — Windows service gotchas:");
-    println!("    1. Run `smos init` so model files already exist on disk when");
-    println!("       the service starts (avoids a 643 MB DeBERTa / GGUF download");
-    println!("       from inside Session 0, where the service runs).");
-    println!("    2. The service runs as LocalSystem, whose profile is NOT yours:");
-    println!("       `~/.smos` (config, db, models, logs) resolves to");
-    println!("         C:\\Windows\\System32\\config\\systemprofile\\.smos");
-    println!("       Set the per-service env var to redirect it elsewhere:");
-    println!("         sc config smos env=SMOS_HOME=<path>");
-    println!("    3. The service has no console; tracing writes to the rolling");
-    println!("       file `<that path>\\logs\\smos-service.log`, NOT stdout/stderr.");
 }

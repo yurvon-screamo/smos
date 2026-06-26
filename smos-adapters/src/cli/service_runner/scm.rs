@@ -59,7 +59,22 @@ define_windows_service!(ffi_service_main, service_main);
 /// on error; a pre-registration failure leaves the service in
 /// `START_PENDING` and SCM applies its own timeout.
 fn service_main(arguments: Vec<OsString>) {
-    let config_path = extract_config_from_args(arguments);
+    // The config path is resolved via the SAME chain the CLI uses
+    // (`--config` override > `./smos.toml` > `~/.smos/config.toml`) so
+    // the service honours the operator's SMOS_HOME (injected into the
+    // service registry at install time) instead of needing a brittle
+    // absolute path baked into binPath. Without this fallback the
+    // service would `SmosConfig::load("")`, hit the defaults branch, and
+    // fail validation with "providers must not be empty".
+    let cli_override = extract_config_from_args(arguments);
+    let override_opt = if cli_override.is_empty() {
+        None
+    } else {
+        Some(cli_override.as_str())
+    };
+    let config_path = crate::cli::init_runner::resolve_effective_config_path(override_opt)
+        .to_string_lossy()
+        .into_owned();
     if let Err(e) = run_service_body(config_path) {
         tracing::error!(error = %format!("{e:#}"), "smos service exited with error");
     }

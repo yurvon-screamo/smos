@@ -59,14 +59,13 @@ pub(super) fn validate_windows_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build the logical `binPath` value SCM stores for
-/// `smos --run-as-service --config <cfg>`.
+/// Build the logical `binPath` value SCM stores for `smos --run-as-service`.
 ///
 /// This is the string SCM persists and later hands verbatim to
 /// `CreateProcessW`, so it must already be a valid `CommandLineToArgvW`
-/// command line: each path segment containing spaces is wrapped in its own
-/// pair of quotes so argv splitting at service start keeps the binary and
-/// config as single tokens. Backslashes are left as-is — they are only
+/// command line: the binary path is wrapped in quotes so argv splitting
+/// at service start keeps the binary as a single token even when it
+/// contains spaces. Backslashes are left as-is — they are only
 /// significant when immediately preceding a `"`, and
 /// [`validate_windows_path`] already rejects paths ending in `\` (which
 /// would escape the closing quote).
@@ -77,17 +76,21 @@ pub(super) fn validate_windows_path(path: &Path) -> Result<()> {
 /// process lifetime, so a tokio runtime created by `#[tokio::main]`
 /// would collide with the runtime built inside `ServiceMain`.
 ///
+/// The service does NOT receive a `--config` path. The config is
+/// resolved at service start via the same `resolve_effective_config_path`
+/// chain the CLI uses (`./smos.toml` then `~/.smos/config.toml`), so the
+/// operator's SMOS_HOME (injected into the service registry at install
+/// time, see [`super::super::windows_env`]) routes the service to the
+/// operator's config without a brittle absolute path baked into binPath
+/// at install time.
+///
 /// This is NOT the form passed to `sc.exe` on the command line: that form
 /// needs an extra layer of outer quoting plus inner-quote escaping handled
 /// by [`quote_for_argv`].
-pub(super) fn format_bin_path(binary: &Path, config: &Path) -> Result<String> {
+pub(super) fn format_bin_path(binary: &Path) -> Result<String> {
     validate_windows_path(binary)?;
-    validate_windows_path(config)?;
     let bin_str = binary.to_string_lossy();
-    let cfg_str = config.to_string_lossy();
-    Ok(format!(
-        "\"{bin_str}\" --run-as-service --config \"{cfg_str}\""
-    ))
+    Ok(format!("\"{bin_str}\" --run-as-service"))
 }
 
 /// Quote `s` as a single argv token using the canonical `CommandLineToArgvW`
@@ -211,56 +214,48 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn format_bin_path_quotes_both_segments_so_spaces_survive() {
+    fn format_bin_path_quotes_binary_so_spaces_survive() {
         // Regression: an unquoted binary path broke CreateProcess when
         // SMOS was installed under `C:\Program Files\` — SCM split the
         // binPath at the first space and tried to exec a non-existent
         // `C:\Program` binary (CreateProcess error 193).
         let binary = PathBuf::from("C:\\Program Files\\smos\\smos.exe");
-        let config = PathBuf::from("C:\\Program Files\\smos\\smos.toml");
-        let bin_path = format_bin_path(&binary, &config).expect("format_bin_path");
+        let bin_path = format_bin_path(&binary).expect("format_bin_path");
         assert!(
             bin_path.starts_with("\"C:\\Program Files\\smos\\smos.exe\""),
             "binary segment must be quoted so SCM does not split at the space: {bin_path}"
         );
-        assert!(
-            bin_path.contains("\"C:\\Program Files\\smos\\smos.toml\""),
-            "config segment must be quoted so the value survives argv splitting: {bin_path}"
-        );
-        assert!(bin_path.contains(" --run-as-service --config "));
+        assert!(bin_path.ends_with(" --run-as-service"));
+        // The config path is NOT baked into binPath anymore — the service
+        // resolves it via resolve_effective_config_path at start time so
+        // the operator's SMOS_HOME routes it correctly.
+        assert!(!bin_path.contains("--config"));
     }
 
     #[test]
     fn format_bin_path_yields_canonical_command_line() {
-        // End-to-end shape of the binPath value SCM will store. Each path
-        // segment is independently quoted; backslashes are NOT doubled
-        // (doubling is the job of `quote_for_argv` when the value is
-        // forwarded to sc.exe as a raw argv token).
+        // End-to-end shape of the binPath value SCM will store. The
+        // binary is quoted; backslashes are NOT doubled (doubling is the
+        // job of `quote_for_argv` when the value is forwarded to sc.exe
+        // as a raw argv token).
         let binary = PathBuf::from("C:\\smos\\smos.exe");
-        let config = PathBuf::from("C:\\smos\\smos.toml");
-        let bin_path = format_bin_path(&binary, &config).expect("format_bin_path");
-        assert_eq!(
-            bin_path,
-            "\"C:\\smos\\smos.exe\" --run-as-service --config \"C:\\smos\\smos.toml\""
-        );
+        let bin_path = format_bin_path(&binary).expect("format_bin_path");
+        assert_eq!(bin_path, "\"C:\\smos\\smos.exe\" --run-as-service");
     }
 
     #[test]
-    fn format_bin_path_rejects_path_with_embedded_quote() {
-        let bad = PathBuf::from("C:\\smos\"evil.exe");
-        let ok = PathBuf::from("C:\\smos\\smos.toml");
-        assert!(format_bin_path(&bad, &ok).is_err());
-        assert!(format_bin_path(&ok, &bad).is_err());
+    fn format_bin_path_rejects_binary_with_embedded_quote() {
+        let bad_binary = PathBuf::from("C:\\smos\"evil.exe");
+        assert!(format_bin_path(&bad_binary).is_err());
     }
 
     #[test]
-    fn format_bin_path_rejects_trailing_backslash() {
-        // A trailing `\` would escape the closing quote SCM wraps around
-        // binPath, turning it into a literal `\"` that breaks argv parsing.
-        let bad = PathBuf::from("C:\\smos\\");
-        let ok = PathBuf::from("C:\\smos\\smos.toml");
-        assert!(format_bin_path(&bad, &ok).is_err());
-        assert!(format_bin_path(&ok, &bad).is_err());
+    fn format_bin_path_rejects_binary_with_trailing_backslash() {
+        // A trailing `\` on the binary would escape the closing quote SCM
+        // wraps around binPath, turning it into a literal `\"` that
+        // breaks argv parsing.
+        let bad_binary = PathBuf::from("C:\\smos\\");
+        assert!(format_bin_path(&bad_binary).is_err());
     }
 
     #[test]
@@ -271,11 +266,11 @@ mod tests {
         // yielding a token sc.exe could not parse — `sc create failed:`
         // with no further detail. `quote_for_argv` produces the canonical
         // single-argv form that `raw_arg` forwards verbatim.
-        let bin_path = "\"C:\\Program Files\\smos\\smos.exe\" --run-as-service --config \"C:\\Program Files\\smos\\smos.toml\"";
+        let bin_path = "\"C:\\Program Files\\smos\\smos.exe\" --run-as-service";
         let argv = quote_for_argv(bin_path);
         assert_eq!(
             argv,
-            "\"\\\"C:\\Program Files\\smos\\smos.exe\\\" --run-as-service --config \\\"C:\\Program Files\\smos\\smos.toml\\\"\""
+            "\"\\\"C:\\Program Files\\smos\\smos.exe\\\" --run-as-service\""
         );
         // Round-trips through CommandLineToArgvW back to the original.
         assert_eq!(parse_argv(&argv), bin_path);

@@ -21,7 +21,11 @@ pub mod templates;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
+mod windows_env;
+#[cfg(target_os = "windows")]
 mod windows_log;
+#[cfg(target_os = "windows")]
+mod windows_summary;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
