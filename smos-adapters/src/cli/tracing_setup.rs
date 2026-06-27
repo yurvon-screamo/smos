@@ -35,22 +35,33 @@ pub fn init_tracing_default() {
 /// `log_format = "json"` emits structured JSON logs (production / log
 /// shipping); any other value emits human-readable colourised output for
 /// local development.
+///
+/// Uses `try_init` (not `init`) so a caller that already installed a
+/// subscriber — the Windows service entry installs a file-appender
+/// subscriber BEFORE `run_server_with_shutdown` runs — does NOT panic
+/// here. `init` panics on a second subscriber install, which under the
+/// service path aborted the process mid-start with WIN32_EXIT_CODE 1067
+/// and no log line (the panic happened inside the tokio runtime, before
+/// service_main could log it).
 pub fn init_tracing_for_server(server_config: &ServerConfig) {
     use tracing_subscriber::EnvFilter;
 
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
-    match server_config.log_format.as_str() {
-        "pretty" => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
-        }
-        _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-        }
+    let result = match server_config.log_format.as_str() {
+        "pretty" => tracing_subscriber::fmt().with_env_filter(filter).try_init(),
+        _ => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .try_init(),
+    };
+    // An Err here means a subscriber is already installed (the service
+    // path). try_init can also Err when a `log`-compatible logger was
+    // set globally via `log::set_logger`, but no SMOS code path does
+    // that, so the only realistic Err is the already-installed case.
+    if let Err(e) = result {
+        tracing::debug!(error = %e, "tracing subscriber already installed; keeping existing");
     }
 }
 

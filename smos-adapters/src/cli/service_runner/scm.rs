@@ -85,8 +85,53 @@ fn service_main(arguments: Vec<OsString>) {
     let config_path = crate::cli::init_runner::resolve_effective_config_path(override_opt)
         .to_string_lossy()
         .into_owned();
-    if let Err(e) = run_service_body(config_path) {
-        tracing::error!(error = %format!("{e:#}"), "smos service exited with error");
+    // catch_unwind so a panic inside run_service_body (e.g. a future
+    // `.expect` in a third-party crate) is OBSERVED by the operator via
+    // `smos service status` instead of aborting the process silently —
+    // WIN32_EXIT_CODE 1067 with no log line is the failure mode this
+    // guards against. The tracing subscriber installed by
+    // init_tracing_for_service is already live, so the panic payload
+    // reaches the same rolling-file log every other service line does.
+    //
+    // NOTE: STOPPED is NOT reported to SCM on a caught panic — the
+    // status_handle lives inside run_service_body and is not in scope
+    // here. SCM therefore continues to see START_PENDING until
+    // START_PENDING_WAIT_HINT (120s) elapses, then TerminateProcess.
+    // The improvement over the bare-panic status quo is observability
+    // (the operator sees the panic message in the log); the SCM-side
+    // transition stays the same. Lifting the handle into service_main
+    // is a follow-up.
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_service_body(config_path)
+    }));
+    match panic_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(error = %format!("{e:#}"), "smos service exited with error");
+        }
+        Err(payload) => {
+            tracing::error!(
+                panic = %panic_payload_string(payload),
+                "smos service panicked"
+            );
+        }
+    }
+}
+
+/// Best-effort string extraction out of a `catch_unwind` payload. Covers
+/// the two idiomatic panic shapes — `panic!("literal")` (`&'static str`)
+/// and `panic!("{}", x)` / `.expect("...")` (`String`); everything else
+/// falls back to a fixed marker so the log line still goes out.
+fn panic_payload_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    // `downcast` consumes the box and returns it back in the Err arm,
+    // so the chain is ownership-correct: try String, on miss recover
+    // the box and try `&'static str`, on miss return the fallback.
+    match payload.downcast::<String>() {
+        Ok(s) => *s,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(s) => (*s).to_string(),
+            Err(_) => "<non-string panic payload>".to_string(),
+        },
     }
 }
 
@@ -295,5 +340,23 @@ mod tests {
     #[test]
     fn service_run_flag_is_stable() {
         assert_eq!(SERVICE_RUN_FLAG, "--run-as-service");
+    }
+
+    #[test]
+    fn panic_payload_string_extracts_string_panic() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("explode!".to_string());
+        assert_eq!(panic_payload_string(payload), "explode!");
+    }
+
+    #[test]
+    fn panic_payload_string_extracts_static_str_panic() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("static literal");
+        assert_eq!(panic_payload_string(payload), "static literal");
+    }
+
+    #[test]
+    fn panic_payload_string_falls_back_for_non_string_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42_i32);
+        assert_eq!(panic_payload_string(payload), "<non-string panic payload>");
     }
 }
