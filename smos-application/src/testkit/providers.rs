@@ -7,7 +7,8 @@ use smos_domain::NliResult;
 use smos_domain::chat::ToolCall;
 
 use crate::errors::ProviderError;
-use crate::ports::{EmbeddingProvider, LlmExtractor, NliClassifier};
+use crate::ports::{EmbeddingProvider, LlmExtractor, NliClassifier, RerankProvider};
+use crate::types::RerankResult;
 
 /// LLM extractor that pops pre-scripted results in FIFO order and counts
 /// invocations. When the script is exhausted, subsequent calls return an empty
@@ -166,6 +167,95 @@ impl NliClassifier for ScriptedNliClassifier {
                     .unwrap()
                     .push((premise.to_string(), hypothesis.to_string()));
                 resolver(premise, hypothesis)
+            }
+        }
+    }
+}
+
+/// Closure type used by the matcher variant of [`ScriptedReranker`].
+type RerankResolver =
+    Box<dyn Fn(&str, &[String], usize) -> Result<Vec<RerankResult>, ProviderError> + Send + Sync>;
+
+/// Scripted reranker, parity-shaped with [`ScriptedNliClassifier`]:
+/// - [`ScriptedReranker::new`] (FIFO): each call pops the next scripted
+///   result set in order. When the script is exhausted the reranker returns
+///   `Ok(vec![])` (the legitimate "provider found nothing" shape) so the
+///   fail-closed contract of the rerank stage is exercisable without an
+///   explicit error — mirroring a real provider that responded with zero
+///   results rather than a transport failure.
+/// - [`ScriptedReranker::matching`] (Match): each call dispatches to the
+///   supplied closure. Use when survivor ordering is not deterministic
+///   (`HashMap` order) and the test keys scores on the document text, or to
+///   honour the `top_k` argument for truncation assertions.
+///
+/// Both modes record every `(query, document_count, top_k)` triple so tests
+/// can assert on the exact calls the use case made.
+pub enum ScriptedReranker {
+    Fifo {
+        results: Mutex<Vec<Result<Vec<RerankResult>, ProviderError>>>,
+        calls: Mutex<Vec<(String, usize, usize)>>,
+    },
+    Match {
+        resolver: RerankResolver,
+        calls: Mutex<Vec<(String, usize, usize)>>,
+    },
+}
+
+impl ScriptedReranker {
+    pub fn new(results: Vec<Result<Vec<RerankResult>, ProviderError>>) -> Self {
+        Self::Fifo {
+            results: Mutex::new(results),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn matching<F>(resolver: F) -> Self
+    where
+        F: Fn(&str, &[String], usize) -> Result<Vec<RerankResult>, ProviderError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::Match {
+            resolver: Box::new(resolver),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Recorded `(query, document_count, top_k)` triples in invocation order.
+    pub fn calls(&self) -> Vec<(String, usize, usize)> {
+        match self {
+            Self::Fifo { calls, .. } | Self::Match { calls, .. } => calls.lock().unwrap().clone(),
+        }
+    }
+}
+
+impl RerankProvider for ScriptedReranker {
+    async fn rerank(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_k: usize,
+    ) -> Result<Vec<RerankResult>, ProviderError> {
+        match self {
+            Self::Fifo { results, calls } => {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((query.to_string(), documents.len(), top_k));
+                let mut queue = results.lock().unwrap();
+                if queue.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    queue.remove(0)
+                }
+            }
+            Self::Match { resolver, calls } => {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((query.to_string(), documents.len(), top_k));
+                resolver(query, documents, top_k)
             }
         }
     }

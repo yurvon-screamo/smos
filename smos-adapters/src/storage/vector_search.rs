@@ -128,7 +128,7 @@ impl SurrealStore {
         // application-controlled, so this is safe).
         let sql = format!(
             "SELECT id, content, memory_key, status, confidence,
-                    valid_until, heat_base, last_access_at,
+                    valid_until, heat_base, last_access_at, extracted_at, conflicts_with,
                     vector::distance::knn() AS distance
              FROM fact
              WHERE embedding <|{over_fetch}, 64|> $embedding
@@ -167,7 +167,7 @@ impl SurrealStore {
         // with `memory_key` / `valid_until` into one index seek.
         let sql = format!(
             "SELECT id, content, memory_key, status, confidence,
-                    valid_until, heat_base, last_access_at,
+                    valid_until, heat_base, last_access_at, extracted_at, conflicts_with,
                     (1.0 - vector::similarity::cosine(embedding, $embedding)) AS distance
              FROM fact
              WHERE memory_key = $mk AND {status_pred} AND valid_until = NONE

@@ -18,7 +18,7 @@ pub mod sessions;
 pub use clock::{FixedClock, NoOpDelay};
 pub use facts::InMemoryFacts;
 pub use providers::{
-    ConstantEmbedder, RecordingEmbedder, ScriptedExtractor, ScriptedNliClassifier,
+    ConstantEmbedder, RecordingEmbedder, ScriptedExtractor, ScriptedNliClassifier, ScriptedReranker,
 };
 pub use sessions::InMemorySessions;
 

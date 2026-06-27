@@ -40,6 +40,7 @@ pub mod init_path;
 pub mod init_runner;
 pub mod llama_runner;
 pub mod raw_import_runner;
+pub mod search_runner;
 pub mod server_runner;
 pub mod service;
 #[cfg(target_os = "windows")]
@@ -57,5 +58,6 @@ pub use import_runner::{ImportArgs, run_import};
 pub use init_defaults::DEFAULT_CONFIG_TOML;
 pub use init_runner::{resolve_effective_config_path, run_init};
 pub use raw_import_runner::{RawImportArgs, run_raw_import};
+pub use search_runner::{OutputFormat, SearchArgs, run_search};
 pub use server_runner::run_server;
 pub use service::{ServiceAction, run_service};

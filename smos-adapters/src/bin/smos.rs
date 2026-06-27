@@ -32,8 +32,9 @@ use clap::{Parser, Subcommand};
 
 use smos::cli::{
     AuditArgs, AuditProvider, ConfigAction, DoctorArgs, ImportArgs, ImportDirArgs, ImportGitArgs,
-    RawImportArgs, ServiceAction, run_audit_cli, run_config, run_dir_import, run_doctor,
-    run_finalize, run_import, run_import_git, run_init, run_raw_import, run_server, run_service,
+    OutputFormat, RawImportArgs, SearchArgs, ServiceAction, run_audit_cli, run_config,
+    run_dir_import, run_doctor, run_finalize, run_import, run_import_git, run_init, run_raw_import,
+    run_search, run_server, run_service,
 };
 #[derive(Parser, Debug)]
 #[command(
@@ -146,6 +147,34 @@ enum Command {
         memory_key: Option<String>,
     },
 
+    /// Read-only retrieval: print reranked accepted facts for a query as JSON.
+    ///
+    /// Requires a reachable embedding endpoint (`[embedding]`) and reranker
+    /// (`[reranker]`), and that the DB already holds Accepted facts (run
+    /// `smos import raw` then `smos finalize` to populate it). Strictly
+    /// sequential per database path: SurrealDB/RocksDB takes a single-writer
+    /// lock at connect time.
+    Search {
+        /// Query text. Read from stdin when `--stdin` is passed instead.
+        query: Option<String>,
+
+        /// Read the query from stdin instead of the positional argument.
+        #[arg(long)]
+        stdin: bool,
+
+        /// Memory namespace (project key) to search within. Required.
+        #[arg(long)]
+        person: String,
+
+        /// Override `retrieval.top_k_final` (the rerank depth).
+        #[arg(long)]
+        top_k: Option<usize>,
+
+        /// Output format. Only `json` today; reserved for future formats.
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+
     /// Manage SMOS as a system service (install/uninstall/start/stop/status).
     Service {
         #[command(subcommand)]
@@ -227,9 +256,12 @@ enum ImportSub {
 /// `smos import opencode …` form so the two paths stay DRY.
 #[derive(clap::Args, Debug)]
 struct OpencodeArgs {
-    /// opencode session id (e.g. `ses_abc123`). Required unless `--list`
-    /// or `--from-file` is given.
-    #[arg(required_unless_present_any = ["list", "from_file"])]
+    /// opencode session id (e.g. `ses_abc123`). Declared optional at the
+    /// clap level on purpose: a `required`-style attribute here is checked
+    /// even when the sibling `subcommand` of [`Command::Import`] is present,
+    /// which would falsely reject `import raw`, `import directory`, and
+    /// `import git`. The "required unless --list / --from-file" contract is
+    /// enforced at runtime by [`validate_opencode_args`].
     session_id: Option<String>,
 
     /// Import from a local opencode-export JSON file instead of discovery.
@@ -334,10 +366,12 @@ async fn run_cli() -> anyhow::Result<ExitCode> {
         } => {
             match subcommand {
                 None => {
+                    validate_opencode_args(&opencode_args)?;
                     let args = opencode_args_to_import_args(opencode_args);
                     run_import(&config_path, args).await?;
                 }
                 Some(ImportSub::Opencode(oa)) => {
+                    validate_opencode_args(&oa)?;
                     let args = opencode_args_to_import_args(oa);
                     run_import(&config_path, args).await?;
                 }
@@ -393,6 +427,24 @@ async fn run_cli() -> anyhow::Result<ExitCode> {
             memory_key,
         } => {
             run_finalize(&config_path, &session_id, memory_key.as_deref()).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Search {
+            query,
+            stdin,
+            person,
+            top_k,
+            format,
+        } => {
+            let body = read_search_query(query, stdin)?;
+            let fmt = OutputFormat::parse(&format)?;
+            let args = SearchArgs {
+                query: body,
+                memory_key: person,
+                top_k,
+                format: fmt,
+            };
+            run_search(&config_path, args).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::ImportGit { url } => {
@@ -451,6 +503,59 @@ fn opencode_args_to_import_args(oa: OpencodeArgs) -> ImportArgs {
     }
 }
 
+/// Enforce the historical "session_id required unless `--list` /
+/// `--from-file`" contract for the opencode import flavours at runtime.
+///
+/// This rule used to live on the `session_id` field as a clap
+/// `required_unless_present_any`, but clap evaluates that attribute even when
+/// a sibling `subcommand` of [`Command::Import`] is present — so `smos import
+/// raw`, `import directory`, and `import git` were all falsely rejected with
+/// a missing `<SESSION_ID>` error. Moving the check here leaves the
+/// subcommand shapes free of the phantom positional while preserving the
+/// bare `smos import <session_id>` and explicit `smos import opencode
+/// <session_id>` contracts. The subcommand flavours (raw / directory / git)
+/// never reach this function.
+///
+/// Mirrors the defence-in-depth guard in
+/// `smos::cli::import_runner::resolve_transcript`; the two layers
+/// intentionally carry different messages — this one for a clap-equivalent
+/// CLI UX at the dispatch site, the runner's for direct (clap-free) callers
+/// of `run_import`.
+fn validate_opencode_args(oa: &OpencodeArgs) -> anyhow::Result<()> {
+    if oa.session_id.is_none() && oa.from_file.is_none() && !oa.list {
+        anyhow::bail!(
+            "the following required arguments were not provided:\n  <SESSION_ID>\n\
+             \nUsage: smos import <SESSION_ID>\n\
+             \nPass a session id, or use --list / --from-file, or pick a subcommand \
+             (raw | directory | git | opencode)."
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the `smos search` query body. When `--stdin` is given the body is
+/// read from stdin (positional `query` must be `None`); otherwise the
+/// positional argument is used verbatim. Unlike [`read_raw_text`], an empty
+/// body is permitted — the search use case returns an empty array for it, so
+/// a blank query is a valid `[]`-producing invocation rather than an error.
+fn read_search_query(query: Option<String>, stdin: bool) -> anyhow::Result<String> {
+    let body = if stdin {
+        use std::io::Read;
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    } else {
+        query.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no query: pass a positional argument or use --stdin to read from stdin"
+            )
+        })?
+    };
+    // Trim only trailing newlines so multi-line queries keep their internal
+    // shape; the use case applies its own `trim()` for the min-topic-chars gate.
+    Ok(body.trim_end_matches(['\n', '\r']).to_string())
+}
+
 /// Resolve the raw-import text body. When `--stdin` is given the body is
 /// read from stdin (positional `text` must be `None`); otherwise the
 /// positional argument is used verbatim. An empty body is rejected so the
@@ -472,4 +577,194 @@ fn read_raw_text(text: Option<String>, stdin: bool) -> anyhow::Result<String> {
         anyhow::bail!("raw import text is empty; nothing to extract");
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        let mut full = vec!["smos"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).expect("CLI should parse")
+    }
+
+    fn parse_err(args: &[&str]) -> String {
+        let mut full = vec!["smos"];
+        full.extend_from_slice(args);
+        match Cli::try_parse_from(full) {
+            Ok(_) => panic!("expected parse error for {:?}", args),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    fn into_bare_opencode(cli: Cli) -> (Option<ImportSub>, OpencodeArgs) {
+        match cli.command {
+            Command::Import {
+                subcommand,
+                opencode_args,
+            } => (subcommand, opencode_args),
+            other => panic!("expected Command::Import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_raw_positional_parses_without_session_id() {
+        // Regression: the flatten'd OpencodeArgs.session_id used to carry a
+        // clap `required_unless_present_any`, which clap checked even with a
+        // sibling subcommand present — so this rejected with a missing
+        // <SESSION_ID> error.
+        let cli = parse(&["import", "raw", "I like Python."]);
+        match into_bare_opencode(cli) {
+            (
+                Some(ImportSub::Raw {
+                    text,
+                    stdin,
+                    memory_key,
+                }),
+                _,
+            ) => {
+                assert_eq!(text.as_deref(), Some("I like Python."));
+                assert!(!stdin);
+                assert_eq!(memory_key, "shared");
+            }
+            (other, _) => panic!("expected Raw subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_raw_stdin_parses_without_session_id() {
+        // The exact shape the BEAM adapter invokes for every chunk.
+        let cli = parse(&["import", "raw", "--stdin", "--memory-key", "diagtest"]);
+        match into_bare_opencode(cli) {
+            (
+                Some(ImportSub::Raw {
+                    text,
+                    stdin,
+                    memory_key,
+                }),
+                _,
+            ) => {
+                assert!(text.is_none());
+                assert!(stdin);
+                assert_eq!(memory_key, "diagtest");
+            }
+            (other, _) => panic!("expected Raw subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_directory_parses_without_session_id() {
+        let cli = parse(&["import", "directory", "/tmp/docs"]);
+        assert!(matches!(
+            into_bare_opencode(cli),
+            (Some(ImportSub::Directory { .. }), _)
+        ));
+    }
+
+    #[test]
+    fn import_git_parses_without_session_id() {
+        let cli = parse(&["import", "git", "https://example.invalid/x.git"]);
+        assert!(matches!(
+            into_bare_opencode(cli),
+            (Some(ImportSub::Git { .. }), _)
+        ));
+    }
+
+    #[test]
+    fn bare_import_without_session_id_fails_runtime_validation() {
+        // `smos import` with no subcommand and no session_id still must be
+        // rejected — now at runtime by validate_opencode_args instead of by
+        // clap, preserving the historical contract. The message keeps the
+        // clap-style body so operators recognise it; the exit code moves
+        // from clap's 2 to anyhow's 1 (accepted per task spec).
+        let (subcommand, oa) = into_bare_opencode(parse(&["import"]));
+        assert!(subcommand.is_none());
+        let msg = validate_opencode_args(&oa).unwrap_err().to_string();
+        assert!(
+            msg.contains("SESSION_ID"),
+            "error should mention SESSION_ID: {msg}"
+        );
+        assert!(
+            msg.contains("required arguments were not provided"),
+            "error should keep the clap-style body: {msg}"
+        );
+    }
+
+    #[test]
+    fn explicit_opencode_without_session_id_fails_runtime_validation() {
+        // The explicit `smos import opencode` flavour shares OpencodeArgs,
+        // so the same runtime contract applies.
+        let cli = parse(&["import", "opencode"]);
+        match cli.command {
+            Command::Import {
+                subcommand: Some(ImportSub::Opencode(oa)),
+                ..
+            } => {
+                let msg = validate_opencode_args(&oa).unwrap_err().to_string();
+                assert!(msg.contains("SESSION_ID"), "{msg}");
+                assert!(
+                    msg.contains("required arguments were not provided"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected explicit Import opencode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_opencode_with_session_id_passes_validation() {
+        // Positive mirror of the explicit-opencode failure case: locks the
+        // dispatch success path for `Some(ImportSub::Opencode(oa))`.
+        let cli = parse(&["import", "opencode", "ses_abc"]);
+        match cli.command {
+            Command::Import {
+                subcommand: Some(ImportSub::Opencode(oa)),
+                ..
+            } => {
+                assert_eq!(oa.session_id.as_deref(), Some("ses_abc"));
+                validate_opencode_args(&oa).expect("explicit opencode + session_id => ok");
+            }
+            other => panic!("expected explicit Import opencode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_import_with_session_id_passes_validation() {
+        let (subcommand, oa) = into_bare_opencode(parse(&["import", "ses_abc"]));
+        assert!(subcommand.is_none());
+        assert_eq!(oa.session_id.as_deref(), Some("ses_abc"));
+        validate_opencode_args(&oa).expect("session id present => ok");
+    }
+
+    #[test]
+    fn bare_import_with_list_passes_validation() {
+        let (subcommand, oa) = into_bare_opencode(parse(&["import", "--list"]));
+        assert!(subcommand.is_none());
+        assert!(oa.list);
+        validate_opencode_args(&oa).expect("--list => ok");
+    }
+
+    #[test]
+    fn bare_import_with_from_file_passes_validation() {
+        let (subcommand, oa) = into_bare_opencode(parse(&["import", "--from-file", "x.json"]));
+        assert!(subcommand.is_none());
+        assert_eq!(oa.from_file.as_deref(), Some("x.json"));
+        validate_opencode_args(&oa).expect("--from-file => ok");
+    }
+
+    #[test]
+    fn import_help_still_lists_subcommands_and_session_id() {
+        // The Usage block of `import --help` must still surface the four
+        // subcommands and the positional SESSION_ID (now optional, but
+        // present) so operator muscle memory keeps working.
+        let help = parse_err(&["import", "--help"]);
+        for token in ["raw", "directory", "git", "opencode", "SESSION_ID"] {
+            assert!(
+                help.contains(token),
+                "import --help must mention {token:?}:\n{help}"
+            );
+        }
+    }
 }

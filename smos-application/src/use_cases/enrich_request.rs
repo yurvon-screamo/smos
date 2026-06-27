@@ -53,11 +53,12 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use smos_domain::config::{HeatConfig, RetrievalConfig};
-use smos_domain::{FactId, FactStatus, Heat, MemoryKey, SessionId, Timestamp};
+use smos_domain::{FactId, Heat, MemoryKey, SessionId, Timestamp};
 
 use crate::errors::{ProviderError, UseCaseError};
 use crate::helpers::memory_block::{self, MemoryBlockEntry};
 use crate::helpers::request_enricher;
+use crate::helpers::retrieval_pipeline;
 use crate::helpers::retrieval_planner::{self, RetrievalHit};
 use crate::helpers::topic_extractor;
 use crate::ports::{Clock, EmbeddingProvider, FactRepository, RerankProvider, SessionRepository};
@@ -317,35 +318,23 @@ where
     /// error or an empty result returns `Err` and the request fails with
     /// HTTP 503 instead of silently shipping vector-order-only ranking.
     ///
-    /// `Ok(_)` is only returned when the provider responded with at least
-    /// one reranked index that maps back to a survivor. An empty `Vec`
-    /// from the provider is treated identically to an `Err` — both
-    /// surface as [`ProviderError::InvalidResponse`] with an explicit
-    /// message so the operator sees a clear root cause in the 503 body.
+    /// Delegates to [`retrieval_pipeline::rerank_hits`] so the read-only
+    /// `RetrieveFacts` use case shares the exact same rerank path; the score
+    /// carried by [`retrieval_pipeline::RankedHit`] is dropped here because
+    /// the live enrichment pipeline only consumes the ordered hits.
     async fn rerank_survivors(
         &self,
         topic: &str,
         survivors: &[RetrievalHit],
     ) -> Result<Vec<RetrievalHit>, ProviderError> {
-        let documents: Vec<String> = survivors.iter().map(|s| s.document.clone()).collect();
-        let ranked = self
-            .reranker
-            .rerank(topic, &documents, self.retrieval_cfg.top_k_final)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "reranker unavailable; request will fail with 503");
-                e
-            })?;
-        if ranked.is_empty() {
-            tracing::error!("reranker returned empty results; request will fail with 503");
-            return Err(ProviderError::InvalidResponse(
-                "reranker returned empty results".to_string(),
-            ));
-        }
-        Ok(ranked
-            .into_iter()
-            .filter_map(|r| survivors.get(r.index).cloned())
-            .collect())
+        let ranked = retrieval_pipeline::rerank_hits(
+            topic,
+            survivors,
+            self.reranker,
+            self.retrieval_cfg.top_k_final,
+        )
+        .await?;
+        Ok(ranked.into_iter().map(|r| r.hit).collect())
     }
 
     /// Atomic dedup against the session's `injected_facts` set. Returns only
@@ -390,82 +379,11 @@ fn prefilter(
     heat_cfg: &HeatConfig,
     now: Timestamp,
 ) -> Vec<RetrievalHit> {
-    let retrieval_hits: Vec<RetrievalHit> = hits.into_iter().filter_map(hit_to_retrieval).collect();
+    let retrieval_hits: Vec<RetrievalHit> = hits
+        .into_iter()
+        .filter_map(retrieval_pipeline::hit_to_retrieval)
+        .collect();
     retrieval_planner::prefilter_and_heat(&retrieval_hits, retrieval_cfg, heat_cfg, now)
-}
-
-/// Map a single `SearchHit` to a `RetrievalHit`. Drops rows whose typed fields
-/// cannot be reconstructed (status / confidence / heat) so a corrupt row never
-/// poisons the pipeline — it is logged and skipped.
-fn hit_to_retrieval(hit: SearchHit) -> Option<RetrievalHit> {
-    let status = match parse_fact_status(&hit.metadata.status) {
-        Some(s) => s,
-        None => {
-            tracing::warn!(status = %hit.metadata.status, "unparseable status; dropping hit");
-            return None;
-        }
-    };
-    let confidence = match smos_domain::Confidence::new(hit.metadata.confidence) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "out-of-range confidence; dropping hit");
-            return None;
-        }
-    };
-    let heat = match Heat::new(hit.metadata.heat_base) {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::warn!(error = %e, "out-of-range heat_base; dropping hit");
-            return None;
-        }
-    };
-    let last_access_at = match Timestamp::from_unix_secs(hit.metadata.last_access_at as i64) {
-        Ok(ts) => ts,
-        Err(e) => {
-            tracing::warn!(error = %e, "out-of-range last_access_at; dropping hit");
-            return None;
-        }
-    };
-    // `valid_until` is stored as an ISO-8601 string by the adapter; an absent
-    // tombstone (`None`) means the fact is still current. Parse failures are
-    // logged and treated as `None` so a corrupt row never blocks retrieval.
-    let valid_until = hit
-        .metadata
-        .valid_until
-        .as_deref()
-        .and_then(parse_iso_timestamp);
-    Some(RetrievalHit {
-        id: hit.id,
-        document: hit.document,
-        memory_key: hit.memory_key,
-        status,
-        confidence,
-        valid_until,
-        heat_base: heat,
-        last_access_at,
-    })
-}
-
-/// Map a wire-formatted status string to a `FactStatus`. Compares against
-/// each canonical lowercase token (`FactStatus::as_str`) so the wire contract
-/// has a single source of truth in the domain. Returns `None` for unknown
-/// values (logged by the caller).
-fn parse_fact_status(s: &str) -> Option<FactStatus> {
-    [
-        FactStatus::Pending,
-        FactStatus::Accepted,
-        FactStatus::Rejected,
-    ]
-    .into_iter()
-    .find(|candidate| s == candidate.as_str())
-}
-
-/// Parse an ISO-8601 string into a `Timestamp` via the `time` crate's
-/// `Rfc3339` parser. Returns `None` on any failure.
-fn parse_iso_timestamp(s: &str) -> Option<Timestamp> {
-    use time::OffsetDateTime;
-    let odt = OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()?;
-    Timestamp::from_unix_secs(odt.unix_timestamp()).ok()
 }
 
 /// Render the `<smos-memory>` block from the new facts.
@@ -488,7 +406,7 @@ fn build_memory_block(
 mod tests {
     use super::*;
     use crate::types::{ChatMessageDto, EnrichmentMessages, MessageContent};
-    use smos_domain::{MemoryKey, SessionId};
+    use smos_domain::{FactStatus, MemoryKey, SessionId};
 
     fn user_msg(content: &str) -> ChatMessageDto {
         ChatMessageDto {
@@ -545,141 +463,11 @@ mod tests {
         assert_eq!(topic_extractor::extract_from_messages(&msgs), "alpha beta");
     }
 
-    // -----------------------------------------------------------------------
-    // parse_fact_status — wire-format → enum mapping
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_fact_status_recognises_canonical_tokens() {
-        assert_eq!(parse_fact_status("pending"), Some(FactStatus::Pending));
-        assert_eq!(parse_fact_status("accepted"), Some(FactStatus::Accepted));
-        assert_eq!(parse_fact_status("rejected"), Some(FactStatus::Rejected));
-    }
-
-    #[test]
-    fn parse_fact_status_rejects_unknown_tokens() {
-        assert_eq!(parse_fact_status("invalid"), None);
-        assert_eq!(parse_fact_status(""), None);
-    }
-
-    #[test]
-    fn parse_fact_status_is_case_sensitive() {
-        // The wire contract is the lowercase token emitted by `as_str`; a
-        // case mismatch is treated as unknown so the row is dropped rather
-        // than silently re-interpreted.
-        assert_eq!(parse_fact_status("Accepted"), None);
-        assert_eq!(parse_fact_status("ACCEPTED"), None);
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_iso_timestamp — Rfc3339 → Timestamp mapping
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_iso_timestamp_accepts_rfc3339_utc() {
-        let ts = parse_iso_timestamp("2025-06-18T12:00:00Z").expect("valid rfc3339");
-        assert_eq!(ts.as_unix_secs(), 1_750_248_000);
-    }
-
-    #[test]
-    fn parse_iso_timestamp_accepts_offset_form() {
-        let ts = parse_iso_timestamp("2025-06-18T12:00:00+00:00").expect("valid offset");
-        assert_eq!(ts.as_unix_secs(), 1_750_248_000);
-    }
-
-    #[test]
-    fn parse_iso_timestamp_rejects_malformed_strings() {
-        assert_eq!(parse_iso_timestamp("not a date"), None);
-        assert_eq!(parse_iso_timestamp(""), None);
-        assert_eq!(parse_iso_timestamp("2025-06-18"), None);
-    }
-
-    // -----------------------------------------------------------------------
-    // hit_to_retrieval — SearchHit → RetrievalHit projection
-    // -----------------------------------------------------------------------
-
-    fn sample_hit(
-        status: &str,
-        confidence: f32,
-        heat_base: f32,
-        last_access_at: f32,
-        valid_until: Option<&str>,
-    ) -> SearchHit {
-        SearchHit {
-            id: FactId::from_raw("fact_0123456789abcdef").expect("fact id"),
-            document: "doc".into(),
-            memory_key: MemoryKey::from_raw("origa").expect("memory key"),
-            metadata: crate::types::SearchHitMetadata {
-                status: status.into(),
-                confidence,
-                valid_until: valid_until.map(str::to_string),
-                heat_base,
-                last_access_at,
-                distance: Some(0.1),
-            },
-        }
-    }
-
-    #[test]
-    fn hit_to_retrieval_maps_well_formed_hit() {
-        let hit = sample_hit("accepted", 0.85, 1.0, 1_700_000_000.0, None);
-        let r = hit_to_retrieval(hit).expect("mapped");
-        assert_eq!(r.status, FactStatus::Accepted);
-        assert!((r.confidence.value() - 0.85).abs() < 1e-6);
-        assert!((r.heat_base.value() - 1.0).abs() < 1e-6);
-        assert_eq!(r.last_access_at.as_unix_secs(), 1_700_000_000);
-        assert!(r.valid_until.is_none());
-    }
-
-    #[test]
-    fn hit_to_retrieval_carries_valid_until_tombstone() {
-        let hit = sample_hit(
-            "accepted",
-            0.9,
-            0.5,
-            1_700_000_000.0,
-            Some("2025-12-31T00:00:00Z"),
-        );
-        let r = hit_to_retrieval(hit).expect("mapped");
-        assert!(r.valid_until.is_some());
-    }
-
-    #[test]
-    fn hit_to_retrieval_drops_hit_with_unknown_status() {
-        let hit = sample_hit("weird", 0.9, 1.0, 1_700_000_000.0, None);
-        assert!(hit_to_retrieval(hit).is_none());
-    }
-
-    #[test]
-    fn hit_to_retrieval_drops_hit_with_out_of_range_confidence() {
-        // 1.5 is outside [0,1]; Confidence::new rejects it.
-        let hit = sample_hit("accepted", 1.5, 1.0, 1_700_000_000.0, None);
-        assert!(hit_to_retrieval(hit).is_none());
-    }
-
-    #[test]
-    fn hit_to_retrieval_drops_hit_with_out_of_range_heat() {
-        let hit = sample_hit("accepted", 0.9, 2.0, 1_700_000_000.0, None);
-        assert!(hit_to_retrieval(hit).is_none());
-    }
-
-    #[test]
-    fn hit_to_retrieval_drops_hit_with_out_of_range_last_access_at() {
-        // `f32::INFINITY` saturates to `i64::MAX` on `as i64` cast; that
-        // overflows the `OffsetDateTime` year range and the typed timestamp
-        // rejects it, so the row is dropped.
-        let hit = sample_hit("accepted", 0.9, 1.0, f32::INFINITY, None);
-        assert!(hit_to_retrieval(hit).is_none());
-    }
-
-    #[test]
-    fn hit_to_retrieval_treats_malformed_valid_until_as_none() {
-        // A corrupt tombstone string must not poison the row — it is logged
-        // and the fact stays current (None tombstone).
-        let hit = sample_hit("accepted", 0.9, 1.0, 1_700_000_000.0, Some("not-a-date"));
-        let r = hit_to_retrieval(hit).expect("mapped despite malformed valid_until");
-        assert!(r.valid_until.is_none());
-    }
+    // The pure helpers (`parse_fact_status`, `parse_iso_timestamp`,
+    // `hit_to_retrieval`) and their unit tests now live in
+    // `crate::helpers::retrieval_pipeline`; the rerank path is covered there
+    // and shared with `RetrieveFacts`, so this module no longer duplicates
+    // them.
 
     // -----------------------------------------------------------------------
     // build_memory_block — format smoke
@@ -787,6 +575,8 @@ mod execute_tests {
                 heat_base: 1.0,
                 last_access_at: 1_700_000_000.0,
                 distance: Some(0.1),
+                created_at: None,
+                conflicts_with: Vec::new(),
             },
         }
     }

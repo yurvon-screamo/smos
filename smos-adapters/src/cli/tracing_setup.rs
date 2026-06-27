@@ -29,6 +29,28 @@ pub fn init_tracing_default() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
+/// Install the tracing subscriber with EVERY log line forced to **stderr**.
+///
+/// Used by machine-readable-stdout commands (`smos search`) whose entire
+/// output contract is a single JSON document on stdout that downstream
+/// consumers parse with a strict `json.loads`. The default `fmt()` writer is
+/// stdout, so a future `tracing::info!` on the search path — or a later-added
+/// `tracing-log` bridge that finally surfaces surrealdb's `log`-facade chatter
+/// — would silently interleave log lines into the JSON and make the consumer
+/// return an empty result (exactly the "remembers nothing" failure the
+/// search fail-closed contract exists to prevent). Forcing stderr keeps
+/// stdout pure regardless of what gets logged on the path.
+pub fn init_tracing_to_stderr() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
 /// Install the tracing subscriber picking JSON vs. pretty from
 /// `server_config.log_format`. `RUST_LOG` overrides `DEFAULT_FILTER`.
 ///

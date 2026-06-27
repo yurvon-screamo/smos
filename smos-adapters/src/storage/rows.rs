@@ -197,6 +197,19 @@ pub(crate) struct SearchSimilarRow {
     valid_until: Option<String>,
     heat_base: f32,
     last_access_at: String,
+    /// Extraction timestamp (ISO-8601). Surfaced to the read-only search
+    /// command as `created_at` so the BEAM harness can report when each
+    /// memory was first observed. `Option` + `#[serde(default)]` keeps
+    /// deserialisation robust for legacy rows written before the column was
+    /// SELECTed (both query paths populate it today, so this is purely
+    /// defensive) — symmetric with `conflicts_with` below.
+    #[serde(default)]
+    extracted_at: Option<String>,
+    /// Fact ids this fact contradicts. Forwarded verbatim to the search DTO
+    /// so the search surface can flag active conflicts. `#[serde(default)]`
+    /// deserialises missing arrays as empty for backward compatibility.
+    #[serde(default)]
+    conflicts_with: Vec<String>,
     /// Cosine distance as reported by either the HNSW index
     /// (`vector::distance::knn()`) or the brute-force fallback
     /// (`1.0 - vector::similarity::cosine(...)`). Lower = more similar.
@@ -227,6 +240,8 @@ impl SearchSimilarRow {
                 .map(|ts| ts.as_unix_secs() as f32)
                 .unwrap_or(0.0),
             distance: Some(self.distance as f32),
+            created_at: self.extracted_at.clone(),
+            conflicts_with: self.conflicts_with.clone(),
         };
         Some(SearchHit {
             id: fact_id,

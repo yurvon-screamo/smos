@@ -12,9 +12,11 @@ pub mod extract_facts_from_response;
 pub mod finalize_session;
 pub mod handle_chat_completion;
 pub mod import_opencode_session;
+pub mod retrieve_facts;
 
 pub use enrich_request::EnrichRequest;
 pub use extract_facts_from_response::{ExtractFactsFromResponse, format_tool_calls};
 pub use finalize_session::{FinalizeSession, FinalizeStats};
 pub use handle_chat_completion::{HandleChatCompletion, extract_response_payload};
 pub use import_opencode_session::{AssistantTurn, ImportOpencodeSession, ImportStats};
+pub use retrieve_facts::{RetrieveFacts, ScoredSearchHit};

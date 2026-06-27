@@ -15,6 +15,7 @@ pub mod noise_filter;
 pub mod openai_content;
 pub mod person_router;
 pub mod request_enricher;
+pub mod retrieval_pipeline;
 pub mod retrieval_planner;
 pub mod session_marker;
 pub mod topic_extractor;

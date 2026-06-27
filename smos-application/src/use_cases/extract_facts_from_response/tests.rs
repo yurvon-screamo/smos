@@ -157,6 +157,8 @@ fn hit_for(fact: &Fact, similarity: f32, mk: MemoryKey) -> SearchHit {
         heat_base: 1.0,
         last_access_at: 1_700_000_000.0,
         distance: Some(1.0 - similarity),
+        created_at: None,
+        conflicts_with: Vec::new(),
     };
     SearchHit {
         id: fact.id().clone(),

@@ -41,6 +41,19 @@ pub struct SearchHitMetadata {
     /// Cosine distance reported by the vector store. Lower = more similar.
     /// `None` when the underlying store did not surface a distance.
     pub distance: Option<f32>,
+    /// ISO-8601 extraction timestamp. Populated by the adapter from the fact's
+    /// `extracted_at` column so the read-only search surface can report when
+    /// each memory was first observed without a second round-trip.
+    /// `#[serde(default)]` keeps the field optional for older rows / fakes
+    /// that never set it.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Fact ids this fact contradicts (the `conflicts_with` provenance set).
+    /// Populated by the adapter so the search surface can surface active
+    /// conflicts to the caller. `#[serde(default)]` deserialises missing
+    /// arrays as empty for backward compatibility.
+    #[serde(default)]
+    pub conflicts_with: Vec<String>,
 }
 
 #[cfg(test)]
@@ -55,6 +68,8 @@ mod tests {
             heat_base: 1.0,
             last_access_at: 1_700_000_000.0,
             distance: Some(0.12),
+            created_at: Some("2025-06-18T12:00:00Z".into()),
+            conflicts_with: vec!["fact_deadbeefdeadbee".into()],
         }
     }
 
@@ -92,9 +107,54 @@ mod tests {
             heat_base: 0.4,
             last_access_at: 1_700_000_050.0,
             distance: None,
+            created_at: None,
+            conflicts_with: Vec::new(),
         };
         let v: serde_json::Value = serde_json::to_value(&meta).unwrap();
         assert_eq!(v["valid_until"], "2027-01-01T00:00:00Z");
         assert_eq!(v["distance"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn metadata_roundtrips_created_at_and_conflicts_with() {
+        let meta = SearchHitMetadata {
+            status: "accepted".into(),
+            confidence: 0.9,
+            valid_until: None,
+            heat_base: 1.0,
+            last_access_at: 1_700_000_000.0,
+            distance: Some(0.05),
+            created_at: Some("2025-06-18T12:00:00Z".into()),
+            conflicts_with: vec![
+                "fact_aaaaaaaaaaaaaaaa".into(),
+                "fact_bbbbbbbbbbbbbbbb".into(),
+            ],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: SearchHitMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.created_at.as_deref(), Some("2025-06-18T12:00:00Z"));
+        assert_eq!(
+            back.conflicts_with,
+            vec!["fact_aaaaaaaaaaaaaaaa", "fact_bbbbbbbbbbbbbbbb"]
+        );
+    }
+
+    /// `#[serde(default)]` on the new fields keeps deserialisation backward
+    /// compatible with rows / fakes emitted before the fields existed: a JSON
+    /// object missing `created_at` and `conflicts_with` deserialises to
+    /// `None` / `[]` instead of erroring.
+    #[test]
+    fn metadata_deserialises_legacy_payload_missing_new_fields() {
+        let legacy = serde_json::json!({
+            "status": "accepted",
+            "confidence": 0.8,
+            "valid_until": null,
+            "heat_base": 1.0,
+            "last_access_at": 1700000000.0,
+            "distance": 0.1
+        });
+        let meta: SearchHitMetadata = serde_json::from_value(legacy).unwrap();
+        assert!(meta.created_at.is_none());
+        assert!(meta.conflicts_with.is_empty());
     }
 }

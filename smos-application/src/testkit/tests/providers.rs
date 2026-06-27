@@ -1,7 +1,9 @@
 //! ScriptedNliClassifier + ScriptedExtractor + ConstantEmbedder + FixedClock
-//! parity invariants.
+//! + ScriptedReranker parity invariants.
 
 use super::*;
+use crate::ports::RerankProvider;
+use crate::types::RerankResult;
 
 #[tokio::test]
 async fn scripted_returns_in_order() {
@@ -82,4 +84,80 @@ fn fixed_clock_constant() {
     let clock = FixedClock(ts());
     assert_eq!(clock.now(), ts());
     assert_eq!(clock.now(), ts(), "always the same instant");
+}
+
+#[tokio::test]
+async fn scripted_reranker_returns_in_order_then_empty() {
+    let docs = ["alpha".to_string(), "beta".to_string()];
+    let r0 = vec![RerankResult {
+        index: 0,
+        score: 0.9,
+        document: "alpha".into(),
+    }];
+    let r1 = vec![RerankResult {
+        index: 1,
+        score: 0.8,
+        document: "beta".into(),
+    }];
+    let reranker = ScriptedReranker::new(vec![Ok(r0.clone()), Ok(r1.clone())]);
+
+    let out1 = reranker.rerank("q", &docs, 2).await.unwrap();
+    let out2 = reranker.rerank("q", &docs, 2).await.unwrap();
+    let out3 = reranker.rerank("q", &docs, 2).await.unwrap();
+
+    assert_eq!(out1, r0);
+    assert_eq!(out2, r1);
+    assert!(
+        out3.is_empty(),
+        "exhausted script yields empty Ok, not error"
+    );
+}
+
+#[tokio::test]
+async fn scripted_reranker_records_query_docs_and_top_k() {
+    let docs = ["d0".to_string(), "d1".to_string(), "d2".to_string()];
+    let reranker = ScriptedReranker::matching(|_q, docs, top_k| {
+        Ok((0..top_k.min(docs.len()))
+            .map(|i| RerankResult {
+                index: i,
+                score: 1.0 - i as f32 * 0.1,
+                document: String::new(),
+            })
+            .collect())
+    });
+
+    reranker.rerank("query one", &docs, 2).await.unwrap();
+    reranker.rerank("query two", &docs, 3).await.unwrap();
+
+    let calls = reranker.calls();
+    assert_eq!(
+        calls,
+        vec![
+            ("query one".to_string(), 3, 2),
+            ("query two".to_string(), 3, 3),
+        ],
+        "each call records (query, document_count, top_k)"
+    );
+}
+
+#[tokio::test]
+async fn scripted_reranker_matching_honours_top_k() {
+    let docs = (0..5).map(|i| format!("d{i}")).collect::<Vec<_>>();
+    let reranker = ScriptedReranker::matching(|_q, docs, top_k| {
+        Ok(docs
+            .iter()
+            .enumerate()
+            .take(top_k)
+            .map(|(i, d)| RerankResult {
+                index: i,
+                score: 1.0,
+                document: d.clone(),
+            })
+            .collect())
+    });
+
+    let out = reranker.rerank("q", &docs, 2).await.unwrap();
+    assert_eq!(out.len(), 2, "match-mode resolver receives top_k verbatim");
+    assert_eq!(out[0].index, 0);
+    assert_eq!(out[1].index, 1);
 }
