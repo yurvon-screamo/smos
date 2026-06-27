@@ -59,13 +59,23 @@ define_windows_service!(ffi_service_main, service_main);
 /// on error; a pre-registration failure leaves the service in
 /// `START_PENDING` and SCM applies its own timeout.
 fn service_main(arguments: Vec<OsString>) {
+    // Load the operator-profile env written by `smos service install`
+    // BEFORE any `smos_home()` call so config resolution + tracing land
+    // in the operator's profile, not LocalSystem's systemprofile. The
+    // registry `Environment` value is unreliable across Windows versions
+    // (SCM does not always apply it to a LocalSystem service), so the
+    // install writes a plain `KEY=VALUE` file next to the binary and we
+    // set_var the values here at process startup, race-free (no other
+    // thread is alive yet — runtime + handler come later).
+    apply_operator_env_file();
+
     // The config path is resolved via the SAME chain the CLI uses
     // (`--config` override > `./smos.toml` > `~/.smos/config.toml`) so
-    // the service honours the operator's SMOS_HOME (injected into the
-    // service registry at install time) instead of needing a brittle
-    // absolute path baked into binPath. Without this fallback the
-    // service would `SmosConfig::load("")`, hit the defaults branch, and
-    // fail validation with "providers must not be empty".
+    // the service honours the operator's SMOS_HOME (loaded above) and
+    // does not need a brittle absolute path baked into binPath. Without
+    // this fallback the service would `SmosConfig::load("")`, hit the
+    // defaults branch, and fail validation with "providers must not be
+    // empty".
     let cli_override = extract_config_from_args(arguments);
     let override_opt = if cli_override.is_empty() {
         None
@@ -78,6 +88,29 @@ fn service_main(arguments: Vec<OsString>) {
     if let Err(e) = run_service_body(config_path) {
         tracing::error!(error = %format!("{e:#}"), "smos service exited with error");
     }
+}
+
+/// Locate `<binary_dir>/smos-service.env`, parse it, and `set_var` every
+/// pair into the process environment. Best-effort: when the file is
+/// absent (older install, custom binary location without the file) the
+/// service keeps running with the LocalSystem default environment — the
+/// failure mode degrades to the pre-fix behaviour (systemprofile paths)
+/// rather than aborting the service start.
+fn apply_operator_env_file() {
+    let Some(binary_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+    else {
+        return;
+    };
+    let Some(pairs) = crate::cli::service::env_file::load_env_file(&binary_dir) else {
+        return;
+    };
+    // SAFETY: service_main is the first user code the SCM worker thread
+    // executes — no other thread exists yet (the tokio runtime is built
+    // inside run_service_body, the control handler is registered after
+    // that). set_var is therefore race-free.
+    unsafe { crate::cli::service::env_file::apply_env_vars(&pairs) };
 }
 
 fn run_service_body(config_path: String) -> Result<()> {

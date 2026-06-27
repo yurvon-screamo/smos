@@ -19,9 +19,9 @@ pub mod paths;
 pub mod templates;
 
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod env_file;
 #[cfg(target_os = "windows")]
-mod windows_env;
+mod windows;
 #[cfg(target_os = "windows")]
 mod windows_log;
 #[cfg(target_os = "windows")]

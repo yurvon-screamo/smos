@@ -26,8 +26,7 @@ const STATUS_TAIL_LINES: usize = 40;
 /// Print the tail of the most recent service log, or a remediation hint
 /// when no log exists at any candidate path. LocalSystem is probed first
 /// (the default service account), then the operator's SMOS_HOME (covers
-/// the `sc config smos env=SMOS_HOME=...` redirect documented in the
-/// install summary).
+/// the env-file redirect written by `smos service install`).
 pub(super) fn print_recent_service_log() {
     println!("Recent service log (last {STATUS_TAIL_LINES} lines):");
     for (label, dir) in candidate_log_dirs() {
@@ -54,7 +53,8 @@ pub(super) fn print_recent_service_log() {
     }
     println!("  (no service log found at any candidate path)");
     println!("    LocalSystem default: <SystemRoot>\\System32\\config\\systemprofile\\.smos\\logs");
-    println!("    or the SMOS_HOME override set via `sc config smos env=SMOS_HOME=<path>`");
+    println!("    or your SMOS_HOME (written next to the binary at install time,");
+    println!("    see `smos service install` output for the env file path).");
 }
 
 /// Directories to probe, in priority order. The LocalSystem path resolves
@@ -63,10 +63,10 @@ pub(super) fn print_recent_service_log() {
 ///
 /// Known limitation: recency is NOT compared across candidate dirs — the
 /// first dir with ANY matching log wins. If the operator redirected via
-/// `sc config env=SMOS_HOME=...` AFTER a previous LocalSystem run, a
-/// stale LocalSystem log can mask the fresh operator log. Acceptable for
-/// an interactive diagnostic; the printed `source:` line lets the
-/// operator check the other path by hand.
+/// the env file (written next to the binary at install time) AFTER a
+/// previous LocalSystem run, a stale LocalSystem log can mask the fresh
+/// operator log. Acceptable for an interactive diagnostic; the printed
+/// `source:` line lets the operator check the other path by hand.
 fn candidate_log_dirs() -> Vec<(&'static str, PathBuf)> {
     vec![
         ("LocalSystem profile", localsystem_smos_logs()),

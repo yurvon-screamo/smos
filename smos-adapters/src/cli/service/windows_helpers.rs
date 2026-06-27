@@ -79,10 +79,9 @@ pub(super) fn validate_windows_path(path: &Path) -> Result<()> {
 /// The service does NOT receive a `--config` path. The config is
 /// resolved at service start via the same `resolve_effective_config_path`
 /// chain the CLI uses (`./smos.toml` then `~/.smos/config.toml`), so the
-/// operator's SMOS_HOME (injected into the service registry at install
-/// time, see [`super::super::windows_env`]) routes the service to the
-/// operator's config without a brittle absolute path baked into binPath
-/// at install time.
+/// operator's SMOS_HOME (written next to the binary at install time, see
+/// [`super::env_file`]) routes the service to the operator's config
+/// without a brittle absolute path baked into binPath at install time.
 ///
 /// This is NOT the form passed to `sc.exe` on the command line: that form
 /// needs an extra layer of outer quoting plus inner-quote escaping handled

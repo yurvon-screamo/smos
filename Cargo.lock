@@ -4439,7 +4439,7 @@ dependencies = [
 
 [[package]]
 name = "smos"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4482,7 +4482,7 @@ dependencies = [
 
 [[package]]
 name = "smos-application"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "bytes",
  "futures",
@@ -4499,7 +4499,7 @@ dependencies = [
 
 [[package]]
 name = "smos-domain"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "serde",
  "serde_json",
