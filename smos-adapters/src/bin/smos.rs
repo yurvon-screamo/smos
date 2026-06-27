@@ -248,6 +248,10 @@ enum ImportSub {
         /// Memory namespace (project key). Defaults to the shared namespace.
         #[arg(long, default_value = "shared")]
         memory_key: String,
+
+        /// Skip the NLI finalize drain after the extraction.
+        #[arg(long)]
+        no_finalize: bool,
     },
 }
 
@@ -397,11 +401,13 @@ async fn run_cli() -> anyhow::Result<ExitCode> {
                     text,
                     stdin,
                     memory_key,
+                    no_finalize,
                 }) => {
                     let body = read_raw_text(text, stdin)?;
                     let args = RawImportArgs {
                         text: body,
                         memory_key,
+                        no_finalize,
                     };
                     run_raw_import(&config_path, args).await?;
                 }
@@ -622,12 +628,14 @@ mod tests {
                     text,
                     stdin,
                     memory_key,
+                    no_finalize,
                 }),
                 _,
             ) => {
                 assert_eq!(text.as_deref(), Some("I like Python."));
                 assert!(!stdin);
                 assert_eq!(memory_key, "shared");
+                assert!(!no_finalize);
             }
             (other, _) => panic!("expected Raw subcommand, got {other:?}"),
         }
@@ -643,13 +651,33 @@ mod tests {
                     text,
                     stdin,
                     memory_key,
+                    no_finalize,
                 }),
                 _,
             ) => {
                 assert!(text.is_none());
                 assert!(stdin);
                 assert_eq!(memory_key, "diagtest");
+                assert!(!no_finalize);
             }
+            (other, _) => panic!("expected Raw subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_raw_no_finalize_flag_parses() {
+        // `--no-finalize` must flip the drain opt-out so the BEAM harness
+        // (or an operator) can skip the per-chunk NLI load.
+        let cli = parse(&[
+            "import",
+            "raw",
+            "--stdin",
+            "--no-finalize",
+            "--memory-key",
+            "diagtest3",
+        ]);
+        match into_bare_opencode(cli) {
+            (Some(ImportSub::Raw { no_finalize, .. }), _) => assert!(no_finalize),
             (other, _) => panic!("expected Raw subcommand, got {other:?}"),
         }
     }

@@ -3,14 +3,19 @@
 //! Mirrors [`super::dir_import_runner`] but for a single text input instead
 //! of a directory tree. The same [`ExtractFactsFromResponse`] pipeline runs,
 //! so dedup, embedding, cross-session confirmation, and the
-//! `MIN_INPUT_CHARS` floor all apply identically. No finalize drain is
-//! triggered (the operator can run `smos finalize` by hand for that).
+//! `MIN_INPUT_CHARS` floor all apply identically.
+//!
+//! After extraction, the runner triggers a single `FinalizeSession` drain
+//! via [`run_finalize`] by default (NLI promotes this chunk's pending facts
+//! to Accepted and detects conflicts against the accumulated Accepted pool
+//! from prior chunks). Pass `--no-finalize` to skip the drain.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
 use crate::SurrealStore;
+use crate::cli::finalize_runner::run_finalize;
 use crate::cli::import_helpers::{derive_session_id, parse_memory_key};
 use crate::cli::tracing_setup::init_tracing_default;
 use crate::config::SmosConfig;
@@ -23,6 +28,7 @@ use smos_application::use_cases::ExtractFactsFromResponse;
 pub struct RawImportArgs {
     pub text: String,
     pub memory_key: String,
+    pub no_finalize: bool,
 }
 
 /// Entry point: install tracing, load config, connect to the store, run
@@ -72,5 +78,12 @@ pub async fn run_raw_import(config_path: &str, args: RawImportArgs) -> Result<()
     println!("Memory key: {}", memory_key);
     println!("Session:    {}", session_id);
     println!("New facts:  {}", count);
+
+    if !args.no_finalize && count > 0 {
+        println!("\n=== Finalizing ===");
+        run_finalize(config_path, session_id.as_str(), Some(memory_key.as_str())).await?;
+    } else if args.no_finalize {
+        println!("(finalize skipped via --no-finalize)");
+    }
     Ok(())
 }

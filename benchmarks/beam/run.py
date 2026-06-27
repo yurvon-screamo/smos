@@ -1149,19 +1149,6 @@ async def async_main() -> None:
                 print("Shutdown requested -- progress saved. Re-run to resume.")
                 return
 
-            # === Phase 1.5: SMOS finalize — promote pending facts to Accepted ===
-            # `smos search` returns Accepted facts only, so the pending facts
-            # extracted during ingestion MUST be drained (NLI cross-session
-            # confirmation) before any search query runs. Sequential per the
-            # RocksDB single-writer constraint; finalize is idempotent.
-            logger.info(
-                "=== Finalizing captured SMOS sessions (pending -> Accepted) ==="
-            )
-            finalize_results = await mem0.finalize_pending()
-            for sid, code in finalize_results.items():
-                if code != 0:
-                    logger.warning("SMOS finalize exit=%s for session=%s", code, sid)
-
             # === Phase 2: Search + Answer + Judge ===
             all_questions: list[tuple] = []
             for size in chat_sizes:

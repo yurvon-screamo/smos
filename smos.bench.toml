@@ -72,10 +72,15 @@ min_topic_chars = 3
 cosine_threshold = 0.85
 
 [confidence]
+# Bench-specific: BEAM ingests each conversation via `smos import raw`, which
+# derives ONE deterministic session_id → multi_source_bonus (0.2, needs 2+
+# sessions) never fires → max confidence = base (0.5). Lowering accept_threshold
+# from 0.7 to 0.5 lets single-session facts reach Accepted so `smos search`
+# returns them. Production keeps 0.7.
 base = 0.5
 multi_source_bonus = 0.2
 no_contradiction_bonus = 0.1
-accept_threshold = 0.7
+accept_threshold = 0.5
 pending_threshold = 0.4
 
 [nli]

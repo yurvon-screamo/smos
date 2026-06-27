@@ -3,8 +3,10 @@
 Replaces ``Mem0Client`` so the BEAM harness (``benchmarks/beam/run.py``) drives
 SMOS via the CLI instead of the Mem0 HTTP API. The interface mirrors
 ``Mem0Client`` exactly (``add`` / ``search`` / ``delete_user`` + async context
-manager) so ``run.py`` needs no edits outside the client construction and the
-Phase-1→Phase-2 finalize hook.
+manager) so ``run.py`` needs no edits outside the client construction.
+``smos import raw`` finalizes inline by default, so the harness no longer wires
+a separate Phase-1→Phase-2 finalize step (``finalize_pending`` is retained as an
+explicit recovery hook only).
 
 Each operation shells out to the unified ``smos`` binary (``import raw``,
 ``finalize``, ``search``) against a single benchmark config (``SMOS_CONFIG``
@@ -38,10 +40,11 @@ _MAX_MEMORY_KEY_LEN = 64
 def _default_subprocess_timeout() -> float:
     """Per-subprocess timeout, overridable via ``SMOS_SUBPROCESS_TIMEOUT``.
 
-    Default 1800 s (30 min): the shared finalize subprocess on a 1M run reloads
-    the 643 MB DeBERTa NLI model and drains every pending fact across every
-    memory_key in one shot, which can run well past a low default. Operators
-    tuning for a smoke run can lower it.
+    Default 1800 s (30 min): ``import raw`` reloads the 643 MB DeBERTa NLI
+    model per chunk to run the inline finalize drain, and the explicit
+    ``finalize_pending()`` recovery hook re-drains every pending fact across
+    every memory_key in one shot — both can run well past a low default.
+    Operators tuning for a smoke run can lower it.
     """
     raw = os.getenv("SMOS_SUBPROCESS_TIMEOUT")
     if raw:
@@ -231,15 +234,17 @@ class SMOSClient:
     async def finalize_pending(self) -> dict[str, int]:
         """Run ``smos finalize`` once per captured session_id.
 
+        Redundant for the normal BEAM flow: since ``smos import raw`` now runs
+        finalize inline by default, each chunk's pending facts are already
+        promoted to Accepted (and conflicts against the accumulated Accepted
+        pool are detected) as ingestion proceeds. Retained as an explicit
+        recovery hook for the case where inline finalize was skipped (e.g. an
+        ``--no-finalize`` run) or a prior ingest died before the drain.
+
         ``smos import raw`` derives a deterministic session id, so every BEAM
         user shares ONE session id; the discovery path (no ``--memory-key``)
         then finalises every memory_key that session touched in a single
         subprocess. Returns ``{session_id: exit_code}`` for observability.
-
-        SMOS promotes pending facts to Accepted only via finalize (NLI
-        cross-session confirmation), and ``smos search`` returns Accepted
-        facts only — so this hook MUST run between ingest (Phase 1) and
-        search (Phase 2).
         """
         results: dict[str, int] = {}
         # Dedupe by session id: the shared deterministic id means N users
