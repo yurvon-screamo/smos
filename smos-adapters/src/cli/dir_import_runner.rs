@@ -145,7 +145,7 @@ async fn process_files(
                     enable_response_extraction: true,
                 };
                 let count = use_case
-                    .execute(&content, &[], memory_key, session_id)
+                    .execute("", &content, &[], memory_key, session_id)
                     .await
                     .with_context(|| format!("extraction failed for {}", file_path.display()))?;
                 stats.files_processed += 1;

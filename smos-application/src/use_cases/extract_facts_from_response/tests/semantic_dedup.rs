@@ -45,7 +45,10 @@ async fn persist_facts_layer2_semantic_match_confirms_existing_fact() {
         &fix.extraction_cfg,
     );
 
-    let n = uc.execute(rephrased, &[], &mk(), &sid(2)).await.unwrap();
+    let n = uc
+        .execute("", rephrased, &[], &mk(), &sid(2))
+        .await
+        .unwrap();
 
     assert_eq!(
         n, 0,
@@ -109,7 +112,10 @@ async fn persist_facts_layer2_below_threshold_creates_new_fact() {
         &fix.extraction_cfg,
     );
 
-    let n = uc.execute(new_content, &[], &mk(), &sid(2)).await.unwrap();
+    let n = uc
+        .execute("", new_content, &[], &mk(), &sid(2))
+        .await
+        .unwrap();
 
     assert_eq!(n, 1, "below-threshold similarity must create a new fact");
     let new_id = FactId::from_content(new_content);
@@ -167,7 +173,10 @@ async fn persist_facts_layer2_missing_distance_falls_through_to_new_fact() {
         &fix.extraction_cfg,
     );
 
-    let n = uc.execute(new_content, &[], &mk(), &sid(2)).await.unwrap();
+    let n = uc
+        .execute("", new_content, &[], &mk(), &sid(2))
+        .await
+        .unwrap();
 
     assert_eq!(
         n, 1,
@@ -219,7 +228,10 @@ async fn persist_facts_layer2_threshold_lowered_collapses_0_85_pair() {
         &fix.extraction_cfg,
     );
 
-    let n = uc.execute(rephrased, &[], &mk(), &sid(2)).await.unwrap();
+    let n = uc
+        .execute("", rephrased, &[], &mk(), &sid(2))
+        .await
+        .unwrap();
 
     assert_eq!(
         n, 0,

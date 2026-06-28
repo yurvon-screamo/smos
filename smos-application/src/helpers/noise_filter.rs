@@ -1,8 +1,8 @@
 //! Extraction noise filter — strip SMOS-internal artifacts before extraction
 //! (§4, response_pipeline).
 //!
-//! Three classes of noise are removed so the extractor never turns SMOS control
-//! metadata into a "fact":
+//! Four classes of noise are removed so the extractor never turns control
+//! metadata or model internals into a "fact":
 //!
 //! 1. Session markers `<!-- smos:sess_xxx -->` appended to responses.
 //! 2. `<smos-memory session="...">…</smos-memory>` blocks (DOTALL — the block
@@ -10,6 +10,17 @@
 //! 3. Bare `sess_<token>` identifiers the upstream may have echoed back without
 //!    their marker wrapper (the extractor would otherwise lift them into a
 //!    "fact" like "the session id is sess_...").
+//! 4. Inline `<think>…</think>` reasoning blocks. Reasoning models (DeepSeek-R1,
+//!    Qwen-QwQ, GLM-thinking via OpenRouter) emit their chain-of-thought inline
+//!    in `content`. The reasoning can be an order of magnitude longer than the
+//!    answer and carries no extractable fact, so it is pure token waste for the
+//!    extractor. Both the closed form and an unclosed `<think>…` (streaming
+//!    cut-off / dropped `</think>`) are stripped.
+//!
+//! Known limitation: a stray `</think>` with no opening `<think>` is not
+//! matched by either think pattern. Reasoning models always emit `<think>`
+//! first, so this does not arise in practice, but it is documented for
+//! completeness.
 //!
 //! The bare-id filter must avoid mid-word tokens like `obsess_token` or
 //! `disse_data`. Rust's `regex` crate does not support lookbehind, so we use a
@@ -27,6 +38,18 @@ static MARKERS_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("markers regex literal")
 });
 
+/// Closed `<think>…</think>` reasoning block (non-greedy, DOTALL so the body
+/// can span multiple lines). Runs BEFORE [`THINK_OPEN_RE`] so a properly
+/// closed block is removed before the unclosed pass — otherwise the greedy
+/// open pattern would eat from the first `<think>` to end-of-string.
+static THINK_CLOSED_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<think>.*?</think>").expect("think-closed regex literal"));
+
+/// Unclosed `<think>…` (no `</think>` — streaming cut-off / dropped tag).
+/// Greedy to end-of-string: a partial reasoning trail has no fact boundary.
+static THINK_OPEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<think>.*$").expect("think-open regex literal"));
+
 /// Bare session id prefixed by either start-of-text or a non-word character.
 /// The prefix is captured so substitution can preserve it (otherwise we'd eat
 /// the space before a bare id).
@@ -37,7 +60,9 @@ static BARE_SESS_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Return `content` with all SMOS-internal noise stripped, trimmed.
 pub fn clean(content: &str) -> String {
     let without_markers = MARKERS_RE.replace_all(content, "");
-    let without_bare = BARE_SESS_RE.replace_all(&without_markers, "${1}");
+    let without_think_closed = THINK_CLOSED_RE.replace_all(&without_markers, "");
+    let without_think_open = THINK_OPEN_RE.replace_all(&without_think_closed, "");
+    let without_bare = BARE_SESS_RE.replace_all(&without_think_open, "${1}");
     without_bare.trim().to_string()
 }
 
@@ -103,5 +128,65 @@ mod tests {
         let input = "marker <!-- smos:sess_1 --> bare sess_aabbccddeeff block <smos-memory session=\"s\">x</smos-memory>";
         let out = clean(input);
         assert_eq!(out, "marker  bare  block");
+    }
+
+    #[test]
+    fn strips_closed_think_block_at_start() {
+        let input = "<think>let me reason about this</think>The answer is 42.";
+        assert_eq!(clean(input), "The answer is 42.");
+    }
+
+    #[test]
+    fn strips_closed_think_block_in_middle() {
+        let input = "Before.<think>internal deliberation</think>After.";
+        assert_eq!(clean(input), "Before.After.");
+    }
+
+    #[test]
+    fn strips_closed_think_block_at_end() {
+        let input = "Real fact here.<think>and some trailing rumination</think>";
+        assert_eq!(clean(input), "Real fact here.");
+    }
+
+    #[test]
+    fn strips_multiline_think_block_body() {
+        // The think block sits on its own line between two newlines; removing
+        // it leaves one blank line (internal whitespace is preserved — only
+        // leading/trailing is trimmed by `clean`).
+        let input = "fact\n<think>line one\nline two\nline three</think>\nmore fact";
+        assert_eq!(clean(input), "fact\n\nmore fact");
+    }
+
+    #[test]
+    fn strips_unclosed_think_to_end_of_string() {
+        let input = "answer<think>reasoning that never got a closing tag";
+        assert_eq!(clean(input), "answer");
+    }
+
+    #[test]
+    fn strips_adjacent_closed_think_blocks() {
+        let input = "<think>A</think><think>B</think>final";
+        assert_eq!(clean(input), "final");
+    }
+
+    #[test]
+    fn closed_think_stripped_before_unclosed_pass() {
+        // A closed block followed by a genuinely unclosed one: the closed pass
+        // removes the first, leaving only the unclosed trail for the open pass.
+        let input = "<think>closed reasoning</think>fact<think>unclosed trail";
+        assert_eq!(clean(input), "fact");
+    }
+
+    #[test]
+    fn normal_text_without_think_is_unchanged() {
+        let input = "The cache uses TTL=60 to avoid stale entries.";
+        assert_eq!(clean(input), input);
+    }
+
+    #[test]
+    fn strips_think_combined_with_markers_and_bare_id() {
+        let input = "<think>noise</think>real fact <!-- smos:sess_1 --> sess_aabb <smos-memory session=\"s\">x</smos-memory>";
+        let out = clean(input);
+        assert_eq!(out, "real fact");
     }
 }

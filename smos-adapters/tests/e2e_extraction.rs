@@ -968,3 +968,107 @@ async fn full_pipeline_smoke_extraction_runs_after_passthrough() {
         "Prometheus scrapes metrics on port 9090"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 15. Noise filter strips <think> reasoning blocks before extraction
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn extraction_noise_filter_strips_think_blocks() {
+    let upstream = MockServer::start().await;
+    let llama = MockServer::start().await;
+    let reranker = MockServer::start().await;
+
+    let config = config_with_extraction(&upstream, &llama, &reranker);
+    let state = build_state(config).await;
+    // The upstream reply carries an inline reasoning block that must never
+    // reach the extractor (token waste, no factual value).
+    let noisy = "<think>let me reason about the architecture at length, this is internal deliberation</think>\nThe gateway listens on 8443";
+    mount_upstream_content(&upstream, noisy).await;
+    mount_extractor_chat_facts(&llama, vec!["The gateway listens on 8443".into()]).await;
+    mount_extractor_embeddings(&llama).await;
+
+    let smos = serve_state(state.clone()).await;
+    send(&smos, &extraction_request()).await;
+
+    let _pending = wait_for_pending(
+        &state.store,
+        &enrichment_memory_key(),
+        1,
+        Duration::from_secs(8),
+    )
+    .await;
+
+    let chat_body = llama
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.url.path().ends_with("/v1/chat/completions"))
+        .map(|r| serde_json::from_slice::<Value>(&r.body).expect("chat body json"))
+        .expect("extraction /v1/chat/completions request recorded");
+    let user_content = chat_body["messages"][1]["content"].as_str().unwrap_or("");
+    assert!(
+        !user_content.contains("<think>"),
+        "<think> tag leaked into extraction input: {user_content}"
+    );
+    assert!(
+        !user_content.contains("</think>"),
+        "</think> tag leaked into extraction input: {user_content}"
+    );
+    assert!(
+        user_content.contains("The gateway listens on 8443"),
+        "real answer must survive think-strip; got: {user_content}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. User message threads into the extraction input with role markup
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn extraction_threads_user_message_into_input_with_markup() {
+    let upstream = MockServer::start().await;
+    let llama = MockServer::start().await;
+    let reranker = MockServer::start().await;
+
+    let config = config_with_extraction(&upstream, &llama, &reranker);
+    let state = build_state(config).await;
+    mount_upstream_content(&upstream, "The worker pool runs four processes").await;
+    mount_extractor_chat_facts(&llama, vec!["The worker pool runs four processes".into()]).await;
+    mount_extractor_embeddings(&llama).await;
+
+    let smos = serve_state(state.clone()).await;
+    // Distinctive user message so the markup assertion is unambiguous.
+    let body = json!({
+        "model": "origa",
+        "messages": [{"role": "user", "content": "describe the worker pool sizing"}],
+    });
+    send(&smos, &body).await;
+
+    let _pending = wait_for_pending(
+        &state.store,
+        &enrichment_memory_key(),
+        1,
+        Duration::from_secs(8),
+    )
+    .await;
+
+    let chat_body = llama
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.url.path().ends_with("/v1/chat/completions"))
+        .map(|r| serde_json::from_slice::<Value>(&r.body).expect("chat body json"))
+        .expect("extraction /v1/chat/completions request recorded");
+    let user_content = chat_body["messages"][1]["content"].as_str().unwrap_or("");
+    assert!(
+        user_content.contains("User:\ndescribe the worker pool sizing"),
+        "user message must be threaded into the extraction input with role markup; got: {user_content}"
+    );
+    assert!(
+        user_content.contains("Assistant:\nThe worker pool runs four processes"),
+        "assistant signal must follow the user block under its own label; got: {user_content}"
+    );
+}

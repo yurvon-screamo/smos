@@ -60,6 +60,11 @@ pub async fn handle(
     let is_streaming = request.is_streaming();
     let enable_extraction = state.config.server.enable_response_extraction;
 
+    // Extract the last user message BEFORE the request is consumed by the use
+    // case. It threads into the background extraction task as framing context
+    // for the assistant reply. One String clone per request — negligible.
+    let user_message = last_user_text(&request.messages);
+
     // The routing maps are pre-built once at startup (see AppState) and
     // cloned via Arc here — no per-request HashMap/Vec allocation. If live
     // config reload is added later, the Arc will need to be swapped
@@ -89,6 +94,7 @@ pub async fn handle(
         state,
         response,
         marker,
+        user_message,
         memory_key,
         session_id,
         enable_extraction,
@@ -102,16 +108,40 @@ pub async fn handle(
 
 /// Shared inputs for the streaming / non-streaming response builders.
 ///
-/// Groups the six positional params the two builders previously took so the
+/// Groups the positional params the two builders previously took so the
 /// `handle` dispatch and the builders read by field name. The fields mirror
-/// the previous parameter list verbatim (same names, same types, same order).
+/// the previous parameter list verbatim (same names, same types, same order)
+/// plus `user_message` threaded into the extraction task.
 struct ResponseContext {
     state: Arc<AppState>,
     response: ChatResponse,
     marker: String,
+    user_message: String,
     memory_key: MemoryKey,
     session_id: SessionId,
     enable_extraction: bool,
+}
+
+/// Return the trimmed text of the LAST message whose `role == "user"` and
+/// whose `content` is a plain string. Array/multipart content is skipped
+/// (conservative — those entries are rare and extracting their text parts is
+/// tracked as future scope). Returns an empty string when no such message
+/// exists, so the extraction use case falls back to its label-free path.
+fn last_user_text(messages: &[serde_json::Value]) -> String {
+    for msg in messages.iter().rev() {
+        let is_user = msg
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .map(|r| r == "user")
+            .unwrap_or(false);
+        if !is_user {
+            continue;
+        }
+        if let Some(text) = msg.get("content").and_then(serde_json::Value::as_str) {
+            return text.trim().to_string();
+        }
+    }
+    String::new()
 }
 
 /// Build the SSE response. When extraction is ENABLED, the stream is wrapped
@@ -124,6 +154,7 @@ fn streaming_response(ctx: ResponseContext) -> Response {
         state,
         response,
         marker,
+        user_message,
         memory_key,
         session_id,
         enable_extraction,
@@ -142,6 +173,7 @@ fn streaming_response(ctx: ResponseContext) -> Response {
         let marked = stream_transform::inject_marker_with_extraction(
             stream,
             marker,
+            user_message,
             StreamingBuffer::new(),
             spawner,
         );
@@ -161,6 +193,7 @@ fn non_streaming_response(ctx: ResponseContext) -> Response {
         state,
         response,
         marker,
+        user_message,
         memory_key,
         session_id,
         enable_extraction,
@@ -172,7 +205,7 @@ fn non_streaming_response(ctx: ResponseContext) -> Response {
                 // extraction input never includes SMOS control noise.
                 let (content, tool_calls) = extract_response_payload(&value);
                 let spawner = ResponseExtractionSpawner::new(state, memory_key, session_id);
-                spawner.spawn_extraction(content, tool_calls);
+                spawner.spawn_extraction(user_message, content, tool_calls);
             }
             Json(sse_parser::inject_marker_non_streaming(value, &marker)).into_response()
         }
@@ -220,7 +253,7 @@ impl ResponseExtractionSpawner {
 }
 
 impl ExtractionSpawner for ResponseExtractionSpawner {
-    fn spawn_extraction(self, content: String, tool_calls: Vec<ToolCall>) {
+    fn spawn_extraction(self, user_message: String, content: String, tool_calls: Vec<ToolCall>) {
         let ResponseExtractionSpawner {
             facts,
             sessions,
@@ -247,7 +280,13 @@ impl ExtractionSpawner for ResponseExtractionSpawner {
                 enable_response_extraction: true,
             };
             match use_case
-                .execute(&content, &tool_calls, &memory_key, &session_id)
+                .execute(
+                    &user_message,
+                    &content,
+                    &tool_calls,
+                    &memory_key,
+                    &session_id,
+                )
                 .await
             {
                 Ok(count) => tracing::info!(

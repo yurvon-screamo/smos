@@ -189,7 +189,7 @@ where
             enable_response_extraction: self.enable_response_extraction,
         };
         extractor
-            .execute(&turn.content, &turn.tool_calls, memory_key, session_id)
+            .execute("", &turn.content, &turn.tool_calls, memory_key, session_id)
             .await
     }
 }

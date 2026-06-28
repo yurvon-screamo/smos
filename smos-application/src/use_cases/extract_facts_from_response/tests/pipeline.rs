@@ -21,7 +21,7 @@ async fn execute_disabled_returns_zero_without_calling_extractor() {
     uc.enable_response_extraction = false;
 
     let n = uc
-        .execute("TTL=10 prevents refresh loop", &[], &mk(), &sid(1))
+        .execute("", "TTL=10 prevents refresh loop", &[], &mk(), &sid(1))
         .await
         .unwrap();
     assert_eq!(n, 0);
@@ -46,7 +46,7 @@ async fn execute_short_input_returns_zero_without_calling_extractor() {
     );
 
     // "ok" is 2 chars < MIN_INPUT_CHARS (15).
-    let n = uc.execute("ok", &[], &mk(), &sid(1)).await.unwrap();
+    let n = uc.execute("", "ok", &[], &mk(), &sid(1)).await.unwrap();
     assert_eq!(n, 0);
 }
 
@@ -69,7 +69,13 @@ async fn execute_saves_new_pending_fact_and_registers_it() {
     );
 
     let n = uc
-        .execute("we changed TTL to 10 to stop the loop", &[], &mk(), &sid(1))
+        .execute(
+            "",
+            "we changed TTL to 10 to stop the loop",
+            &[],
+            &mk(),
+            &sid(1),
+        )
         .await
         .unwrap();
 
@@ -109,7 +115,7 @@ async fn execute_unavailable_extractor_skips_gracefully() {
     );
 
     let n = uc
-        .execute("some real content long enough", &[], &mk(), &sid(1))
+        .execute("", "some real content long enough", &[], &mk(), &sid(1))
         .await
         .unwrap();
     assert_eq!(n, 0);
@@ -142,7 +148,7 @@ async fn execute_retries_on_request_failed_then_succeeds() {
     );
 
     let n = uc
-        .execute("the auth module uses JWT", &[], &mk(), &sid(1))
+        .execute("", "the auth module uses JWT", &[], &mk(), &sid(1))
         .await
         .unwrap();
     assert_eq!(n, 1);
@@ -169,7 +175,7 @@ async fn execute_gives_up_after_all_attempts_fail() {
     );
 
     let result = uc
-        .execute("content long enough to pass gate", &[], &mk(), &sid(1))
+        .execute("", "content long enough to pass gate", &[], &mk(), &sid(1))
         .await;
     assert!(result.is_err(), "final failure propagates as Err");
     assert!(facts.is_empty());
@@ -192,7 +198,7 @@ async fn execute_strips_smos_noise_before_extraction() {
     );
 
     let content = "real content about the deployment\n<!-- smos:sess_abcdef012345 -->\n<smos-memory session=\"s\">x</smos-memory>";
-    let n = uc.execute(content, &[], &mk(), &sid(1)).await.unwrap();
+    let n = uc.execute("", content, &[], &mk(), &sid(1)).await.unwrap();
     assert_eq!(n, 1);
 }
 
@@ -228,7 +234,7 @@ async fn execute_cross_session_confirms_existing_fact() {
 
     // Same fact observed from session 2 → confirmation, not a new fact.
     let n = uc
-        .execute("shared fact content here", &[], &mk(), &sid(2))
+        .execute("", "shared fact content here", &[], &mk(), &sid(2))
         .await
         .unwrap();
     assert_eq!(n, 0, "confirmation does not count as a new fact");
@@ -275,7 +281,7 @@ async fn recording_embedder_yields_distinct_vectors_for_distinct_facts() {
     );
 
     let n = uc
-        .execute("content covering both directives", &[], &mk(), &sid(1))
+        .execute("", "content covering both directives", &[], &mk(), &sid(1))
         .await
         .unwrap();
     assert_eq!(n, 2, "two distinct facts persisted");
@@ -326,6 +332,7 @@ async fn execute_propagates_err_when_batch_contains_empty_raw_fact() {
 
     let result = uc
         .execute(
+            "",
             "content long enough to clear MIN_INPUT_CHARS",
             &[],
             &mk(),
@@ -335,5 +342,154 @@ async fn execute_propagates_err_when_batch_contains_empty_raw_fact() {
     assert!(
         result.is_err(),
         "empty raw fact must surface as Err (the only safe non-silent path)"
+    );
+}
+
+/// A long user message MUST NOT let a short assistant reply through the gate.
+/// This pins the gate-on-assistant-signal invariant: the gate considers only
+/// the cleaned assistant content + tool calls, never the user message. A future
+/// regression that moves the gate onto the combined input would let this case
+/// through and call the extractor — this test would catch it.
+#[tokio::test]
+async fn execute_long_user_message_does_not_let_short_assistant_reply_through_gate() {
+    let facts = InMemoryFacts::default();
+    let sessions = RecordingSessions::default();
+    let extractor = ScriptedExtractor::new(vec![Err(ProviderError::Unavailable(
+        "must not be called".into(),
+    ))]);
+    let fix = Fix::new();
+    let uc = build(
+        &facts,
+        &sessions,
+        &extractor,
+        &fix.embedder,
+        &fix.clock,
+        &fix.cfg,
+        &fix.extraction_cfg,
+    );
+
+    let long_user = "Could you please explain in great detail how the authentication subsystem works, including all the moving parts and the rationale behind each decision that was made along the way?";
+    let n = uc
+        .execute(long_user, "ok", &[], &mk(), &sid(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "short assistant reply must short-circuit regardless of user message length"
+    );
+    assert_eq!(
+        extractor.call_count(),
+        0,
+        "gate is on assistant signal only — extractor never invoked"
+    );
+}
+
+// -----------------------------------------------------------------------
+// user_message threading — role markup + gate semantics
+// -----------------------------------------------------------------------
+
+/// A non-empty user message is prepended with explicit "User:/Assistant:"
+/// role markup so the extractor sees the question→answer pair. The recorded
+/// extractor input is the exact combined string.
+#[tokio::test]
+async fn execute_with_user_message_frames_input_with_role_markup() {
+    let facts = InMemoryFacts::default();
+    let sessions = RecordingSessions::default();
+    let extractor = ScriptedExtractor::new(vec![Ok(vec!["a fact".to_string()])]);
+    let fix = Fix::new();
+    let uc = build(
+        &facts,
+        &sessions,
+        &extractor,
+        &fix.embedder,
+        &fix.clock,
+        &fix.cfg,
+        &fix.extraction_cfg,
+    );
+
+    let n = uc
+        .execute(
+            "  how does auth work?  ",
+            "the auth uses JWT",
+            &[],
+            &mk(),
+            &sid(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+
+    let inputs = extractor.inputs();
+    assert_eq!(inputs.len(), 1, "extractor invoked exactly once");
+    assert_eq!(
+        inputs[0].0, "User:\nhow does auth work?\n\nAssistant:\nthe auth uses JWT",
+        "user message trimmed and framed with role labels"
+    );
+}
+
+/// An empty user message (the import-path shape) produces a label-free input
+/// byte-identical to the pre-markup extraction shape — no "Assistant:" prefix.
+#[tokio::test]
+async fn execute_with_empty_user_message_omits_role_labels() {
+    let facts = InMemoryFacts::default();
+    let sessions = RecordingSessions::default();
+    let extractor = ScriptedExtractor::new(vec![Ok(vec!["a fact".to_string()])]);
+    let fix = Fix::new();
+    let uc = build(
+        &facts,
+        &sessions,
+        &extractor,
+        &fix.embedder,
+        &fix.clock,
+        &fix.cfg,
+        &fix.extraction_cfg,
+    );
+
+    uc.execute("", "the auth uses JWT", &[], &mk(), &sid(1))
+        .await
+        .unwrap();
+
+    let inputs = extractor.inputs();
+    assert_eq!(
+        inputs[0].0, "the auth uses JWT",
+        "no role labels when user_message is empty"
+    );
+}
+
+/// A response that is ONLY a `<think>` block (no factual answer) must short-
+/// circuit: after noise stripping the assistant signal is empty, so extraction
+/// is skipped and the extractor is never called.
+#[tokio::test]
+async fn execute_with_think_only_response_skips_extraction() {
+    let facts = InMemoryFacts::default();
+    let sessions = RecordingSessions::default();
+    let extractor = ScriptedExtractor::new(vec![Err(ProviderError::Unavailable(
+        "must not be called".into(),
+    ))]);
+    let fix = Fix::new();
+    let uc = build(
+        &facts,
+        &sessions,
+        &extractor,
+        &fix.embedder,
+        &fix.clock,
+        &fix.cfg,
+        &fix.extraction_cfg,
+    );
+
+    let think_only =
+        "<think>long reasoning that is well over the 15-char floor but carries no fact</think>";
+    let n = uc
+        .execute("", think_only, &[], &mk(), &sid(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "think-only response has no extractable assistant signal"
+    );
+    assert_eq!(
+        extractor.call_count(),
+        0,
+        "extractor never invoked when assistant signal is empty after think-strip"
     );
 }

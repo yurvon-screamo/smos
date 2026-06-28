@@ -74,7 +74,11 @@ fn classify_event(event: &SseEvent, marker: &str, marker_emitted: &mut bool) -> 
 /// tasks by axum).
 pub trait ExtractionSpawner: Send {
     /// Consume the spawner and launch the background extraction task.
-    fn spawn_extraction(self, content: String, tool_calls: Vec<ToolCall>);
+    ///
+    /// `user_message` is the original user prompt (CONTEXT for the assistant
+    /// reply); `content` is the finalised assistant response. Both flow into
+    /// the extraction use case so the extractor sees the question→answer pair.
+    fn spawn_extraction(self, user_message: String, content: String, tool_calls: Vec<ToolCall>);
 }
 
 /// Lightweight marker-only wrapper: forwards chunks 1:1 and injects the
@@ -137,10 +141,12 @@ where
 ///    chunk — same behaviour as [`inject_marker`]).
 /// 2. Every chunk ALSO feeds `buffer` (content + tool-call deltas).
 /// 3. Once the stream ends, `buffer` is finalised and `spawner.spawn_extraction`
-///    launches the background extraction task.
+///    launches the background extraction task with the original user message
+///    threaded through as framing context.
 pub fn inject_marker_with_extraction<S, E>(
     upstream: S,
     marker: String,
+    user_message: String,
     buffer: StreamingBuffer,
     spawner: E,
 ) -> impl Stream<Item = Result<Event, Infallible>> + Send
@@ -196,7 +202,7 @@ where
         // Stream fully consumed: hand the buffered payload to the extraction
         // task. Non-blocking — `spawn_extraction` detaches the work.
         let (content, tool_calls) = buffer.finalize().await;
-        spawner.spawn_extraction(content, tool_calls);
+        spawner.spawn_extraction(user_message, content, tool_calls);
     }
 }
 
@@ -291,12 +297,19 @@ mod tests {
 
     #[derive(Default)]
     struct Recording {
+        user_message: Arc<Mutex<Option<String>>>,
         content: Arc<Mutex<Option<String>>>,
         calls: Arc<Mutex<Vec<ToolCall>>>,
         invoked: Arc<Mutex<bool>>,
     }
     impl ExtractionSpawner for Recording {
-        fn spawn_extraction(self, content: String, tool_calls: Vec<ToolCall>) {
+        fn spawn_extraction(
+            self,
+            user_message: String,
+            content: String,
+            tool_calls: Vec<ToolCall>,
+        ) {
+            *self.user_message.lock().unwrap() = Some(user_message);
             *self.content.lock().unwrap() = Some(content);
             *self.calls.lock().unwrap() = tool_calls;
             *self.invoked.lock().unwrap() = true;
@@ -310,10 +323,12 @@ mod tests {
                     data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
                     data: [DONE]\n\n";
 
+        let user_slot = Arc::new(Mutex::new(None));
         let content_slot = Arc::new(Mutex::new(None));
         let calls_slot = Arc::new(Mutex::new(Vec::new()));
         let invoked_slot = Arc::new(Mutex::new(false));
         let rec = Recording {
+            user_message: user_slot.clone(),
             content: content_slot.clone(),
             calls: calls_slot.clone(),
             invoked: invoked_slot.clone(),
@@ -322,6 +337,7 @@ mod tests {
         drain(inject_marker_with_extraction(
             bytes_stream(vec![body.into()]),
             "\n<!-- smos:sess_x -->".into(),
+            "the user question".into(),
             StreamingBuffer::new(),
             rec,
         ))
@@ -330,6 +346,11 @@ mod tests {
         assert!(
             *invoked_slot.lock().unwrap(),
             "spawner invoked at stream end"
+        );
+        assert_eq!(
+            user_slot.lock().unwrap().as_deref(),
+            Some("the user question"),
+            "user message threaded through to the spawner"
         );
         assert_eq!(
             content_slot.lock().unwrap().as_deref(),
@@ -352,7 +373,12 @@ mod tests {
         #[derive(Clone)]
         struct Capture(Arc<Mutex<Captured>>);
         impl ExtractionSpawner for Capture {
-            fn spawn_extraction(self, content: String, tool_calls: Vec<ToolCall>) {
+            fn spawn_extraction(
+                self,
+                _user_message: String,
+                content: String,
+                tool_calls: Vec<ToolCall>,
+            ) {
                 *self.0.lock().unwrap() = Some((content, tool_calls));
             }
         }
@@ -361,6 +387,7 @@ mod tests {
         drain(inject_marker_with_extraction(
             bytes_stream(vec![body.into()]),
             "\n<!-- smos:sess_y -->".into(),
+            String::new(),
             StreamingBuffer::new(),
             cap,
         ))
@@ -381,7 +408,7 @@ mod tests {
         #[derive(Clone)]
         struct Flag(Arc<Mutex<bool>>);
         impl ExtractionSpawner for Flag {
-            fn spawn_extraction(self, _c: String, _t: Vec<ToolCall>) {
+            fn spawn_extraction(self, _u: String, _c: String, _t: Vec<ToolCall>) {
                 *self.0.lock().unwrap() = true;
             }
         }
@@ -389,6 +416,7 @@ mod tests {
         drain(inject_marker_with_extraction(
             bytes_stream(vec![body.into()]),
             "<!-- smos:sess_z -->".into(),
+            String::new(),
             StreamingBuffer::new(),
             flag,
         ))
@@ -425,7 +453,12 @@ mod tests {
         #[derive(Clone)]
         struct Capture(Arc<Mutex<Captured>>);
         impl ExtractionSpawner for Capture {
-            fn spawn_extraction(self, content: String, tool_calls: Vec<ToolCall>) {
+            fn spawn_extraction(
+                self,
+                _user_message: String,
+                content: String,
+                tool_calls: Vec<ToolCall>,
+            ) {
                 *self.0.lock().unwrap() = Some((content, tool_calls));
             }
         }
@@ -434,6 +467,7 @@ mod tests {
         drain(inject_marker_with_extraction(
             upstream,
             "<!-- smos:sess_b2 -->".into(),
+            String::new(),
             StreamingBuffer::new(),
             cap,
         ))
@@ -469,7 +503,7 @@ mod tests {
         #[derive(Default)]
         struct Noop;
         impl ExtractionSpawner for Noop {
-            fn spawn_extraction(self, _: String, _: Vec<ToolCall>) {}
+            fn spawn_extraction(self, _: String, _: String, _: Vec<ToolCall>) {}
         }
         assert_infallible_signature(&Noop);
     }

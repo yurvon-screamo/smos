@@ -13,12 +13,18 @@
 //!
 //! 1. Kill-switch: `enable_response_extraction = false` → return 0 immediately.
 //! 2. Strip SMOS-internal noise (session marker, `<smos-memory>` block, bare
-//!    `sess_<id>`) via `noise_filter::clean` so the extractor never turns
-//!    control metadata into a "fact".
-//! 3. Append formatted tool calls to the input (facts may live in tool results
-//!    — e.g. file content returned by a `read` tool).
-//! 4. Short-circuit when the combined input is below `MIN_INPUT_CHARS` (short
-//!    replies like "ok" carry no extractable signal).
+//!    `sess_<id>`, inline `<think>` reasoning) via `noise_filter::clean` so the
+//!    extractor never turns control metadata or model internals into a "fact".
+//! 3. Append formatted tool calls to the assistant signal (facts may live in
+//!    tool results — e.g. file content returned by a `read` tool).
+//! 4. Short-circuit when the ASSISTANT signal is below `MIN_INPUT_CHARS`
+//!    (short replies like "ok" carry no extractable signal). The user message
+//!    is CONTEXT for framing the answer, never a source of facts, so it never
+//!    influences the gate. When the gate passes, the user message is prepended
+//!    with explicit `"User:\n…\n\nAssistant:\n…"` role markup so the extractor
+//!    sees the question→answer pair; absent a user message (import paths), the
+//!    input is the bare assistant signal, byte-identical to the pre-markup
+//!    shape.
 //! 5. Retry the extractor up to 3 times with exponential backoff (1 s, 2 s —
 //!    sleeps BETWEEN attempts, never after the last). `Unavailable` (model
 //!    unreachable) skips gracefully; other errors retry.
@@ -93,8 +99,17 @@ where
     /// Run the extraction pipeline. Returns the number of newly-stored pending
     /// facts (cross-session confirmations do not count — they update an
     /// existing fact rather than adding one).
+    ///
+    /// `user_message` is the original user prompt (CONTEXT for the assistant
+    /// reply). It is prepended with `"User:\n…\n\nAssistant:\n…"` role markup
+    /// so the extractor sees the question→answer pair. It is intentionally NOT
+    /// noise-filtered: SMOS markers and `<think>` blocks only appear in model
+    /// output, never in a genuine user prompt. When `user_message` is empty
+    /// (import paths) the input is the bare assistant signal, with no role
+    /// labels, byte-identical to the pre-markup shape.
     pub async fn execute(
         &self,
+        user_message: &str,
         content: &str,
         tool_calls: &[ToolCall],
         memory_key: &MemoryKey,
@@ -105,17 +120,36 @@ where
             return Ok(0);
         }
 
-        // Steps 2 + 3 — clean noise, append tool calls.
-        let mut input = noise_filter::clean(content);
-        input.push_str(&format_tool_calls(tool_calls));
+        // Steps 2 + 3 — clean noise, append tool calls. The assistant signal is
+        // what the gate and the extractor care about; the user message is
+        // framing only.
+        let cleaned = noise_filter::clean(content);
+        let assistant_signal = format!("{}{}", cleaned, format_tool_calls(tool_calls));
 
-        // Step 4 — short-circuit on too-short input.
-        if input.trim().chars().count() < MIN_INPUT_CHARS {
+        // Step 4 — short-circuit on too-short ASSISTANT signal. The user message
+        // never influences the gate: a bare "ok" reply carries no extractable
+        // fact regardless of the question that prompted it.
+        if assistant_signal.trim().chars().count() < MIN_INPUT_CHARS {
             tracing::debug!(
-                len = input.len(),
-                "extraction skipped: input below MIN_INPUT_CHARS"
+                len = assistant_signal.len(),
+                "extraction skipped: assistant signal below MIN_INPUT_CHARS"
             );
             return Ok(0);
+        }
+
+        // Frame the user message + assistant signal with explicit role labels so
+        // the extractor understands the question→answer context. The "Assistant:"
+        // label is added only alongside a "User:" label — without a user message
+        // there is nothing to disambiguate, so the bare signal is used verbatim.
+        let mut input = String::new();
+        let user_trimmed = user_message.trim();
+        if !user_trimmed.is_empty() {
+            input.push_str("User:\n");
+            input.push_str(user_trimmed);
+            input.push_str("\n\nAssistant:\n");
+            input.push_str(&assistant_signal);
+        } else {
+            input.push_str(&assistant_signal);
         }
 
         // Step 5 — extract with retries.

@@ -80,7 +80,7 @@ pub async fn run_raw_import(config_path: &str, args: RawImportArgs) -> Result<()
     };
 
     let count = use_case
-        .execute(&args.text, &[], &memory_key, &session_id)
+        .execute("", &args.text, &[], &memory_key, &session_id)
         .await?;
 
     println!("\n=== Raw import complete ===");

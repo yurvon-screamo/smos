@@ -79,6 +79,34 @@ async fn scripted_extractor_returns_in_order_then_empty() {
     assert_eq!(extractor.call_count(), 3);
 }
 
+#[tokio::test]
+async fn scripted_extractor_records_input_pairs_in_order() {
+    use smos_domain::chat::{ToolArguments, ToolCall};
+
+    let extractor = ScriptedExtractor::new(vec![Ok(vec!["fact".to_string()])]);
+    let tool_call = ToolCall {
+        name: "read_file".into(),
+        arguments: ToolArguments::from_json(r#"{"path":"auth.rs"}"#),
+    };
+
+    extractor
+        .extract_facts("User:\nq\n\nAssistant:\na", &[])
+        .await
+        .unwrap();
+    extractor
+        .extract_facts("plain", std::slice::from_ref(&tool_call))
+        .await
+        .unwrap();
+
+    let inputs = extractor.inputs();
+    assert_eq!(inputs.len(), 2, "one recorded pair per call");
+    assert_eq!(inputs[0].0, "User:\nq\n\nAssistant:\na");
+    assert!(inputs[0].1.is_empty());
+    assert_eq!(inputs[1].0, "plain");
+    assert_eq!(inputs[1].1.len(), 1);
+    assert_eq!(inputs[1].1[0].name, "read_file");
+}
+
 #[test]
 fn fixed_clock_constant() {
     let clock = FixedClock(ts());

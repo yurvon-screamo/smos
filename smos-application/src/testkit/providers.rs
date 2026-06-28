@@ -14,9 +14,15 @@ use crate::types::RerankResult;
 /// invocations. When the script is exhausted, subsequent calls return an empty
 /// `Vec` (mirroring a provider that simply finds no facts) rather than
 /// erroring, so tests that do not care about the Nth call still pass.
+///
+/// Records every `(content, tool_calls)` pair handed to `extract_facts` via
+/// [`ScriptedExtractor::inputs`] — the parity-shaped accessor the NLI/reranker
+/// fakes expose — so tests can assert on the exact input that reached the
+/// extractor (e.g. the `"User:/Assistant:"` role markup).
 pub struct ScriptedExtractor {
     results: Mutex<Vec<Result<Vec<String>, ProviderError>>>,
     calls: Mutex<u32>,
+    inputs: Mutex<Vec<(String, Vec<ToolCall>)>>,
 }
 
 impl ScriptedExtractor {
@@ -24,21 +30,31 @@ impl ScriptedExtractor {
         Self {
             results: Mutex::new(results),
             calls: Mutex::new(0),
+            inputs: Mutex::new(Vec::new()),
         }
     }
 
     pub fn call_count(&self) -> u32 {
         *self.calls.lock().unwrap()
     }
+
+    /// Recorded `(content, tool_calls)` pairs in invocation order.
+    pub fn inputs(&self) -> Vec<(String, Vec<ToolCall>)> {
+        self.inputs.lock().unwrap().clone()
+    }
 }
 
 impl LlmExtractor for ScriptedExtractor {
     async fn extract_facts(
         &self,
-        _content: &str,
-        _tool_calls: &[ToolCall],
+        content: &str,
+        tool_calls: &[ToolCall],
     ) -> Result<Vec<String>, ProviderError> {
         *self.calls.lock().unwrap() += 1;
+        self.inputs
+            .lock()
+            .unwrap()
+            .push((content.to_string(), tool_calls.to_vec()));
         let mut guard = self.results.lock().unwrap();
         if guard.is_empty() {
             Ok(Vec::new())
