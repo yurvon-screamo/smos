@@ -198,7 +198,7 @@ pub struct ProviderConfig {
 /// ```toml
 /// [persons.bob]
 /// provider = "llama-local"
-/// model = "nemotron-3-nano-4b"
+/// model = "qwen3.5-2b"
 /// persona = "~/.smos/persons/bob.md"  # optional
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,7 +378,7 @@ pub struct AuditConfig {
     /// Cloud base URL (no path). Defaults to OpenRouter.
     pub cloud_base_url: String,
     /// Local model id forwarded as `request.model` to the local
-    /// OpenAI-compatible chat server (e.g. `nemotron-3-nano-4b`).
+    /// OpenAI-compatible chat server (e.g. `qwen3.5-2b`).
     pub local_model: String,
     /// Local chat-server base URL.
     pub local_url: String,

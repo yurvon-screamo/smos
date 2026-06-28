@@ -11,7 +11,7 @@
 //! 2. **llama-server** — checks the binary is reachable on `PATH` (every
 //!    local role — embedding, extraction, reranker — depends on it).
 //! 3. **GGUF models** — downloads the three required GGUF weights
-//!    (Nemotron extraction LLM, Jina embeddings, Qwen3 reranker) from
+//!    (Qwen3.5-2B-MTP extraction LLM, Jina embeddings, Qwen3 reranker) from
 //!    HuggingFace into `~/.smos/models/`. Already-present files are skipped,
 //!    so re-running init only retries the failed downloads. See
 //!    [`init_models`].

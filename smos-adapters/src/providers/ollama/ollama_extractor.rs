@@ -1,6 +1,6 @@
 //! `OllamaExtractor` — `LlmExtractor` against an OpenAI-compatible
-//! `/v1/chat/completions` endpoint backed by `llama-server` (Nemotron-class
-//! model by default).
+//! `/v1/chat/completions` endpoint backed by `llama-server` (Qwen3.5-2B-MTP
+//! by default).
 //!
 //! Sends a system+user prompt pair (few-shot instructions + the response text),
 //! parses the bullet-list reply, and filters prompt-echo noise so SMOS control
@@ -53,7 +53,7 @@ DO NOT extract:\n\
 Output as a bullet list, one fact per line starting with \"- \". Quality over quantity.";
 
 /// OpenAI-compatible fact extractor backed by `llama-server`
-/// (Nemotron-3-Nano-4B by default).
+/// (Qwen3.5-2B-MTP by default).
 #[derive(Clone)]
 pub struct OllamaExtractor {
     client: Client,
@@ -86,6 +86,18 @@ struct ChatRequest<'a> {
     /// `temperature: 0.0`: the same input re-yields the same bullet list, so
     /// `FactId = SHA1(content)` stays stable across re-extraction runs.
     seed: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
+}
+
+/// Disables Qwen3.5 thinking mode. Qwen3.5 dropped the Qwen3-era
+/// `/no_think` soft switch: thinking is toggled only via the
+/// `enable_thinking` chat-template variable, which llama-server reads from
+/// the nested `chat_template_kwargs` object (the top-level `enable_thinking`
+/// key is silently ignored).
+#[derive(Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
 }
 
 #[derive(Serialize)]
@@ -132,6 +144,9 @@ impl LlmExtractor for OllamaExtractor {
             stream: false,
             temperature: self.config.temperature,
             seed: self.config.seed,
+            chat_template_kwargs: Some(ChatTemplateKwargs {
+                enable_thinking: false,
+            }),
         };
 
         let response = match self.client.post(self.chat_url()).json(&body).send().await {
@@ -243,7 +258,7 @@ mod tests {
     fn cfg(url: &str) -> Arc<LlmExtractionConfig> {
         Arc::new(LlmExtractionConfig {
             url: url.into(),
-            model: "nemotron-3-nano-4b".into(),
+            model: "qwen3.5-2b".into(),
             timeout_seconds: 2,
             ..LlmExtractionConfig::default()
         })
@@ -259,6 +274,47 @@ mod tests {
     fn chat_url_for_plain_base() {
         let ext = OllamaExtractor::new(cfg("http://llama:28082")).expect("build");
         assert_eq!(ext.chat_url(), "http://llama:28082/v1/chat/completions");
+    }
+
+    #[test]
+    fn chat_request_disables_thinking_via_nested_chat_template_kwargs() {
+        let body = ChatRequest {
+            model: "qwen3.5-2b",
+            messages: vec![ChatMessage {
+                role: "user",
+                content: "hi".to_string(),
+            }],
+            stream: false,
+            temperature: 0.0,
+            seed: 42,
+            chat_template_kwargs: Some(ChatTemplateKwargs {
+                enable_thinking: false,
+            }),
+        };
+        let json = serde_json::to_value(&body).expect("serialize ChatRequest");
+        assert_eq!(
+            json["chat_template_kwargs"]["enable_thinking"], false,
+            "thinking must be disabled inside the nested chat_template_kwargs \
+             object; llama-server ignores a top-level enable_thinking key"
+        );
+    }
+
+    #[test]
+    fn chat_request_omits_chat_template_kwargs_when_none() {
+        let body = ChatRequest {
+            model: "qwen3.5-2b",
+            messages: vec![],
+            stream: false,
+            temperature: 0.0,
+            seed: 42,
+            chat_template_kwargs: None,
+        };
+        let json = serde_json::to_value(&body).expect("serialize ChatRequest");
+        assert!(
+            json.get("chat_template_kwargs").is_none(),
+            "chat_template_kwargs must be absent when None so requests for \
+             models that do not read it stay byte-identical"
+        );
     }
 
     #[test]

@@ -71,9 +71,19 @@ impl Default for LlamaCppConfig {
                 extra_args: vec!["--ctx-size".into(), "8192".into()],
             },
             extraction: LlamaCppServiceConfig {
-                model_path: mk("nemotron-3-nano-4b.gguf"),
+                model_path: mk("qwen3.5-2b-q5_k_m.gguf"),
                 port: 28082,
-                extra_args: vec!["--ctx-size".into(), "4096".into()],
+                extra_args: vec![
+                    "--ctx-size".into(),
+                    "4096".into(),
+                    "--spec-type".into(),
+                    "draft-mtp".into(),
+                    "--spec-draft-n-max".into(),
+                    "3".into(),
+                    "-np".into(),
+                    "1".into(),
+                    "--no-mmproj".into(),
+                ],
             },
             idle_timeout_seconds: Some(300),
         }

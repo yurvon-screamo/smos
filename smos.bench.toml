@@ -36,10 +36,12 @@ name = "bench-placeholder"
 url = "http://localhost:28082/v1/chat/completions"
 api_key_env = ""
 
-# Fact-extraction LLM (Nemotron-3-Nano-4B). Same endpoint as the main config.
+# Fact-extraction LLM. Same endpoint as the main config.
+# Switched to Qwen3.5-2B-MTP (GGUF served by llama-server on :28082);
+# previously nemotron-3-nano-4b.
 [llm_extraction]
 url = "http://localhost:28082"
-model = "nemotron-3-nano-4b"
+model = "qwen3.5-2b"
 api_key = ""
 timeout_seconds = 180
 temperature = 0.0
@@ -101,7 +103,7 @@ min_threshold = 0.2
 [session]
 timeout_seconds = 1800
 pending_overflow_threshold = 20
-scan_interval_seconds = 60
+scan_interval_seconds = 15
 
 [audit]
 enabled = false
@@ -112,6 +114,16 @@ binary = "llama-server"
 # auto-launch is off — start the three llama-server endpoints yourself.
 auto_launch = false
 idle_timeout_seconds = 300
+
+# Reference-only: auto_launch=false above means `smos serve` never spawns
+# from this section. It documents the extraction command the operator runs
+# by hand (Qwen3.5-2B-MTP with speculative decode on :28082).
+[llama_cpp.extraction]
+model_path = "~/.smos/models/qwen3.5-2b-q5_k_m.gguf"
+port = 28082
+# MTP speculative decode: `-np 1` is REQUIRED (parallel slots >1 unsupported
+# with draft-mtp), `--no-mmproj` skips the vision encoder (text-only model).
+extra_args = ["--ctx-size", "4096", "--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "-np", "1", "--no-mmproj"]
 
 [git]
 repo_url = ""

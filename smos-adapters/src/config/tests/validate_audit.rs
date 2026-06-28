@@ -108,7 +108,7 @@ fn validate_rejects_person_referencing_unknown_provider() {
         "bob".into(),
         PersonConfig {
             provider: "typo".into(),
-            model: "nemotron-3-nano-4b".into(),
+            model: "qwen3.5-2b".into(),
             persona: String::new(),
         },
     );
@@ -154,7 +154,7 @@ fn validate_rejects_person_with_unsafe_name_at_startup() {
         "a/b".into(),
         PersonConfig {
             provider: "p".into(),
-            model: "nemotron-3-nano-4b".into(),
+            model: "qwen3.5-2b".into(),
             persona: String::new(),
         },
     );
@@ -179,7 +179,7 @@ fn validate_accepts_person_referencing_known_provider() {
         "bob".into(),
         PersonConfig {
             provider: "p".into(),
-            model: "nemotron-3-nano-4b".into(),
+            model: "qwen3.5-2b".into(),
             persona: String::new(),
         },
     );

@@ -81,7 +81,7 @@ api_key_env = ""                    # env var name; empty = no auth header sent
 
 [persons.bob]
 provider = "llama-local"            # MUST match a [[providers]].name
-model = "nemotron-3-nano-4b"        # upstream model id
+model = "qwen3.5-2b"                # upstream model id
 persona = "~/.smos/persons/bob.md"  # optional; `~` expands to user home
 
 # Example second person.
@@ -91,12 +91,12 @@ persona = "~/.smos/persons/bob.md"  # optional; `~` expands to user home
 # persona = "~/.smos/persons/alice.md"
 
 # ---------------------------------------------------------------------------
-# LLM for fact extraction (Nemotron-3-Nano-4B or any OpenAI-compatible model
+# LLM for fact extraction (Qwen3.5-2B-MTP or any OpenAI-compatible model
 # served by `llama-server`).
 # ---------------------------------------------------------------------------
 [llm_extraction]
 url = "http://localhost:28082"           # API base (the adapter appends /v1/chat/completions)
-model = "nemotron-3-nano-4b"
+model = "qwen3.5-2b"
 api_key = ""                            # optional, for cloud providers
 timeout_seconds = 30
 # Deterministic extraction: temperature=0 disables random sampling, seed pins
@@ -183,7 +183,10 @@ min_threshold = 0.2
 [session]
 timeout_seconds = 1800
 pending_overflow_threshold = 20
-scan_interval_seconds = 60
+# Pending→Accepted promotion cadence. Lowering from 60s to 15s shortens the
+# window a freshly-extracted fact waits before the watcher re-runs the NLI /
+# confidence scan, at the cost of more NLI cycles per minute.
+scan_interval_seconds = 15
 
 # SMOS Dreaming Agent — autonomous LLM-driven memory audit. Disabled by
 # default; flip `enabled = true` to opt in. The agent runs on a cron schedule,
@@ -198,7 +201,7 @@ cloud_model = "z-ai/glm-4.6"
 # dreaming module expands the placeholder via std::env::var at runtime.
 cloud_api_key = ""
 cloud_base_url = "https://openrouter.ai/api/v1"
-local_model = "nemotron-3-nano-4b"
+local_model = "qwen3.5-2b"
 local_url = "http://localhost:28082"
 max_deletions_per_run = 50
 max_merges_per_run = 100
@@ -238,9 +241,11 @@ port = 28181
 extra_args = ["--ctx-size", "8192"]
 
 [llama_cpp.extraction]
-model_path = "~/.smos/models/nemotron-3-nano-4b.gguf"
+model_path = "~/.smos/models/qwen3.5-2b-q5_k_m.gguf"
 port = 28082
-extra_args = ["--ctx-size", "4096"]
+# MTP speculative decode: `-np 1` is REQUIRED (parallel slots >1 unsupported
+# with draft-mtp), `--no-mmproj` skips the vision encoder (text-only model).
+extra_args = ["--ctx-size", "4096", "--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "-np", "1", "--no-mmproj"]
 
 # ---------------------------------------------------------------------------
 # Git-backed memory sync.

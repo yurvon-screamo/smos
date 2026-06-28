@@ -51,9 +51,9 @@ struct GgufModelSpec {
 const REQUIRED_GGUF_MODELS: &[GgufModelSpec] = &[
     GgufModelSpec {
         role: "extraction",
-        repo_id: "nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF",
-        remote_filename: "NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf",
-        local_filename: "nemotron-3-nano-4b.gguf",
+        repo_id: "unsloth/Qwen3.5-2B-MTP-GGUF",
+        remote_filename: "Qwen3.5-2B-Q5_K_M.gguf",
+        local_filename: "qwen3.5-2b-q5_k_m.gguf",
     },
     GgufModelSpec {
         role: "embedding",
@@ -249,10 +249,10 @@ mod tests {
     /// silently drop the atomic-write guarantee.
     #[test]
     fn part_path_appends_part_suffix() {
-        let p = part_path(std::path::Path::new("/m/nemotron-3-nano-4b.gguf"));
+        let p = part_path(std::path::Path::new("/m/qwen3.5-2b-q5_k_m.gguf"));
         assert_eq!(
             p.file_name().unwrap(),
-            "nemotron-3-nano-4b.gguf.part",
+            "qwen3.5-2b-q5_k_m.gguf.part",
             "part_path must append .part without touching the original extension"
         );
     }

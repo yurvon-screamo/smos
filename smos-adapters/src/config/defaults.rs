@@ -32,7 +32,7 @@ impl Default for LlmExtractionConfig {
     fn default() -> Self {
         Self {
             url: "http://localhost:28082".into(),
-            model: "nemotron-3-nano-4b".into(),
+            model: "qwen3.5-2b".into(),
             api_key: String::new(),
             timeout_seconds: 30,
             temperature: 0.0,
@@ -80,7 +80,7 @@ impl Default for SessionConfig {
         Self {
             timeout_seconds: 1800,
             pending_overflow_threshold: 20,
-            scan_interval_seconds: 60,
+            scan_interval_seconds: 15,
         }
     }
 }
@@ -95,7 +95,7 @@ impl Default for AuditConfig {
             cloud_model: "z-ai/glm-4.6".into(),
             cloud_api_key: String::new(),
             cloud_base_url: "https://openrouter.ai/api/v1".into(),
-            local_model: "nemotron-3-nano-4b".into(),
+            local_model: "qwen3.5-2b".into(),
             local_url: "http://localhost:28082".into(),
             max_deletions_per_run: 50,
             max_merges_per_run: 100,

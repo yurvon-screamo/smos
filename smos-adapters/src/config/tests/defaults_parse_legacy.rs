@@ -12,7 +12,7 @@ fn default_has_canonical_values() {
     assert_eq!(cfg.nli.contradiction_threshold, 0.5);
     assert_eq!(cfg.nli.entailment_threshold, 0.6);
     assert!(cfg.nli_backend.model.starts_with("MoritzLaurer/"));
-    assert_eq!(cfg.llm_extraction.model, "nemotron-3-nano-4b");
+    assert_eq!(cfg.llm_extraction.model, "qwen3.5-2b");
     assert_eq!(cfg.llm_extraction.seed, 42);
     assert_eq!(cfg.embedding.dimensions, 1024);
 }
@@ -209,7 +209,7 @@ fn providers_and_persons_section_parses() {
                     timeout_seconds = 90\n\
                     [persons.bob]\n\
                     provider = \"llama-local\"\n\
-                    model = \"nemotron-3-nano-4b\"\n\
+                    model = \"qwen3.5-2b\"\n\
                     persona = \"~/.smos/persons/bob.md\"\n\
                     [persons.alice]\n\
                     provider = \"openrouter\"\n\
@@ -230,7 +230,7 @@ fn providers_and_persons_section_parses() {
 
     let bob = cfg.persons.get("bob").expect("person bob");
     assert_eq!(bob.provider, "llama-local");
-    assert_eq!(bob.model, "nemotron-3-nano-4b");
+    assert_eq!(bob.model, "qwen3.5-2b");
     assert_eq!(bob.persona, "~/.smos/persons/bob.md");
 
     let alice = cfg.persons.get("alice").expect("person alice");
@@ -304,7 +304,7 @@ fn legacy_unknown_section_does_not_bridge_into_canonical_sections() {
     let cfg = SmosConfig::load(tmp.path().to_str().unwrap()).expect("parse + validate");
     // Defaults preserved — legacy fields did NOT bleed through.
     assert_eq!(cfg.llm_extraction.url, "http://localhost:28082");
-    assert_eq!(cfg.llm_extraction.model, "nemotron-3-nano-4b");
+    assert_eq!(cfg.llm_extraction.model, "qwen3.5-2b");
     assert_eq!(cfg.llm_extraction.timeout_seconds, 30);
     assert!(cfg.embedding.model.starts_with("hf.co/jinaai"));
     assert_eq!(cfg.embedding.timeout_seconds, 30);
