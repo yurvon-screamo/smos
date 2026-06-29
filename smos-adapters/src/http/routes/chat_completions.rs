@@ -122,11 +122,21 @@ struct ResponseContext {
     enable_extraction: bool,
 }
 
-/// Return the trimmed text of the LAST message whose `role == "user"` and
-/// whose `content` is a plain string. Array/multipart content is skipped
-/// (conservative — those entries are rare and extracting their text parts is
-/// tracked as future scope). Returns an empty string when no such message
-/// exists, so the extraction use case falls back to its label-free path.
+/// Return the trimmed text of the LAST message whose `role == "user"`.
+///
+/// Content shape:
+/// - plain string → trimmed verbatim;
+/// - multipart array → the `type:"text"` parts are joined with `\n`
+///   (image/audio/binary parts are dropped — they carry no fact context and
+///   their base64 payload would bloat the extraction input, defeating the
+///   token-saving goal);
+/// - array with no text parts (image-only), missing content, or any other
+///   shape → empty string. The search does NOT fall back to an earlier user
+///   message in that case: an image-only turn genuinely has no textual
+///   question, and an earlier prompt would inject unrelated context.
+///
+/// Returns an empty string when no user message exists, so the extraction use
+/// case falls back to its label-free path.
 fn last_user_text(messages: &[serde_json::Value]) -> String {
     for msg in messages.iter().rev() {
         let is_user = msg
@@ -137,11 +147,43 @@ fn last_user_text(messages: &[serde_json::Value]) -> String {
         if !is_user {
             continue;
         }
-        if let Some(text) = msg.get("content").and_then(serde_json::Value::as_str) {
-            return text.trim().to_string();
-        }
+        return extract_user_text(msg.get("content"));
     }
     String::new()
+}
+
+/// Extract the textual content of one user message: plain string verbatim, or
+/// the `\n`-joined non-empty `type:"text"` parts of a multipart array.
+/// Anything else (non-text parts, missing content, numbers, …) yields "".
+fn extract_user_text(content: Option<&serde_json::Value>) -> String {
+    let Some(content) = content else {
+        return String::new();
+    };
+    if let Some(text) = content.as_str() {
+        return text.trim().to_string();
+    }
+    let Some(parts) = content.as_array() else {
+        return String::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            let is_text = part
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(|t| t == "text")
+                .unwrap_or(false);
+            if !is_text {
+                return None;
+            }
+            part.get("text")
+                .and_then(serde_json::Value::as_str)
+                .filter(|t| !t.is_empty())
+        })
+        .collect::<Vec<&str>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 /// Build the SSE response. When extraction is ENABLED, the stream is wrapped
@@ -328,5 +370,100 @@ struct FlatIdGenerator(Arc<dyn IdGeneratorPort + Send + Sync>);
 impl IdGeneratorPort for FlatIdGenerator {
     fn new_session_id(&self) -> SessionId {
         self.0.new_session_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn user(content: serde_json::Value) -> serde_json::Value {
+        json!({"role": "user", "content": content})
+    }
+
+    #[test]
+    fn last_user_text_returns_trimmed_string_content() {
+        let msgs = [user(json!("  hello world  "))];
+        assert_eq!(last_user_text(&msgs), "hello world");
+    }
+
+    #[test]
+    fn last_user_text_picks_last_user_message_when_many() {
+        let msgs = [
+            user(json!("first question")),
+            json!({"role": "assistant", "content": "answer"}),
+            user(json!("second question")),
+        ];
+        assert_eq!(last_user_text(&msgs), "second question");
+    }
+
+    #[test]
+    fn last_user_text_extracts_text_part_and_drops_image_from_multipart() {
+        let msgs = [user(json!([
+            {"type": "text", "text": "describe the scaling policy"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+        ]))];
+        assert_eq!(last_user_text(&msgs), "describe the scaling policy");
+    }
+
+    #[test]
+    fn last_user_text_joins_multiple_text_parts_with_newline() {
+        let msgs = [user(json!([
+            {"type": "text", "text": "q1"},
+            {"type": "text", "text": "q2"}
+        ]))];
+        assert_eq!(last_user_text(&msgs), "q1\nq2");
+    }
+
+    #[test]
+    fn last_user_text_drops_empty_text_parts() {
+        let msgs = [user(json!([
+            {"type": "text", "text": ""},
+            {"type": "text", "text": "real"}
+        ]))];
+        assert_eq!(last_user_text(&msgs), "real");
+    }
+
+    #[test]
+    fn last_user_text_image_only_array_yields_empty() {
+        let msgs = [user(json!([
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
+        ]))];
+        assert_eq!(
+            last_user_text(&msgs),
+            "",
+            "image-only turn carries no textual question"
+        );
+    }
+
+    #[test]
+    fn last_user_text_does_not_fall_back_to_earlier_user_message_on_image_only_turn() {
+        // The LAST user turn is image-only. We must NOT return the earlier
+        // text turn's content — that would inject an unrelated prompt.
+        let msgs = [
+            user(json!("earlier textual question")),
+            user(json!([{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}])),
+        ];
+        assert_eq!(
+            last_user_text(&msgs),
+            "",
+            "image-only turn must not fall back to an earlier user message"
+        );
+    }
+
+    #[test]
+    fn last_user_text_no_user_message_yields_empty() {
+        let msgs = [
+            json!({"role": "system", "content": "you are helpful"}),
+            json!({"role": "assistant", "content": "answer"}),
+        ];
+        assert_eq!(last_user_text(&msgs), "");
+    }
+
+    #[test]
+    fn last_user_text_missing_content_field_yields_empty() {
+        let msgs = [json!({"role": "user"})];
+        assert_eq!(last_user_text(&msgs), "");
     }
 }

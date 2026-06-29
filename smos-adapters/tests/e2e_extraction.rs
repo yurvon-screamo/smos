@@ -1072,3 +1072,69 @@ async fn extraction_threads_user_message_into_input_with_markup() {
         "assistant signal must follow the user block under its own label; got: {user_content}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 17. Multipart user content: text part extracted, multimodal parts dropped
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn extraction_extracts_text_part_from_multipart_user_content() {
+    let upstream = MockServer::start().await;
+    let llama = MockServer::start().await;
+    let reranker = MockServer::start().await;
+
+    let config = config_with_extraction(&upstream, &llama, &reranker);
+    let state = build_state(config).await;
+    mount_upstream_content(&upstream, "The autoscaler targets 70% CPU utilization").await;
+    mount_extractor_chat_facts(
+        &llama,
+        vec!["The autoscaler targets 70% CPU utilization".into()],
+    )
+    .await;
+    mount_extractor_embeddings(&llama).await;
+
+    let smos = serve_state(state.clone()).await;
+    // Multipart user turn: one text part + one image_url part. Only the text
+    // part must reach the extractor; the base64 image payload must not.
+    let body = json!({
+        "model": "origa",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe the scaling policy"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+            ]
+        }],
+    });
+    send(&smos, &body).await;
+
+    let _pending = wait_for_pending(
+        &state.store,
+        &enrichment_memory_key(),
+        1,
+        Duration::from_secs(8),
+    )
+    .await;
+
+    let chat_body = llama
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.url.path().ends_with("/v1/chat/completions"))
+        .map(|r| serde_json::from_slice::<Value>(&r.body).expect("chat body json"))
+        .expect("extraction /v1/chat/completions request recorded");
+    let user_content = chat_body["messages"][1]["content"].as_str().unwrap_or("");
+    assert!(
+        user_content.contains("User:\ndescribe the scaling policy"),
+        "multipart text part must reach the extraction input; got: {user_content}"
+    );
+    assert!(
+        !user_content.contains("base64"),
+        "image base64 payload leaked into extraction input: {user_content}"
+    );
+    assert!(
+        !user_content.contains("image"),
+        "image_url part leaked into extraction input: {user_content}"
+    );
+}
