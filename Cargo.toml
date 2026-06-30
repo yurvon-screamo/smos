@@ -26,8 +26,8 @@ tracing = "0.1"
 surrealdb = { version = "2", features = ["kv-rocksdb"] }
 uuid = { version = "1", features = ["v4"] }
 # Intra-workspace crates. Path + version lets us publish independently later.
-smos-domain = { path = "smos-domain", version = "0.2.2" }
-smos-application = { path = "smos-application", version = "0.2.2" }
+smos-domain = { path = "smos-domain", version = "0.3.0" }
+smos-application = { path = "smos-application", version = "0.3.0" }
 
 [profile.release]
 lto = true
