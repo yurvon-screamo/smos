@@ -41,6 +41,8 @@ impl SmosConfig {
     ///   (a disabled audit is opt-in; see [`SmosConfig::validate_audit_always`]
     ///   for the variant that checks audit fields regardless of the enabled
     ///   flag, used by `smos audit --provider` to catch typos before the run).
+    /// - `cli.forward_mode` is `"auto"` or `"local"` and
+    ///   `cli.forward_probe_timeout_ms > 0`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errors: Vec<String> = Vec::new();
 
@@ -138,6 +140,17 @@ impl SmosConfig {
 
         if self.audit.enabled {
             errors.extend(self.validate_audit_fields());
+        }
+
+        if !matches!(self.cli.forward_mode.as_str(), "auto" | "local") {
+            errors.push(format!(
+                "cli.forward_mode must be 'auto' or 'local', got {:?}",
+                self.cli.forward_mode
+            ));
+        }
+
+        if self.cli.forward_probe_timeout_ms == 0 {
+            errors.push("cli.forward_probe_timeout_ms must be > 0".into());
         }
 
         if errors.is_empty() {

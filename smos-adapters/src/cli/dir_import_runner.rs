@@ -65,12 +65,22 @@ pub async fn run_dir_import(config_path: &str, args: ImportDirArgs) -> Result<()
         files.truncate(limit);
     }
 
-    let store = SurrealStore::connect(
+    let store = match SurrealStore::connect(
         &config.surreal.path,
         &config.surreal.namespace,
         &config.surreal.database,
     )
-    .await?;
+    .await
+    {
+        Ok(s) => s,
+        Err(error) => {
+            let error = anyhow::Error::from(error);
+            if crate::cli::forwarding::is_lock_error(&error) {
+                crate::cli::forwarding::emit_lock_held_message_no_forwarding();
+            }
+            return Err(error);
+        }
+    };
     store.run_migrations().await?;
 
     let memory_key = parse_memory_key(&args.memory_key)?;
@@ -89,7 +99,13 @@ pub async fn run_dir_import(config_path: &str, args: ImportDirArgs) -> Result<()
 
     if !args.no_finalize && stats.total_facts > 0 {
         println!("\n=== Finalizing ===");
-        run_finalize(config_path, session_id.as_str(), Some(memory_key.as_str())).await?;
+        run_finalize(
+            config_path,
+            session_id.as_str(),
+            Some(memory_key.as_str()),
+            crate::cli::forwarding::ExecMode::Local,
+        )
+        .await?;
     }
     Ok(())
 }

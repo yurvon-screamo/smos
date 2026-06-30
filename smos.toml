@@ -242,3 +242,23 @@ branch = "main"
 auto_push = false
 local_path = "~/.smos/git/memory"
 disable_gpg_sign = true            # SMOS commits are unsigned by default
+
+# ---------------------------------------------------------------------------
+# CLI forwarding policy.
+# ---------------------------------------------------------------------------
+#
+# When `smos serve` is running and holds the RocksDB lock, forwardable CLI
+# subcommands (`search`, `finalize`, `import raw`, `import opencode`) can
+# route through the service's HTTP API instead of opening the store locally.
+# The decision is made per-invocation:
+#
+#   1. `--local` on the command line wins unconditionally.
+#   2. `server.host` non-loopback disables forwarding (fail-secure against
+#      talking to a possibly-foreign SMOS instance).
+#   3. `[cli].forward_mode = "local"` disables forwarding permanently.
+#   4. Otherwise `GET /health` is probed on the configured host:port; a 200
+#      response enables forwarding, any other outcome falls back to local.
+#
+[cli]
+forward_mode = "auto"               # "auto" (default) | "local"
+forward_probe_timeout_ms = 250      # tight default so fallback is fast

@@ -13,9 +13,12 @@ use crate::NativeNliClassifier;
 
 /// Natural-language-inference verdict between a premise and a hypothesis.
 ///
-/// Calls the injected classifier (the same `NativeNliClassifier` instance the
-/// session watcher uses, so the audit and finalize paths share the same
-/// softmax thresholds and model weights).
+/// Calls the injected classifier. The `Arc<NativeNliClassifier>` here is
+/// a clone of the same shared instance the session watcher and the
+/// `/v1/cli/finalize` handler consume (built once in
+/// `server_runner::run_server_with_shutdown`), so the audit, watcher, and
+/// finalize paths share the same softmax thresholds and model weights
+/// without duplicating the ~643 MB ort Session.
 pub struct NliClassifyTool {
     pub classifier: Arc<NativeNliClassifier>,
 }

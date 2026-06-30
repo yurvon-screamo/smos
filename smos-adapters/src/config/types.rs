@@ -125,6 +125,42 @@ pub struct SmosConfig {
     /// into SurrealDB so two SMOS instances can share memory through git.
     #[serde(default)]
     pub git: GitConfig,
+
+    /// CLI forwarding policy. When `smos serve` is running and holds the
+    /// RocksDB lock, forwardable CLI subcommands (`search`, `finalize`,
+    /// `import raw`, `import opencode`) can route through the service's HTTP
+    /// API instead of opening the store locally. See [`CliConfig`] and
+    /// [`crate::cli::forwarding`] for the resolution rules.
+    #[serde(default)]
+    pub cli: CliConfig,
+}
+
+/// CLI forwarding policy — drives `smos`'s decision to invoke use cases
+/// locally (opening RocksDB in-process) or to forward over HTTP to a running
+/// `smos serve` instance (which already holds the RocksDB lock).
+///
+/// Forwarding is **loopback-only** by construction: the resolver refuses to
+/// forward when `server.host` is not a loopback address, regardless of this
+/// section. The operator-facing knobs here are the default policy and the
+/// health-probe timeout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CliConfig {
+    /// Default forwarding policy when `--local` is NOT passed.
+    ///
+    /// - `"auto"` (default) — probe `GET /health` on the configured
+    ///   `host:port`; forward when reachable, fall back to local otherwise.
+    /// - `"local"` — always execute in-process; equivalent to a permanent
+    ///   `--local` flag.
+    ///
+    /// Unknown values are rejected by [`super::validate`].
+    pub forward_mode: String,
+
+    /// Health-probe timeout in milliseconds. Tight default so the fallback
+    /// decision is fast (a down server does not stall the CLI by the full
+    /// TCP timeout). 250 ms covers a healthy loopback round-trip with
+    /// generous headroom.
+    pub forward_probe_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

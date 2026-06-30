@@ -71,7 +71,14 @@ use crate::config::{ServerConfig, SessionConfig};
 pub struct SessionWatcher<FR, SR, NC> {
     facts: FR,
     sessions: SR,
-    classifier: NC,
+    /// NLI classifier wrapped in `Arc` so one model load can be shared
+    /// across the watcher, the dreaming audit, and the `/v1/cli/finalize`
+    /// handler without duplicating the ~643 MB resident Session. The
+    /// watcher never holds a lock on this Arc across `.await`: the field
+    /// is deref'd (`&*self.classifier`) only at the point where the
+    /// borrow is handed to `FinalizeSession`, and the borrow's lifetime
+    /// is bounded by the watcher's own `&self`.
+    classifier: Arc<NC>,
     confidence_cfg: Arc<ConfidenceConfig>,
     nli_cfg: Arc<NliConfig>,
     merge_cfg: Arc<MergeConfig>,
@@ -113,8 +120,11 @@ pub struct WatcherDeps<FR, SR, NC> {
     pub facts: FR,
     /// Session repository port.
     pub sessions: SR,
-    /// NLI classifier port.
-    pub classifier: NC,
+    /// NLI classifier port, wrapped in `Arc<NC>` so a single model load
+    /// (e.g. one `NativeNliClassifier` owning a ~643 MB ort Session) can
+    /// be shared across the watcher, the dreaming audit, and the
+    /// `/v1/cli/finalize` handler. Cheap to clone via `Arc::clone`.
+    pub classifier: Arc<NC>,
 }
 
 /// Configuration snapshots the watcher reads on every cycle.
@@ -337,7 +347,7 @@ where
             let finalize = FinalizeSession {
                 facts: &self.facts,
                 sessions: &self.sessions,
-                classifier: &self.classifier,
+                classifier: &*self.classifier,
                 confidence_cfg: &self.confidence_cfg,
                 nli_cfg: &self.nli_cfg,
                 merge_cfg: &self.merge_cfg,
@@ -432,7 +442,7 @@ where
             let finalize = FinalizeSession {
                 facts: &self.facts,
                 sessions: &self.sessions,
-                classifier: &self.classifier,
+                classifier: &*self.classifier,
                 confidence_cfg: &self.confidence_cfg,
                 nli_cfg: &self.nli_cfg,
                 merge_cfg: &self.merge_cfg,

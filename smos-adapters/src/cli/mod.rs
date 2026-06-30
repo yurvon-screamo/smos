@@ -29,6 +29,7 @@ pub mod dir_import_runner;
 pub mod dir_scanner;
 pub mod doctor_runner;
 pub mod finalize_runner;
+pub mod forwarding;
 pub mod git_import_runner;
 pub mod import_helpers;
 pub mod import_runner;
@@ -52,12 +53,17 @@ pub use audit_runner::{AuditArgs, AuditProvider, run_audit_cli};
 pub use config_runner::{ConfigAction, run_config};
 pub use dir_import_runner::{ImportDirArgs, run_dir_import};
 pub use doctor_runner::{DoctorArgs, run_doctor};
-pub use finalize_runner::run_finalize;
+pub use finalize_runner::{AggregatedStats, print_finalize_report, run_finalize};
 pub use git_import_runner::{ImportGitArgs, run_import_git};
-pub use import_runner::{ImportArgs, run_import};
+pub use import_runner::{
+    ImportArgs, WireAssistantTurn, import_opencode_should_skip_forwarding,
+    render_import_opencode_report, run_import,
+};
 pub use init_defaults::DEFAULT_CONFIG_TOML;
 pub use init_runner::{resolve_effective_config_path, run_init};
-pub use raw_import_runner::{RawImportArgs, run_raw_import};
+pub use raw_import_runner::{
+    RawImportArgs, RawImportResult, render_raw_import_report, run_raw_import,
+};
 pub use search_runner::{OutputFormat, SearchArgs, run_search};
 pub use server_runner::run_server;
 pub use service::{ServiceAction, run_service};

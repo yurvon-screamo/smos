@@ -30,6 +30,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use smos::cli::forwarding::{ExecMode, ExecModeOptions, resolve as resolve_exec_mode};
 use smos::cli::{
     AuditArgs, AuditProvider, ConfigAction, DoctorArgs, ImportArgs, ImportDirArgs, ImportGitArgs,
     OutputFormat, RawImportArgs, SearchArgs, ServiceAction, run_audit_cli, run_config,
@@ -48,6 +49,13 @@ struct Cli {
     /// `./smos.toml` (CWD) first, then `~/.smos/config.toml`.
     #[arg(long, global = true)]
     config: Option<String>,
+
+    /// Force in-process execution even when `smos serve` is reachable on the
+    /// configured loopback bind. The flag is a no-op for subcommands that do
+    /// not forward (`serve`, `init`, `doctor`, `import directory`,
+    /// `import git`, `config`, `service`, `audit`).
+    #[arg(long, global = true)]
+    local: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -372,12 +380,14 @@ async fn run_cli() -> anyhow::Result<ExitCode> {
                 None => {
                     validate_opencode_args(&opencode_args)?;
                     let args = opencode_args_to_import_args(opencode_args);
-                    run_import(&config_path, args).await?;
+                    let mode = resolve_exec_mode_for_opencode(&args, &config_path, cli.local).await;
+                    run_import(&config_path, args, mode).await?;
                 }
                 Some(ImportSub::Opencode(oa)) => {
                     validate_opencode_args(&oa)?;
                     let args = opencode_args_to_import_args(oa);
-                    run_import(&config_path, args).await?;
+                    let mode = resolve_exec_mode_for_opencode(&args, &config_path, cli.local).await;
+                    run_import(&config_path, args, mode).await?;
                 }
                 Some(ImportSub::Directory {
                     path,
@@ -409,7 +419,8 @@ async fn run_cli() -> anyhow::Result<ExitCode> {
                         memory_key,
                         no_finalize,
                     };
-                    run_raw_import(&config_path, args).await?;
+                    let mode = resolve_exec_mode_for(&config_path, cli.local).await;
+                    run_raw_import(&config_path, args, mode).await?;
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -432,7 +443,8 @@ async fn run_cli() -> anyhow::Result<ExitCode> {
             session_id,
             memory_key,
         } => {
-            run_finalize(&config_path, &session_id, memory_key.as_deref()).await?;
+            let mode = resolve_exec_mode_for_finalize(&config_path, cli.local).await;
+            run_finalize(&config_path, &session_id, memory_key.as_deref(), mode).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Search {
@@ -450,7 +462,11 @@ async fn run_cli() -> anyhow::Result<ExitCode> {
                 top_k,
                 format: fmt,
             };
-            run_search(&config_path, args).await?;
+            // Forwarding gate: resolve ExecMode from the loopback `/health`
+            // probe. The probe is skipped silently when the static gates
+            // fail (force_local / non-loopback host / forward_mode = local).
+            let mode = resolve_exec_mode_for_search(&config_path, cli.local).await;
+            run_search(&config_path, args, mode).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::ImportGit { url } => {
@@ -583,6 +599,51 @@ fn read_raw_text(text: Option<String>, stdin: bool) -> anyhow::Result<String> {
         anyhow::bail!("raw import text is empty; nothing to extract");
     }
     Ok(body)
+}
+
+/// Resolve the execution mode for `smos search`: forward to a running
+/// `smos serve` when the static gates pass and `/health` is reachable on the
+/// configured loopback bind, otherwise local.
+///
+/// A load / probe failure is logged at debug (the runner keeps moving with
+/// `ExecMode::Local`). Per the plan: when the local branch THEN fails on the
+/// RocksDB lock (server started between probe and connect — the TOCTOU
+/// window), the operator-visible signal is the SurrealStore error verbatim;
+/// the `--local` flag is mentioned in the forward-notice on the next
+/// invocation that succeeds the probe.
+async fn resolve_exec_mode_for_search(config_path: &str, force_local: bool) -> ExecMode {
+    resolve_exec_mode_for(config_path, force_local).await
+}
+
+/// Same routing logic as [`resolve_exec_mode_for_search`], used by
+/// `smos finalize`.
+async fn resolve_exec_mode_for_finalize(config_path: &str, force_local: bool) -> ExecMode {
+    resolve_exec_mode_for(config_path, force_local).await
+}
+
+/// Opencode import routing: skip the probe entirely when `--list` or
+/// `--dry-run` is set (neither opens the store → no lock contention → no
+/// forwarding value). For a real import, resolve normally.
+async fn resolve_exec_mode_for_opencode(
+    args: &ImportArgs,
+    config_path: &str,
+    force_local: bool,
+) -> ExecMode {
+    if smos::cli::import_opencode_should_skip_forwarding(args.list, args.dry_run) {
+        return ExecMode::Local;
+    }
+    resolve_exec_mode_for(config_path, force_local).await
+}
+
+/// Shared resolver: load config, build options, delegate to
+/// [`resolve_exec_mode`].
+async fn resolve_exec_mode_for(config_path: &str, force_local: bool) -> ExecMode {
+    let config = match smos::config::SmosConfig::load(config_path) {
+        Ok(c) => c,
+        Err(_) => return ExecMode::Local,
+    };
+    let opts = ExecModeOptions::from_config(force_local, &config);
+    resolve_exec_mode(&config, &opts).await
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ use crate::cli::tracing_setup::init_tracing_for_server;
 use crate::config::SmosConfig;
 use crate::dreaming::start_scheduler;
 use crate::http::axum_server::{AppState, build_router, is_loopback_host, serve_with_shutdown};
-use crate::nli::build_classifier;
+use crate::nli::{NativeNliClassifier, build_classifier};
 use crate::runtime::{ExtractionSupervisor, SessionWatcher, WatcherConfig, WatcherDeps};
 use crate::upstream::ReqwestUpstreamRouter;
 use crate::{
@@ -137,12 +137,6 @@ pub async fn run_server_with_shutdown(
     // keeps running and the operator can launch the servers by hand. The
     // manager handle is held until shutdown so spawned children survive for
     // the lifetime of the server and are killed in `shutdown_all`.
-    //
-    // The git-sync manager is NOT opened here. It is opened in the
-    // `smos finalize` runner where FinalizeSession actually executes, so
-    // the clone is touched only when there is something to export. The
-    // server's own watcher does not (yet) wire git sync through — that
-    // would require a SessionWatcher signature change.
     let llama_manager = spawn_llama_cpp(&config.llama_cpp).await;
 
     // ExtractionSupervisor is `#[derive(Clone)]` with shared `Arc` interior,
@@ -150,13 +144,51 @@ pub async fn run_server_with_shutdown(
     // §12 drain to wait on tasks spawned through the AppState clone.
     let extraction_supervisor = ExtractionSupervisor::new();
 
-    let state = build_app_state(&config, store.clone(), extraction_supervisor.clone())?;
-    let watcher_handle = spawn_watcher(&config, store.clone()).await;
+    // Build the NLI classifier ONCE and share it across the watcher, the
+    // dreaming audit, and the `/v1/cli/finalize` handler. A single
+    // `NativeNliClassifier` owns a ~643 MB ort Session; pre-refactor the
+    // watcher and the audit each built their own, doubling the resident
+    // footprint. The shared handle is `Arc<NativeNliClassifier>`; every
+    // clone observes the SAME inner `Mutex<Session>`, so NLI inference is
+    // still serialised exactly as `native_nli.rs` documents. A build
+    // failure (model unavailable, OOM) degrades gracefully: `None`
+    // propagates to watcher (disabled) + audit (disabled) + finalize
+    // handler (HTTP 503); chat completions keep working — they never need
+    // NLI. This mirrors the pre-refactor per-consumer degrade behavior
+    // but collapses two failure points into one.
+    let shared_classifier: Option<Arc<NativeNliClassifier>> = match build_classifier(&config).await
+    {
+        Ok(c) => {
+            tracing::info!(
+                model = %config.nli_backend.model,
+                "NLI backend started (shared across watcher / audit / finalize)"
+            );
+            Some(Arc::new(c))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "NLI backend failed to start; watcher / audit / finalize are disabled. \
+                 HTTP server keeps serving chat completions. Restart the proxy once the \
+                 model / interpreter is available."
+            );
+            None
+        }
+    };
+
+    let state = build_app_state(
+        &config,
+        store.clone(),
+        extraction_supervisor.clone(),
+        shared_classifier.clone(),
+    )?;
+    let watcher_handle = spawn_watcher(&config, store.clone(), shared_classifier.clone()).await;
     // The dreaming audit scheduler is built unconditionally so a startup
     // failure (bad cron, missing NLI backend) is logged at server boot
     // rather than the first tick. When `audit.enabled = false` (the
     // default), `spawn_audit_scheduler` returns `None` immediately.
-    let audit_handle = spawn_audit_scheduler(&config, store.clone()).await;
+    let audit_handle =
+        spawn_audit_scheduler(&config, store.clone(), shared_classifier.clone()).await;
 
     let router = build_router(Arc::new(state));
     let listener =
@@ -299,6 +331,7 @@ fn build_app_state(
     config: &SmosConfig,
     store: SurrealStore,
     extraction_supervisor: ExtractionSupervisor,
+    classifier: Option<Arc<NativeNliClassifier>>,
 ) -> Result<AppState> {
     let upstream = ReqwestUpstreamRouter::from_config(&config.providers)?;
     let embedder = OllamaEmbedding::new(Arc::new(config.embedding.clone()))?;
@@ -335,6 +368,8 @@ fn build_app_state(
         extraction_supervisor,
         persons_view,
         providers_view,
+        classifier,
+        git_sync: tokio::sync::OnceCell::new(),
     })
 }
 
@@ -370,25 +405,19 @@ fn build_provider_view(providers: &[crate::config::ProviderConfig]) -> Vec<Provi
 }
 
 /// Spawn the NLI backend (optional) and the [`SessionWatcher`] that uses
-/// it. Returns `None` when the backend failed to start so the caller can
-/// keep serving HTTP without NLI — chat completions never need NLI, so a
-/// failed startup degrades to "watcher disabled" rather than crashing.
-async fn spawn_watcher(config: &SmosConfig, store: SurrealStore) -> WatcherHandle {
-    let classifier = match build_classifier(config).await {
-        Ok(c) => {
-            tracing::info!(
-                model = %config.nli_backend.model,
-                "NLI backend started for session watcher"
-            );
-            c
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "NLI backend failed to start; session watcher disabled \
-                 (HTTP server still serves chat completions). Restart the \
-                 proxy once the model / interpreter is available."
-            );
+/// it. Returns `None` when the shared classifier was not built at startup
+/// so the caller can keep serving HTTP without NLI — chat completions
+/// never need NLI, so a missing backend degrades to "watcher disabled"
+/// rather than crashing.
+async fn spawn_watcher(
+    config: &SmosConfig,
+    store: SurrealStore,
+    classifier: Option<Arc<NativeNliClassifier>>,
+) -> WatcherHandle {
+    let classifier = match classifier {
+        Some(c) => c,
+        None => {
+            tracing::info!("session watcher disabled (NLI backend not available at startup)");
             return None;
         }
     };
@@ -438,31 +467,31 @@ async fn drain_watcher(watcher_handle: WatcherHandle) {
 ///
 /// Returns `None` (and logs the reason) when:
 /// - the audit is disabled (`config.audit.enabled = false`); or
-/// - the NLI backend, embedder, or scheduler could not be built.
+/// - the shared NLI classifier is unavailable; or
+/// - the embedder or scheduler could not be built.
 ///
 /// The HTTP server keeps running in every `None` case so chat completions
 /// stay available even if the audit stack failed to start. This mirrors the
 /// watcher's own degrade behaviour: a missing ML backend must never take
 /// down the proxy.
-async fn spawn_audit_scheduler(config: &SmosConfig, store: SurrealStore) -> AuditHandle {
+async fn spawn_audit_scheduler(
+    config: &SmosConfig,
+    store: SurrealStore,
+    classifier: Option<Arc<NativeNliClassifier>>,
+) -> AuditHandle {
     if !config.audit.enabled {
         tracing::info!("dreaming audit disabled (audit.enabled = false); scheduler not started");
         return None;
     }
 
-    // Build a fresh NLI classifier for the audit. This intentionally does
-    // NOT share the watcher's classifier: `NativeNliClassifier` is not
-    // `Clone` (its `Tokenizer` is `!Clone`), and sharing would require an
-    // invasive refactor of `SessionWatcher`'s generic parameter. The cost
-    // is one extra ~643 MB resident model when BOTH the watcher and the
-    // audit are enabled; operators with constrained memory can disable the
-    // watcher OR the audit to halve the resident footprint.
-    let classifier = match build_classifier(config).await {
-        Ok(c) => c,
-        Err(e) => {
+    // The shared `Arc<NativeNliClassifier>` was built once at startup; the
+    // dreaming module consumes the same Session the watcher and the
+    // finalize handler use — no separate ~643 MB load.
+    let classifier = match classifier {
+        Some(c) => c,
+        None => {
             tracing::warn!(
-                error = %format!("{e:#}"),
-                "audit NLI backend failed to start; dreaming scheduler disabled \
+                "audit disabled: shared NLI backend not available at startup \
                  (HTTP server keeps running). Restart the proxy once the model \
                  / interpreter is available."
             );
@@ -484,7 +513,7 @@ async fn spawn_audit_scheduler(config: &SmosConfig, store: SurrealStore) -> Audi
 
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
 
-    match start_scheduler(&config.audit, store, Arc::new(classifier), embedder, clock).await {
+    match start_scheduler(&config.audit, store, classifier, embedder, clock).await {
         Ok(sched) => Some(sched),
         Err(e) => {
             tracing::warn!(

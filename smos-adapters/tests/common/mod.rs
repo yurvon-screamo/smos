@@ -235,6 +235,8 @@ pub async fn build_state(mut config: SmosConfig) -> Arc<AppState> {
         extraction_supervisor,
         persons_view,
         providers_view,
+        classifier: None,
+        git_sync: tokio::sync::OnceCell::new(),
     });
     std::mem::forget(tmp);
     state
@@ -285,7 +287,11 @@ pub async fn serve_state(state: Arc<AppState>) -> String {
         .expect("bind");
     let addr = listener.local_addr().expect("local addr");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
     });
     format!("http://{addr}")
 }

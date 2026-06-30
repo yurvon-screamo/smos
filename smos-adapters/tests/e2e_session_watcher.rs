@@ -253,7 +253,7 @@ fn build_watcher(
         WatcherDeps {
             facts: store.clone(),
             sessions: store,
-            classifier,
+            classifier: Arc::new(classifier),
         },
         Arc::new(WatcherConfig {
             confidence: Arc::new(ConfidenceConfig::default()),
@@ -936,7 +936,7 @@ async fn watcher_drain_stops_within_budget_when_finalize_hangs() {
         WatcherDeps {
             facts: store.clone(),
             sessions: store.clone(),
-            classifier: HangingClassifier,
+            classifier: Arc::new(HangingClassifier),
         },
         Arc::new(WatcherConfig {
             confidence: Arc::new(ConfidenceConfig::default()),
@@ -1046,7 +1046,7 @@ async fn watcher_drain_honours_shared_shutdown_deadline_over_config_budget() {
         WatcherDeps {
             facts: store.clone(),
             sessions: store.clone(),
-            classifier: HangingClassifier,
+            classifier: Arc::new(HangingClassifier),
         },
         Arc::new(WatcherConfig {
             confidence: Arc::new(ConfidenceConfig::default()),

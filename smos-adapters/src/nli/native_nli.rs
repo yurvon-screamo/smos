@@ -14,6 +14,22 @@
 //! ort inference is purely CPU-bound (or blocks on the EP's own queue) and
 //! never crosses an await point while held — using the std variant avoids
 //! forcing every caller onto the async runtime for a sub-50ms operation.
+//!
+//! # Sharing semantics
+//!
+//! `NativeNliClassifier` is intentionally NOT `Clone`. The struct owns a
+//! ~643 MB ort `Session`; exposing `Clone` would mislead callers into
+//! thinking they get an independent inference engine when in reality every
+//! clone would share the same inner `Arc<Mutex<Session>>`. The honest way
+//! to share one model load across consumers (watcher + dreaming audit +
+//! `/v1/cli/finalize` handler) is to wrap the classifier in
+//! `Arc<NativeNliClassifier>` at the construction site
+//! (`server_runner::run_server_with_shutdown`) and pass `Arc::clone` handles
+//! to each consumer. All clones share the SAME `Session` and its `Mutex`,
+//! so NLI inference is still serialised exactly as the module doc above
+//! documents — the sharing trades per-consumer resident memory for
+//! per-call lock contention, which is the intended trade-off for a
+//! background-only subsystem.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

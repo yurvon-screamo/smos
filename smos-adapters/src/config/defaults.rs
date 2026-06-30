@@ -124,6 +124,15 @@ impl Default for GitConfig {
     }
 }
 
+impl Default for CliConfig {
+    fn default() -> Self {
+        Self {
+            forward_mode: "auto".into(),
+            forward_probe_timeout_ms: 250,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Defaults for serde `default = "..."` attributes
 // ---------------------------------------------------------------------------

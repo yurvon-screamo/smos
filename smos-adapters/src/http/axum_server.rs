@@ -7,6 +7,7 @@
 //! the handler so this state remains flat and easy to assemble in tests.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ use smos_domain::config::{ConfidenceConfig, ExtractionConfig, HeatConfig, Retrie
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::NativeNliClassifier;
 use crate::SurrealStore;
 use crate::cli::shutdown::shutdown_signal;
 use crate::config::SmosConfig;
@@ -68,6 +70,22 @@ pub struct AppState {
     /// IO-free [`ProviderEntry`] view. Same lifecycle as
     /// [`Self::persons_view`].
     pub providers_view: Arc<Vec<ProviderEntry>>,
+    /// Shared NLI classifier — built once at startup, shared across the
+    /// session watcher, the dreaming audit, and the `/v1/cli/finalize`
+    /// handler via `Arc::clone`. `None` when the classifier failed to
+    /// build (model unavailable, OOM): the watcher + audit degrade to
+    /// disabled, and the finalize handler returns HTTP 503. Chat
+    /// completions never need NLI and keep working regardless.
+    pub classifier: Option<Arc<NativeNliClassifier>>,
+
+    /// Lazy git-sync manager, initialised on the first `/v1/cli/finalize`
+    /// call when `[git].repo_url` is non-empty. `None` inside the cell
+    /// when `repo_url` is empty or `open_or_clone` failed (logged at
+    /// WARN). The `Mutex` serialises concurrent `commit_and_push` calls
+    /// on the same clone (git add + commit is not atomic; concurrent
+    /// invocations would race the git index of one working tree).
+    pub git_sync:
+        tokio::sync::OnceCell<Option<Arc<tokio::sync::Mutex<crate::git_sync::GitSyncManager>>>>,
 }
 
 /// Build the router with both routes, conditional CORS, and HTTP tracing.
@@ -98,6 +116,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::chat_completions::handle),
         )
         .route("/health", get(routes::health::handle))
+        .nest("/v1/cli", routes::cli::router())
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -202,9 +221,12 @@ pub async fn serve_with_shutdown<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
     // B3: the extraction drain competes for the SAME single deadline as the
     // watcher drain. Computing `remaining` here (after axum's phase) means a
     // slow axum graceful-shutdown eats into the shared budget instead of
