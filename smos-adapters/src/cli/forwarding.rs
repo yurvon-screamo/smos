@@ -83,17 +83,34 @@ impl ExecModeOptions {
     }
 }
 
+/// Maximum duration for a single forwarded CLI request (extraction +
+/// finalize + git-sync on the server side). Covers the slowest legitimate
+/// path: `import raw` with multi-paragraph text → LLM extraction (config
+/// `timeout_seconds`, default 30 s) → per-fact NLI inference on DeBERTa-v3
+/// (sub-300 ms per pair × up to `pending_overflow_threshold` facts,
+/// default 20) → optional git commit+push. Five minutes is generous headroom;
+/// a wedged server that exceeds it is almost certainly stuck, not busy.
+const FORWARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Resolve the execution mode for one invocation.
 ///
 /// Probes the loopback `/health` endpoint when the static gates pass. Probe
 /// failures (connection refused, timeout, non-200) silently fall back to
 /// [`ExecMode::Local`]; the operator-visible signal is the per-command
 /// stderr notice emitted by [`announce_forward`] / the local-branch tracing.
+///
+/// The probe uses an EPHEMERAL client with `probe_timeout` (250 ms). The
+/// forward client carried by [`ExecMode::Remote`] is a SEPARATE client with
+/// [`FORWARD_REQUEST_TIMEOUT`] — the probe's tight timeout MUST NOT leak
+/// into forward requests (regression: v0.3.0 reused the probe client, which
+/// timed out `import raw` / `finalize` at 250 ms even though the server was
+/// still processing).
 pub async fn resolve(config: &SmosConfig, opts: &ExecModeOptions) -> ExecMode {
     let Some((host, port)) = should_consider_forward(config, opts) else {
         return ExecMode::Local;
     };
-    let client = match reqwest::Client::builder()
+    // Probe with the tight probe-timeout client.
+    let probe_client = match reqwest::Client::builder()
         .timeout(opts.probe_timeout)
         .build()
     {
@@ -106,8 +123,30 @@ pub async fn resolve(config: &SmosConfig, opts: &ExecModeOptions) -> ExecMode {
             return ExecMode::Local;
         }
     };
-    match probe_server(&client, &host, port).await {
-        Some(base_url) => ExecMode::Remote { client, base_url },
+    match probe_server(&probe_client, &host, port).await {
+        Some(base_url) => {
+            // Build a SEPARATE forward client with a generous operation
+            // timeout. This client is carried by ExecMode::Remote and used
+            // for ALL execute_remote calls — it must not inherit the
+            // probe's 250 ms ceiling.
+            let forward_client = match reqwest::Client::builder()
+                .timeout(FORWARD_REQUEST_TIMEOUT)
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        "failed to build forward client; falling back to local execution"
+                    );
+                    return ExecMode::Local;
+                }
+            };
+            ExecMode::Remote {
+                client: forward_client,
+                base_url,
+            }
+        }
         None => ExecMode::Local,
     }
 }
@@ -427,5 +466,80 @@ mod tests {
     fn is_lock_error_is_case_insensitive() {
         let err = anyhow::anyhow!("io error: While LOCK File: foo");
         assert!(is_lock_error(&err));
+    }
+
+    // ---- regression: forward requests must not inherit the probe timeout ----
+
+    /// v0.3.0 regression: the probe client (250 ms timeout) was reused for
+    /// all forward requests, causing `smos import raw` and `smos finalize`
+    /// to time out mid-operation. This test pins that a forward request
+    /// against a server that delays 500 ms (well beyond the 250 ms probe
+    /// timeout) succeeds — proving the forward client uses a separate,
+    /// generous timeout.
+    #[tokio::test]
+    async fn forward_request_survives_delay_beyond_probe_timeout() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+
+        let server = MockServer::start().await;
+
+        // /health responds instantly (probe succeeds).
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        // /v1/cli/search responds with a 500 ms delay (simulating extraction
+        // or finalize work). The probe timeout is 250 ms; if the forward
+        // client inherits it, this request times out.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/cli/search"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(500))
+                    .set_body_json(serde_json::json!([])),
+            )
+            .mount(&server)
+            .await;
+
+        // Build ExecMode the same way bin/smos.rs does: resolve with a
+        // 250 ms probe timeout, then use the resulting Remote client.
+        let uri = server.uri();
+        let (_scheme, rest) = uri.split_once("://").unwrap();
+        let (host, port_str) = rest.rsplit_once(':').unwrap();
+        let port: u16 = port_str.parse().unwrap();
+
+        let mut cfg = SmosConfig::default();
+        cfg.server.host = host.to_string();
+        cfg.server.port = port;
+        cfg.cli.forward_probe_timeout_ms = 250;
+
+        let opts = ExecModeOptions {
+            force_local: false,
+            probe_timeout: Duration::from_millis(250),
+        };
+        let mode = resolve(&cfg, &opts).await;
+
+        let client = match mode {
+            ExecMode::Remote { client, base_url } => {
+                assert_eq!(base_url, server.uri());
+                client
+            }
+            ExecMode::Local => panic!("probe should succeed — server is up"),
+        };
+
+        // This is the regression assertion: a 500 ms-delayed response must
+        // NOT time out under the forward client.
+        let resp = client
+            .post(format!("{}/v1/cli/search", server.uri()))
+            .header("content-type", "application/json")
+            .body(r#"{"query":"x","memory_key":"bob"}"#)
+            .send()
+            .await
+            .expect("forward request must not time out at 250 ms");
+
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "[]", "server response body must arrive intact");
     }
 }
