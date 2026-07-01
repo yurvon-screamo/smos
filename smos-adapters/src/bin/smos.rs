@@ -16,8 +16,6 @@
 //!   subcommand the opencode-transcript path runs (the historical
 //!   `smos import <session_id>` form); `import directory`, `import git`,
 //!   and `import raw` cover the other flavours.
-//! - `smos import-dir <path>` / `smos import-git <url>` — deprecated
-//!   aliases for the new subcommand form, kept for backward compatibility.
 //! - `smos doctor` — environment validation, stats, Markdown report.
 //! - `smos finalize` — manual single-session drain trigger.
 //! - `smos service` — install/uninstall/start/stop/restart/status SMOS as
@@ -89,34 +87,6 @@ enum Command {
         /// form. Parsed only when no subcommand is given.
         #[command(flatten)]
         opencode_args: OpencodeArgs,
-    },
-
-    /// Deprecated alias for `smos import directory <path>`. Kept so existing
-    /// operator scripts and shell history keep working; new invocations
-    /// should use the subcommand form.
-    ImportDir {
-        /// Directory to scan for documents.
-        path: String,
-
-        /// Memory namespace (project key). Defaults to the shared namespace.
-        #[arg(long, default_value = "shared")]
-        memory_key: String,
-
-        /// Limit number of files to process (smoke testing).
-        #[arg(long)]
-        limit: Option<usize>,
-
-        /// Skip the NLI finalize drain after the import.
-        #[arg(long)]
-        no_finalize: bool,
-    },
-
-    /// Deprecated alias for `smos import git <url>`. Kept so existing
-    /// operator scripts and shell history keep working; new invocations
-    /// should use the subcommand form.
-    ImportGit {
-        /// Git repository URL. Private repos use the system's SSH credentials.
-        url: String,
     },
 
     /// Environment validation, stats, and Markdown report generator.
@@ -208,10 +178,7 @@ enum Command {
     },
 }
 
-/// `smos import <subcommand>` selector. Each variant matches one of the
-/// historical top-level `import-*` commands so existing muscle memory
-/// transfers (`import-dir` → `import directory`, `import-git` →
-/// `import git`) while a new `raw` flavour is added for arbitrary text.
+/// `smos import <subcommand>` selector.
 #[derive(Subcommand, Debug)]
 enum ImportSub {
     /// Import an opencode session transcript (`smos import opencode …`).
@@ -467,26 +434,6 @@ async fn run_cli() -> anyhow::Result<ExitCode> {
             // fail (force_local / non-loopback host / forward_mode = local).
             let mode = resolve_exec_mode_for_search(&config_path, cli.local).await;
             run_search(&config_path, args, mode).await?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::ImportGit { url } => {
-            let args = ImportGitArgs { url };
-            run_import_git(&config_path, args).await?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::ImportDir {
-            path,
-            memory_key,
-            limit,
-            no_finalize,
-        } => {
-            let args = ImportDirArgs {
-                path,
-                memory_key,
-                limit,
-                no_finalize,
-            };
-            run_dir_import(&config_path, args).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Service { action } => {
