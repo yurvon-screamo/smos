@@ -48,6 +48,14 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<String>,
 
+    /// Override the SMOS home directory (~/.smos) for this invocation. Used
+    /// by the Windows service binPath to redirect logs/db/models out of the
+    /// LocalSystem systemprofile. When set, SMOS_HOME is applied BEFORE any
+    /// config / path resolution. No-op on Linux/macOS unless explicitly
+    /// passed.
+    #[arg(long, global = true)]
+    smos_home: Option<String>,
+
     /// Force in-process execution even when `smos serve` is reachable on the
     /// configured loopback bind. The flag is a no-op for subcommands that do
     /// not forward (`serve`, `init`, `doctor`, `import directory`,
@@ -317,6 +325,19 @@ fn run_service_process() -> anyhow::Result<ExitCode> {
 /// for a runtime it cannot use (the dispatcher owns the main thread).
 async fn run_cli() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
+
+    // Apply --smos-home BEFORE any config / path resolution so that
+    // smos_home(), surreal.path, nli_backend.cache_dir, and tracing logs
+    // all resolve to the override directory. This is the mechanism the
+    // Windows service binPath uses to redirect LocalSystem's systemprofile
+    // to the operator's profile.
+    //
+    // SAFETY: run_cli is invoked from main() on the sole thread before the
+    // tokio runtime is built. No other thread can observe a torn getenv.
+    // Mirrors the safety invariant in scm.rs::service_main.
+    if let Some(ref home) = cli.smos_home {
+        unsafe { std::env::set_var("SMOS_HOME", home) };
+    }
 
     // Resolve the effective config path once. `resolve_config_path` already
     // implements the full fallback chain (`--config` > `./smos.toml` >

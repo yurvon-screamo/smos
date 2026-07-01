@@ -76,20 +76,28 @@ pub(super) fn validate_windows_path(path: &Path) -> Result<()> {
 /// process lifetime, so a tokio runtime created by `#[tokio::main]`
 /// would collide with the runtime built inside `ServiceMain`.
 ///
-/// The service does NOT receive a `--config` path. The config is
-/// resolved at service start via the same `resolve_effective_config_path`
-/// chain the CLI uses (`./smos.toml` then `~/.smos/config.toml`), so the
-/// operator's SMOS_HOME (written next to the binary at install time, see
-/// [`super::env_file`]) routes the service to the operator's config
-/// without a brittle absolute path baked into binPath at install time.
+/// Both `--config` and `--smos-home` are baked explicitly into binPath.
+/// Unlike Linux/macOS user-services (where the service account's home
+/// directory resolves naturally), a Windows LocalSystem service has no
+/// operator home — `smos_home()` would resolve to
+/// `C:\WINDOWS\System32\config\systemprofile\.smos\`, landing logs, DB,
+/// and models in the system directory. Baking `--smos-home` at install
+/// time (when the operator's profile is available) prevents this; baking
+/// `--config` pins the config file path unambiguously.
 ///
 /// This is NOT the form passed to `sc.exe` on the command line: that form
 /// needs an extra layer of outer quoting plus inner-quote escaping handled
 /// by [`quote_for_argv`].
-pub(super) fn format_bin_path(binary: &Path) -> Result<String> {
+pub(super) fn format_bin_path(binary: &Path, config: &Path, smos_home: &Path) -> Result<String> {
     validate_windows_path(binary)?;
+    validate_windows_path(config)?;
+    validate_windows_path(smos_home)?;
     let bin_str = binary.to_string_lossy();
-    Ok(format!("\"{bin_str}\" --run-as-service"))
+    let config_str = config.to_string_lossy();
+    let home_str = smos_home.to_string_lossy();
+    Ok(format!(
+        "\"{bin_str}\" --run-as-service --config \"{config_str}\" --smos-home \"{home_str}\""
+    ))
 }
 
 /// Quote `s` as a single argv token using the canonical `CommandLineToArgvW`
@@ -212,6 +220,14 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn sample_config() -> PathBuf {
+        PathBuf::from("C:\\Users\\me\\.smos\\config.toml")
+    }
+
+    fn sample_smos_home() -> PathBuf {
+        PathBuf::from("C:\\Users\\me\\.smos")
+    }
+
     #[test]
     fn format_bin_path_quotes_binary_so_spaces_survive() {
         // Regression: an unquoted binary path broke CreateProcess when
@@ -219,33 +235,37 @@ mod tests {
         // binPath at the first space and tried to exec a non-existent
         // `C:\Program` binary (CreateProcess error 193).
         let binary = PathBuf::from("C:\\Program Files\\smos\\smos.exe");
-        let bin_path = format_bin_path(&binary).expect("format_bin_path");
+        let bin_path = format_bin_path(&binary, &sample_config(), &sample_smos_home())
+            .expect("format_bin_path");
         assert!(
             bin_path.starts_with("\"C:\\Program Files\\smos\\smos.exe\""),
             "binary segment must be quoted so SCM does not split at the space: {bin_path}"
         );
-        assert!(bin_path.ends_with(" --run-as-service"));
-        // The config path is NOT baked into binPath anymore — the service
-        // resolves it via resolve_effective_config_path at start time so
-        // the operator's SMOS_HOME routes it correctly.
-        assert!(!bin_path.contains("--config"));
     }
 
     #[test]
-    fn format_bin_path_yields_canonical_command_line() {
-        // End-to-end shape of the binPath value SCM will store. The
-        // binary is quoted; backslashes are NOT doubled (doubling is the
-        // job of `quote_for_argv` when the value is forwarded to sc.exe
-        // as a raw argv token).
+    fn format_bin_path_bakes_config_and_smos_home() {
         let binary = PathBuf::from("C:\\smos\\smos.exe");
-        let bin_path = format_bin_path(&binary).expect("format_bin_path");
-        assert_eq!(bin_path, "\"C:\\smos\\smos.exe\" --run-as-service");
+        let bin_path = format_bin_path(&binary, &sample_config(), &sample_smos_home())
+            .expect("format_bin_path");
+        assert!(
+            bin_path.contains("--config \"C:\\Users\\me\\.smos\\config.toml\""),
+            "binPath must bake --config: {bin_path}"
+        );
+        assert!(
+            bin_path.contains("--smos-home \"C:\\Users\\me\\.smos\""),
+            "binPath must bake --smos-home: {bin_path}"
+        );
+        assert!(
+            bin_path.contains("--run-as-service"),
+            "binPath must contain --run-as-service: {bin_path}"
+        );
     }
 
     #[test]
     fn format_bin_path_rejects_binary_with_embedded_quote() {
         let bad_binary = PathBuf::from("C:\\smos\"evil.exe");
-        assert!(format_bin_path(&bad_binary).is_err());
+        assert!(format_bin_path(&bad_binary, &sample_config(), &sample_smos_home()).is_err());
     }
 
     #[test]
@@ -254,7 +274,21 @@ mod tests {
         // wraps around binPath, turning it into a literal `\"` that
         // breaks argv parsing.
         let bad_binary = PathBuf::from("C:\\smos\\");
-        assert!(format_bin_path(&bad_binary).is_err());
+        assert!(format_bin_path(&bad_binary, &sample_config(), &sample_smos_home()).is_err());
+    }
+
+    #[test]
+    fn format_bin_path_rejects_config_with_trailing_backslash() {
+        let binary = PathBuf::from("C:\\smos\\smos.exe");
+        let bad_config = PathBuf::from("C:\\Users\\me\\.smos\\");
+        assert!(format_bin_path(&binary, &bad_config, &sample_smos_home()).is_err());
+    }
+
+    #[test]
+    fn format_bin_path_rejects_smos_home_with_trailing_backslash() {
+        let binary = PathBuf::from("C:\\smos\\smos.exe");
+        let bad_home = PathBuf::from("C:\\Users\\me\\");
+        assert!(format_bin_path(&binary, &sample_config(), &bad_home).is_err());
     }
 
     #[test]

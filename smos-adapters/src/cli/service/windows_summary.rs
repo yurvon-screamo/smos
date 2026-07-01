@@ -2,45 +2,32 @@
 //!
 //! Split out of [`super::windows`] so the lifecycle module stays under
 //! the size budget. The summary echoes what was installed (binary path)
-//! and the operator-profile env pairs written to the env file next to
-//! the binary, plus the operator-facing gotchas (`smos init` before
-//! start; logs location). Write failure is a hard error upstream
-//! (install `bail!`s before reaching this summary), so the summary
-//! always has a populated `env_pairs`.
+//! and the baked `--config` / `--smos-home` paths, plus the operator-
+//! facing gotchas (`smos init` before start; logs location).
 
-use std::path::PathBuf;
-
-use super::env_file::env_file_path;
 use super::paths::ServicePaths;
 
-/// Print the install outcome. `env_pairs` carries the `(NAME, VALUE)`
-/// pairs written to `<binary_dir>/smos-service.env` (see
-/// [`super::env_file`]); the summary echoes them so the operator can
-/// verify the profile shift.
-pub(super) fn print_install_summary(paths: &ServicePaths, env_pairs: Vec<(String, String)>) {
-    let env_file: PathBuf = paths
-        .binary
-        .parent()
-        .map(env_file_path)
-        .unwrap_or_else(|| env_file_path(&paths.binary));
+/// Print the install outcome.
+pub(super) fn print_install_summary(paths: &ServicePaths) {
+    let smos_home = crate::paths::smos_home();
     println!("✓ Service '{}' installed and started", paths.service_name);
-    println!("  Binary: {}", paths.binary.display());
-    println!();
-    println!("  Operator profile written to:");
-    println!("    {}", env_file.display());
-    println!("  Pairs the service adopts at start:");
-    for (name, value) in &env_pairs {
-        println!("    {name} = {value}");
-    }
-    println!("  The service resolves ~/.smos (config, db, models, logs) to YOUR");
-    println!("  profile via SMOS_HOME — not LocalSystem's systemprofile.");
-    println!("  Note: the global `--config` flag is IGNORED on Windows install;");
+    println!("  Binary:   {}", paths.binary.display());
     println!(
-        "  override the config location by editing {} (or set SMOS_HOME",
-        env_file.display()
+        "  Config:   {} (baked into binPath via --config)",
+        paths.config.display()
     );
-    println!("  in your shell and re-running install).");
+    println!(
+        "  SMOS home: {} (baked into binPath via --smos-home)",
+        smos_home.display()
+    );
+    println!();
+    println!("  The service resolves ~/.smos (config, db, models, logs) to the");
+    println!("  operator profile captured at install time — NOT LocalSystem's");
+    println!("  systemprofile. Both paths are explicit in the service binPath.");
     println!("  Run `smos init` first so model files exist before start (avoids");
     println!("  a 643 MB DeBERTa/GGUF download from Session 0).");
-    println!("  Logs: <smos_home>/logs/ — `smos service status` prints the tail.");
+    println!(
+        "  Logs: {}/logs/ — `smos service status` prints the tail.",
+        smos_home.display()
+    );
 }

@@ -28,7 +28,6 @@ use helpers::{
     service_exists, set_description, set_failure_flag, set_failure_recovery,
 };
 
-use super::env_file::{build_env_pairs, write_env_file};
 use super::windows_log::print_recent_service_log;
 use super::windows_summary::print_install_summary;
 
@@ -53,42 +52,12 @@ pub async fn install_service(paths: &ServicePaths, user: bool) -> Result<()> {
     set_description(paths);
     set_failure_recovery(paths);
     set_failure_flag(paths);
-    // Write the operator-profile env file next to the binary. The
-    // service process loads it at start (service_main →
-    // apply_operator_env_file) and `set_var`s every pair BEFORE the
-    // first `smos_home()` call, so the LocalSystem service resolves
-    // `~/.smos` to the operator's profile. The registry `Environment`
-    // value was the original plan but SCM does not reliably apply it to
-    // a LocalSystem service across Windows versions, so the file-based
-    // handoff is the load-bearing mechanism. Hard error on failure:
-    // installing a service that would crash-loop under LocalSystem with
-    // an empty config is worse than refusing the install.
-    let pairs = build_env_pairs().ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not resolve the operator home directory; refusing to install a \
-             service that would crash-loop under LocalSystem. Set SMOS_HOME and \
-             re-run install."
-        )
-    })?;
-    let binary_dir = paths.binary.parent().ok_or_else(|| {
-        anyhow::anyhow!(
-            "binary path has no parent directory; cannot place smos-service.env: {}",
-            paths.binary.display()
-        )
-    })?;
-    if let Err(e) = write_env_file(binary_dir, &pairs) {
-        bail!(
-            "failed to write {}: {e}; the service would start under LocalSystem with \
-             an empty config and crash-loop.",
-            super::env_file::env_file_path(binary_dir).display()
-        );
-    }
-    // Propagate the start failure so the operator sees a real error
-    // instead of a misleading "installed and started" summary. Linux and
-    // macOS already propagate via `?` in their installers; Windows used
-    // to silently warn (and warn was a no-op before tracing was wired up).
+    // The config + smos-home paths are baked into binPath at install time
+    // (see format_bin_path). No env_file handoff is needed — the service
+    // process receives both paths as --config and --smos-home CLI args
+    // via SCM and applies them before any path resolution.
     run_sc(&["start", &paths.service_name])?;
-    print_install_summary(paths, pairs);
+    print_install_summary(paths);
     Ok(())
 }
 
@@ -104,22 +73,6 @@ pub async fn uninstall_service(user: bool) -> Result<()> {
         tracing::warn!("failed to stop service before uninstall: {e}");
     }
     run_sc(&["delete", SERVICE_NAME])?;
-    // Remove the operator-profile env file written next to the binary
-    // at install time. `sc delete` only removes the SCM registry entry;
-    // the env file would otherwise survive as an orphan. Best-effort —
-    // a leftover file does not break a re-install (write_env_file
-    // overwrites) but breaks the leave-no-trace uninstall contract.
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-    {
-        let env_file = super::env_file::env_file_path(&dir);
-        if env_file.exists()
-            && let Err(e) = std::fs::remove_file(&env_file)
-        {
-            tracing::warn!(error = %e, "failed to remove {}", env_file.display());
-        }
-    }
     println!("✓ Service '{SERVICE_NAME}' uninstalled");
     Ok(())
 }
@@ -188,7 +141,8 @@ fn create_service(paths: &ServicePaths) -> Result<()> {
     // then the value in quotes. We emit `binPath=` and the value as
     // separate argv tokens so sc.exe's parameter scanner matches
     // `binPath=`.
-    let bin_path_value = format_bin_path(&paths.binary)?;
+    let smos_home = crate::paths::smos_home();
+    let bin_path_value = format_bin_path(&paths.binary, &paths.config, &smos_home)?;
     let output = Command::new("sc")
         .arg("create")
         .arg(&paths.service_name)
