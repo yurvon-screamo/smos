@@ -155,7 +155,7 @@ where
             .collect();
 
         if pending.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 session = %session_id,
                 memory_key = %memory_key,
                 "finalize: no pending facts for session"
