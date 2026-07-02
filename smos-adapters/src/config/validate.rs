@@ -92,6 +92,10 @@ impl SmosConfig {
             ));
         }
 
+        if self.llm_extraction.max_concurrent_extractions == 0 {
+            errors.push("llm_extraction.max_concurrent_extractions must be > 0".into());
+        }
+
         if self.session.timeout_seconds == 0 {
             errors.push("session.timeout_seconds must be > 0".into());
         }

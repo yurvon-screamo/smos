@@ -37,6 +37,7 @@ impl Default for LlmExtractionConfig {
             timeout_seconds: 30,
             temperature: 0.0,
             seed: 42,
+            max_concurrent_extractions: 1,
         }
     }
 }
@@ -143,6 +144,13 @@ pub(crate) fn default_auth_header() -> String {
 
 pub(crate) fn default_provider_timeout() -> u64 {
     120
+}
+
+/// Default extraction concurrency gate size. `1` serialises background
+/// extractions against the (default) single-slot upstream so they cannot
+/// pile up and starve chat-completion forwards.
+pub(crate) fn default_max_concurrent_extractions() -> usize {
+    1
 }
 
 // ---------------------------------------------------------------------------

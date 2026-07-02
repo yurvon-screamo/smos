@@ -176,7 +176,7 @@ impl LlmUpstream for ReqwestUpstream {
             let value = response
                 .json::<serde_json::Value>()
                 .await
-                .map_err(|e| UpstreamError::BadResponse(e.to_string()))?;
+                .map_err(|e| map_body_timeout(e, self.inner.timeout))?;
             Ok(ChatResponse::NonStreaming(value))
         }
     }
@@ -307,6 +307,22 @@ fn map_send_error(e: reqwest::Error, url: &str, timeout: Duration) -> UpstreamEr
         UpstreamError::Timeout(timeout)
     } else {
         UpstreamError::ConnectFailed(format!("url={url}: {e}"))
+    }
+}
+
+/// Classify an error raised while reading the non-streaming response body
+/// (`.json()`). reqwest's client-level `timeout` is a total deadline covering
+/// connect → body-finished, so a timeout fires here as well as on `.send()`.
+/// Without this check the body-read timeout would surface as
+/// `BadResponse("unparseable response")`, hiding the real cause behind a
+/// misleading message — HTTP status is identical (502) for both variants, so
+/// this is diagnostic-only. Streaming-path body errors stay `StreamError`
+/// (SSE headers are already sent; the variant is log-only there).
+fn map_body_timeout(e: reqwest::Error, timeout: Duration) -> UpstreamError {
+    if e.is_timeout() {
+        UpstreamError::Timeout(timeout)
+    } else {
+        UpstreamError::BadResponse(e.to_string())
     }
 }
 
@@ -555,5 +571,31 @@ mod tests {
         let router =
             ReqwestUpstreamRouter::from_upstreams(vec![upstream_for(&s1, "only")]).expect("router");
         let _ = router.complete("only", probe_request()).await.expect("ok");
+    }
+
+    /// A response that exceeds the configured timeout surfaces as
+    /// `UpstreamError::Timeout` (mapped to HTTP 502 with a "timed out" message),
+    /// never as `BadResponse`. This pins the timeout-mapping contract for both
+    /// the `.send()` and `.json()` paths: `is_timeout()` is checked in
+    /// `map_send_error` and `map_body_timeout` alike.
+    #[tokio::test]
+    async fn timed_out_forward_surfaces_as_timeout_not_bad_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"choices": []}))
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+
+        let upstream = ReqwestUpstream::new("slow", &server.uri(), "", "Authorization", 1).unwrap();
+        match upstream.complete("slow", probe_request()).await {
+            Err(UpstreamError::Timeout(d)) => {
+                assert_eq!(d, Duration::from_secs(1), "carries the configured timeout");
+            }
+            other => panic!("expected Timeout, got {other:?}"),
+        }
     }
 }

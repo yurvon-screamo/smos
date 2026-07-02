@@ -3,7 +3,9 @@ pub use smos_domain::config::{
     ConfidenceConfig, ExtractionConfig, HeatConfig, MergeConfig, NliConfig, RetrievalConfig,
 };
 
-use super::defaults::{default_auth_header, default_provider_timeout};
+use super::defaults::{
+    default_auth_header, default_max_concurrent_extractions, default_provider_timeout,
+};
 
 /// Error surface for [`SmosConfig`] loading + validation.
 ///
@@ -279,6 +281,14 @@ pub struct LlmExtractionConfig {
     /// `temperature = 0.0` with a pinned `seed` makes the extractor re-yield
     /// the same bullet list across runs on the same backend.
     pub seed: u32,
+    /// Maximum number of concurrent in-flight extraction HTTP calls. Bounds
+    /// background-extraction load on the (frequently shared) single-slot
+    /// upstream so queued extractions cannot pile up and starve
+    /// chat-completion forwards. Default `1`: serialises extractions against
+    /// the LLM endpoint. Raise only when extraction runs on a dedicated
+    /// endpoint with spare slots.
+    #[serde(default = "default_max_concurrent_extractions")]
+    pub max_concurrent_extractions: usize,
 }
 
 /// Embedding endpoint config (provider-agnostic).

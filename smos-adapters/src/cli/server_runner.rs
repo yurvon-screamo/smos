@@ -110,6 +110,7 @@ pub async fn run_server_with_shutdown(
     init_tracing_for_server(&config.server);
 
     warn_on_insecure_config(&config);
+    warn_on_shared_extraction_endpoint(&config);
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -303,6 +304,77 @@ fn warn_on_insecure_config(config: &SmosConfig) {
     }
 }
 
+/// Warn when the extraction LLM endpoint is shared with the chat-completion
+/// upstream (and, when enabled, the dreaming audit). The shared endpoint is
+/// typically a single-slot `llama-server` (`-np 1`, required for draft-mtp),
+/// so background extraction can occupy the only slot a chat-completion forward
+/// needs. The extraction gate (`llm_extraction.max_concurrent_extractions`,
+/// default 1) bounds the worst-case forward wait to one extraction duration,
+/// but eliminating the contention entirely requires a dedicated extraction
+/// endpoint (D-60). This warn makes the shared-slot risk visible to the
+/// operator at startup rather than as an intermittent 0-byte hang under load.
+fn warn_on_shared_extraction_endpoint(config: &SmosConfig) {
+    let extraction = endpoint_host_port(&config.llm_extraction.url);
+    if extraction.is_empty() {
+        return;
+    }
+    let shared_providers: Vec<&str> = config
+        .providers
+        .iter()
+        .filter(|p| endpoint_host_port(&p.url) == extraction)
+        .map(|p| p.name.as_str())
+        .collect();
+    let audit_shares =
+        config.audit.enabled && endpoint_host_port(&config.audit.local_url) == extraction;
+
+    if shared_providers.is_empty() && !audit_shares {
+        return;
+    }
+
+    // Build the "shared with …" description from the ACTUAL flags so the
+    // message never claims the chat upstream is shared when only the audit is
+    // (a rare config: audit enabled, audit.local_url == llm_extraction.url,
+    // but no provider points there).
+    let shared_with = match (!shared_providers.is_empty(), audit_shares) {
+        (true, true) => "the chat upstream and the dreaming audit".to_string(),
+        (true, false) => "the chat upstream".to_string(),
+        (false, true) => "the dreaming audit".to_string(),
+        (false, false) => String::new(),
+    };
+
+    tracing::warn!(
+        extraction_endpoint = %config.llm_extraction.url,
+        shared_providers = ?shared_providers,
+        audit_shares,
+        max_concurrent_extractions = config.llm_extraction.max_concurrent_extractions,
+        "extraction LLM endpoint is shared with {shared_with}; background \
+         extraction can occupy the shared slot and starve chat forwards. The \
+         extraction gate caps the forward wait at one extraction duration; \
+         eliminate the contention by pointing llm_extraction.url at a dedicated \
+         endpoint (D-60)."
+    );
+}
+
+/// Extract the `host:port` portion of a URL for endpoint-sharing comparison.
+///
+/// `"http://localhost:28082/v1/chat/completions"` → `"localhost:28082"`. The
+/// parse strips the scheme, path, query, and any `userinfo@` prefix so two
+/// URLs that point at the same socket still compare equal regardless of how
+/// they are written. A URL without an explicit port (e.g. `http://localhost`)
+/// keeps its bare host and will NOT match `http://localhost:28082` — that is
+/// intentional (they may resolve to different ports) and the warn is
+/// best-effort, not a security boundary.
+fn endpoint_host_port(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let authority = authority.split('?').next().unwrap_or(authority);
+    // Strip `userinfo@` — keep the segment after the last `@` (the host:port).
+    authority
+        .rsplit_once('@')
+        .map(|(_, rest)| rest)
+        .unwrap_or(authority)
+}
+
 /// Known placeholder api_keys that MUST NOT be used outside loopback.
 ///
 /// `placeholder` and `changeme` are the canonical stand-ins operators reach
@@ -336,7 +408,16 @@ fn build_app_state(
     let upstream = ReqwestUpstreamRouter::from_config(&config.providers)?;
     let embedder = OllamaEmbedding::new(Arc::new(config.embedding.clone()))?;
     let reranker = LlamaCppReranker::new(Arc::new(config.reranker.clone()))?;
-    let extractor = OllamaExtractor::new(Arc::new(config.llm_extraction.clone()))?;
+    // The extraction gate bounds concurrent background-extraction HTTP calls
+    // to `llm_extraction.max_concurrent_extractions`. With the default
+    // single-slot upstream (`-np 1`) shared between chat forwards and
+    // extraction, this prevents queued extractions from piling up and
+    // starving chat-completion forwards. CLI import paths are sequential and
+    // intentionally leave the extractor ungated.
+    let max_concurrent = config.llm_extraction.max_concurrent_extractions;
+    let extraction_gate = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    let extractor = OllamaExtractor::new(Arc::new(config.llm_extraction.clone()))?
+        .with_slot(extraction_gate, max_concurrent);
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
     let id_generator: Arc<dyn IdGenerator + Send + Sync> = Arc::new(SystemIdGenerator);
     let retrieval_cfg = Arc::new(config.retrieval.clone());
@@ -564,5 +645,63 @@ mod tests {
     fn is_placeholder_key_passes_through_real_keys() {
         assert!(!is_placeholder_key("sk-or-1234567890abcdef"));
         assert!(!is_placeholder_key("live-key-XYZ"));
+    }
+
+    #[test]
+    fn endpoint_host_port_strips_scheme_and_path() {
+        assert_eq!(
+            endpoint_host_port("http://localhost:28082/v1/chat/completions"),
+            "localhost:28082"
+        );
+    }
+
+    #[test]
+    fn endpoint_host_port_handles_base_url_without_path() {
+        assert_eq!(
+            endpoint_host_port("http://localhost:28082"),
+            "localhost:28082"
+        );
+    }
+
+    #[test]
+    fn endpoint_host_port_strips_query_string() {
+        // A query without a path must not leak into the comparison key.
+        assert_eq!(
+            endpoint_host_port("http://localhost:28082?x=1"),
+            "localhost:28082"
+        );
+        assert_eq!(
+            endpoint_host_port("http://localhost:28082/v1/chat?stream=true"),
+            "localhost:28082"
+        );
+    }
+
+    #[test]
+    fn endpoint_host_port_strips_userinfo() {
+        assert_eq!(
+            endpoint_host_port("http://user:pass@localhost:28082/v1/chat/completions"),
+            "localhost:28082"
+        );
+    }
+
+    #[test]
+    fn endpoint_host_port_equivalence_drives_shared_endpoint_detection() {
+        // The two URLs SMOS configures (provider vs llm_extraction) point at
+        // the same socket via different paths — they MUST reduce to the same
+        // host:port key so the startup warn fires.
+        let provider = endpoint_host_port("http://localhost:28082/v1/chat/completions");
+        let extraction = endpoint_host_port("http://localhost:28082");
+        assert_eq!(provider, extraction);
+    }
+
+    #[test]
+    fn endpoint_host_port_keeps_bare_host_when_no_port() {
+        // Best-effort: a bare host (default port) intentionally does NOT match
+        // the explicit-port form — they may resolve to different sockets.
+        assert_eq!(endpoint_host_port("http://localhost"), "localhost");
+        assert_ne!(
+            endpoint_host_port("http://localhost"),
+            endpoint_host_port("http://localhost:28082")
+        );
     }
 }

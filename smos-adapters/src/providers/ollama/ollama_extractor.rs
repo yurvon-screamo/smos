@@ -16,12 +16,14 @@
 //! re-format the (already-inlined) tool calls.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use smos_application::errors::ProviderError;
 use smos_application::ports::LlmExtractor;
 use smos_domain::chat::ToolCall;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::LlmExtractionConfig;
 use crate::providers::ollama::ollama_client::build_client;
@@ -54,18 +56,78 @@ Output as a bullet list, one fact per line starting with \"- \". Quality over qu
 
 /// OpenAI-compatible fact extractor backed by `llama-server`
 /// (Qwen3.5-2B-MTP by default).
+///
+/// An optional [`ExtractionGate`] bounds how many concurrent `extract_facts`
+/// HTTP calls may be in flight at once. The serve path injects one sized to
+/// `llm_extraction.max_concurrent_extractions` so background extractions
+/// cannot pile up on a shared single-slot upstream (`-np 1`) and starve
+/// chat-completion forwards; the sequential CLI import paths leave it `None`.
 #[derive(Clone)]
 pub struct OllamaExtractor {
     client: Client,
     config: Arc<LlmExtractionConfig>,
+    extraction_slot: Option<ExtractionGate>,
+}
+
+/// Concurrency gate around extraction HTTP calls. Owns both the semaphore
+/// (the actual gate) AND its total permit count, so occupancy
+/// (`permits − available_permits`) is derivable without coupling to
+/// `LlmExtractionConfig`. The total is carried here — not read from config
+/// at log time — so a caller that wires a semaphore of a different size
+/// (e.g. a test) gets an accurate `concurrent` log field instead of one
+/// computed against a stale config value.
+#[derive(Clone)]
+struct ExtractionGate {
+    semaphore: Arc<Semaphore>,
+    permits: usize,
+}
+
+impl ExtractionGate {
+    fn held(&self) -> usize {
+        self.permits
+            .saturating_sub(self.semaphore.available_permits())
+    }
 }
 
 impl OllamaExtractor {
     /// Build the adapter with a pooled HTTP client sized to the config timeout.
-    /// Construction does NOT contact the server.
+    /// Construction does NOT contact the server. No extraction-slot gate is
+    /// wired: the sequential CLI import paths use this directly.
     pub fn new(config: Arc<LlmExtractionConfig>) -> Result<Self, ProviderError> {
         let client = build_client(config.timeout_seconds)?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            extraction_slot: None,
+        })
+    }
+
+    /// Attach a concurrency gate around the extraction HTTP call. Consumes and
+    /// returns `self` so the serve wiring chains it after [`new`]:
+    ///
+    /// ```ignore
+    /// // `permits` MUST equal the semaphore's permit count so the gate's
+    /// // occupancy log field reports true in-flight count.
+    /// OllamaExtractor::new(cfg)?.with_slot(Arc::new(Semaphore::new(1)), 1)
+    /// ```
+    ///
+    /// (Snippet is `ignore`d because it needs an `LlmExtractionConfig` and the
+    /// crate's items in scope; see `tests/extraction_concurrency_gate.rs` for a
+    /// runnable end-to-end example.)
+    ///
+    /// `permits` MUST equal the semaphore's permit count so the gate-contention
+    /// log field (`concurrent = permits − available`) reports true occupancy.
+    /// `extract_facts` acquires a permit before issuing the request and holds
+    /// it for the call's duration (released on drop of the owned permit). The
+    /// gate bounds concurrent in-flight extraction HTTP calls to the permit
+    /// count, so background extractions cannot occupy every slot of a shared
+    /// single-slot upstream and starve chat-completion forwards.
+    pub fn with_slot(mut self, slot: Arc<Semaphore>, permits: usize) -> Self {
+        self.extraction_slot = Some(ExtractionGate {
+            semaphore: slot,
+            permits,
+        });
+        self
     }
 
     fn chat_url(&self) -> String {
@@ -73,6 +135,29 @@ impl OllamaExtractor {
             "{}/v1/chat/completions",
             self.config.url.trim_end_matches('/')
         )
+    }
+
+    /// Acquire a gate permit (when a gate is wired), recording the wait and the
+    /// gate's true occupancy. Returns the owned permit (held across the HTTP
+    /// call) plus the wait duration and post-acquire occupancy, or `None` when
+    /// no gate is wired (CLI sequential paths) OR the semaphore was closed
+    /// mid-shutdown: extraction is background work and must not wedge on a
+    /// permit, so the caller proceeds ungated and logs the non-fatal miss.
+    async fn acquire_gate(&self) -> Option<(OwnedSemaphorePermit, std::time::Duration, usize)> {
+        let gate = self.extraction_slot.clone()?;
+        let started = Instant::now();
+        // `acquire_owned` consumes an `Arc<Semaphore>`; clone it so `gate`
+        // stays intact for the post-acquire occupancy read below.
+        match gate.semaphore.clone().acquire_owned().await {
+            Ok(permit) => Some((permit, started.elapsed(), gate.held())),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "extraction gate semaphore closed; proceeding without a permit (fail-open)"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -148,6 +233,26 @@ impl LlmExtractor for OllamaExtractor {
                 enable_thinking: false,
             }),
         };
+
+        // Acquire the extraction-slot gate (if wired) so concurrent background
+        // extractions cannot pile up on a shared single-slot upstream and
+        // starve chat-completion forwards. The permit is held for the whole
+        // HTTP round-trip and released on drop at function return.
+        let gate = self.acquire_gate().await;
+        if let Some((_permit, wait, concurrent)) = &gate {
+            let max = self
+                .extraction_slot
+                .as_ref()
+                .map(|g| g.permits)
+                .unwrap_or(0);
+            tracing::debug!(
+                target: "smos.extraction.gate",
+                gate_wait_ms = wait.as_millis() as u64,
+                concurrent,
+                max,
+                "extraction gate permit acquired"
+            );
+        }
 
         let response = match self.client.post(self.chat_url()).json(&body).send().await {
             Ok(r) => r,
